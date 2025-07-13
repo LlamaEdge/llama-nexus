@@ -12,7 +12,8 @@ port = 3389        # The port to listen on.
 #
 # - name: The name of the MCP tool server.
 # - transport: The transport protocol to use. Possible values: "sse" and "stream-http".
-# - url: The URL of the MCP tool server.
+# - url: The URL of the MCP tool server. ONLY one of `url` and `oauth_url` should be set.
+# - oauth_url: The URL of the MCP tool server for OAuth authentication. ONLY one of `url` and `oauth_url` should be set.
 # - enable: Whether to enable the MCP tool server.
 
 # The following config is for the markitdown mcp server.
@@ -21,6 +22,14 @@ port = 3389        # The port to listen on.
 name      = "markitdown"
 transport = "stream-http"
 url       = "http://127.0.0.1:8011/mcp"
+enable    = false
+
+# The following config is for the zapier-mcp server.
+# The details about the server are available at https://mcp.zapier.com/mcp/servers
+[[mcp.server.tool]]
+name      = "zapier-mcp"
+transport = "stream-http"
+oauth_url = "https://mcp.zapier.com/api/mcp/a/23683142/mcp?serverId=67bdebee-2595-4e58-bc11-62359d74a8ef"
 enable    = false
 
 

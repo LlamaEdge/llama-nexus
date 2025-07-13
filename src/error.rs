@@ -21,6 +21,8 @@ pub enum ServerError {
     McpEmptyContent,
     #[error("Mcp server not found")]
     McpNotFoundClient,
+    #[error("Mcp operation failed: {0}")]
+    McpOperation(String),
 }
 impl IntoResponse for ServerError {
     fn into_response(self) -> axum::response::Response {
@@ -38,6 +40,7 @@ impl IntoResponse for ServerError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Mcp server not found".to_string(),
             ),
+            ServerError::McpOperation(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         };
 
         (status, Json(err_response)).into_response()

@@ -1,21 +1,39 @@
-use std::{collections::HashMap, env};
+use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
 
+use axum::{
+    Router,
+    extract::{Query, State},
+    response::Html,
+    routing::get,
+};
 use chat_prompts::MergeRagContextPolicy;
 use clap::ValueEnum;
 use endpoints::chat::McpTransport;
 use rmcp::{
     model::{ClientCapabilities, ClientInfo, Implementation, Tool as RmcpTool},
     service::ServiceExt,
-    transport::{SseClientTransport, StreamableHttpClientTransport},
+    transport::{
+        SseClientTransport, StreamableHttpClientTransport,
+        auth::{AuthClient, OAuthState},
+        sse_client::SseClientConfig,
+        streamable_http_client::StreamableHttpClientTransportConfig,
+    },
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock as TokioRwLock;
+use tokio::{
+    io::{AsyncWriteExt, BufWriter},
+    sync::{Mutex, RwLock as TokioRwLock, oneshot},
+};
 
 use crate::{
     dual_debug, dual_error, dual_info,
     error::{ServerError, ServerResult},
     mcp::{MCP_SERVICES, MCP_TOOLS, McpService},
 };
+
+const MCP_REDIRECT_URI: &str = "http://localhost:8080/callback";
+const CALLBACK_PORT: u16 = 8080;
+const CALLBACK_HTML: &str = include_str!("auth/callback.html");
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -146,7 +164,10 @@ pub struct McpServerConfig {
 pub struct McpToolServerConfig {
     pub name: String,
     pub transport: McpTransport,
-    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_url: Option<String>,
     pub enable: bool,
     #[serde(skip_deserializing)]
     pub tools: Option<Vec<RmcpTool>>,
@@ -156,41 +177,277 @@ impl McpToolServerConfig {
     /// Connect the mcp server if it is enabled
     pub async fn connect_mcp_server(&mut self) -> ServerResult<()> {
         if self.enable {
+            // Validate URL configuration: exactly one must be non-empty
+            let mut use_oauth = false;
+            let server_url = match (&self.url, &self.oauth_url) {
+                (Some(url), None) => url,
+                (None, Some(oauth_url)) => {
+                    use_oauth = true;
+                    oauth_url
+                }
+                (Some(_), Some(_)) => {
+                    let err_msg = format!(
+                        "Invalid configuration for mcp server '{}': Both url and oauth_url cannot be set at the same time",
+                        self.name
+                    );
+                    dual_error!("{}", err_msg);
+                    return Err(ServerError::Operation(err_msg));
+                }
+                (None, None) => {
+                    let err_msg = format!(
+                        "Invalid configuration for mcp server '{}': Either url or oauth_url must be set",
+                        self.name
+                    );
+                    dual_error!("{}", err_msg);
+                    return Err(ServerError::Operation(err_msg));
+                }
+            };
+
             match self.transport {
                 McpTransport::Sse => {
-                    let url = self.url.trim_end_matches('/');
-                    if !url.ends_with("/sse") {
-                        let err_msg = format!(
-                            "Invalid mcp tools sse URL: {}. The correct format should end with `/sse`",
-                            self.url
-                        );
-                        dual_error!("{}", err_msg);
-                        return Err(ServerError::Operation(err_msg.to_string()));
-                    }
-                    dual_debug!("Sync mcp tools from mcp server: {}", url);
+                    let url = server_url.trim_end_matches('/');
 
-                    // create a sse transport
-                    let transport = SseClientTransport::start(url).await.map_err(|e| {
-                        let err_msg = format!("Failed to create sse transport: {e}");
-                        dual_error!("{}", &err_msg);
-                        ServerError::Operation(err_msg)
-                    })?;
+                    let service = match use_oauth {
+                        false => {
+                            if !url.ends_with("/sse") {
+                                let err_msg = format!(
+                                    "Invalid mcp tools sse URL: {url}. The correct format should end with `/sse`",
+                                );
+                                dual_error!("{}", err_msg);
+                                return Err(ServerError::Operation(err_msg.to_string()));
+                            }
+                            dual_debug!("Sync mcp tools from mcp server: {}", url);
 
-                    // create a mcp client
-                    let service = ().into_dyn().serve(transport).await.map_err(|e| {
-                        let err_msg = format!(
-                            "Failed to connect to mcp server (name: {}, url: {}, transport: {}). {e}. Please check if the mcp server is running.",
-                            self.name, self.url, self.transport
-                        );
-                        dual_error!("{}", &err_msg);
-                        ServerError::Operation(err_msg)
-                    })?;
+                            // create a sse transport
+                            let transport = SseClientTransport::start(url).await.map_err(|e| {
+                                let err_msg = format!("Failed to create sse transport: {e}");
+                                dual_error!("{}", &err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+
+                            // create a mcp client
+                            let client_info = ClientInfo {
+                                protocol_version: Default::default(),
+                                capabilities: ClientCapabilities::default(),
+                                client_info: Implementation {
+                                    name: env!("CARGO_PKG_NAME").to_string(),
+                                    version: env!("CARGO_PKG_VERSION").to_string(),
+                                },
+                            };
+                            client_info.into_dyn().serve(transport).await.map_err(|e| {
+                                let err_msg = format!(
+                                    "Failed to connect to mcp server (name: {}, url: {}, transport: {}). {e}. Please check if the mcp server is running.",
+                                    self.name, url, self.transport
+                                );
+                                dual_error!("{}", &err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?
+                        }
+                        true => {
+                            // it is a http server for handling callback
+                            // Create channel for receiving authorization code
+                            let (code_sender, code_receiver) = oneshot::channel::<String>();
+
+                            // Create app state
+                            let app_state = AppState {
+                                code_receiver: Arc::new(Mutex::new(Some(code_sender))),
+                            };
+
+                            // Start HTTP server for handling callbacks
+                            let app = Router::new()
+                                .route("/callback", get(callback_handler))
+                                .with_state(app_state);
+
+                            let addr = SocketAddr::from(([127, 0, 0, 1], CALLBACK_PORT));
+                            tracing::info!("Starting callback server at: http://{}", addr);
+
+                            // Start server in a separate task
+                            tokio::spawn(async move {
+                                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+                                let result = axum::serve(listener, app).await;
+
+                                if let Err(e) = result {
+                                    tracing::error!("Callback server error: {}", e);
+                                }
+                            });
+
+                            // Get server URL
+                            tracing::info!("Using MCP server OAuth URL: {}", url);
+
+                            // Initialize oauth state machine
+                            let mut oauth_state =
+                                OAuthState::new(url, None).await.map_err(|e| {
+                                    let err_msg =
+                                        format!("Failed to initialize oauth state machine: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg)
+                                })?;
+
+                            // Get metadata to view supported scopes
+                            if let OAuthState::Unauthorized(manager) = &mut oauth_state {
+                                let metadata = manager.discover_metadata().await.map_err(|e| {
+                                    let err_msg = format!("Failed to discover metadata: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg.to_string())
+                                })?;
+                                if let Some(supported_scopes) = metadata.scopes_supported {
+                                    dual_debug!("Server supported scopes: {:?}", supported_scopes);
+                                    // Use server supported scopes
+                                    oauth_state
+                                        .start_authorization(
+                                            &supported_scopes
+                                                .iter()
+                                                .map(|s| s.as_str())
+                                                .collect::<Vec<_>>(),
+                                            MCP_REDIRECT_URI,
+                                        )
+                                        .await
+                                        .map_err(|e| {
+                                            let err_msg =
+                                                format!("Failed to start authorization: {e}");
+                                            dual_error!("{}", err_msg);
+                                            ServerError::McpOperation(err_msg)
+                                        })?;
+                                } else {
+                                    let err_msg = "Failed to get supported scopes from mcp server";
+                                    dual_error!("{}", err_msg);
+                                    return Err(ServerError::McpOperation(err_msg.to_string()));
+                                }
+                            }
+
+                            // Output authorization URL to user
+                            let mut output = BufWriter::new(tokio::io::stdout());
+                            output
+                                .write_all(b"\n=== MCP OAuth Client ===\n\n")
+                                .await
+                                .map_err(|e| {
+                                    let err_msg = format!("Failed to write to stdout: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg)
+                                })?;
+                            output.write_all(b"Please open the following URL in your browser to authorize:\n\n")
+                            .await.map_err(|e| {
+                                let err_msg = format!("Failed to write to stdout: {e}");
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+
+                            output
+                                .write_all(
+                                    oauth_state
+                                        .get_authorization_url()
+                                        .await
+                                        .map_err(|e| {
+                                            let err_msg =
+                                                format!("Failed to get authorization url: {e}");
+                                            dual_error!("{}", err_msg);
+                                            ServerError::McpOperation(err_msg)
+                                        })?
+                                        .as_bytes(),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    let err_msg = format!("Failed to write to stdout: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg)
+                                })?;
+                            output
+                                .write_all(b"\n\nWaiting for browser callback, please do not close this window...\n")
+                                .await.map_err(|e| {
+                                    let err_msg = format!("Failed to write to stdout: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg)
+                                })?;
+                            output.flush().await.map_err(|e| {
+                                let err_msg = format!("Failed to flush stdout: {e}");
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+
+                            // Wait for authorization code
+                            tracing::info!("Waiting for authorization code...");
+                            let auth_code = code_receiver.await.map_err(|e| {
+                                let err_msg = format!("Failed to get authorization code: {e}");
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+                            tracing::info!("Received authorization code: {}", auth_code);
+                            // Exchange code for access token
+                            tracing::info!("Exchanging authorization code for access token...");
+                            oauth_state.handle_callback(&auth_code).await.map_err(|e| {
+                                let err_msg = format!("Failed to handle callback: {e}");
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+                            tracing::info!("Successfully obtained access token");
+
+                            output
+                                .write_all(
+                                    b"\nAuthorization successful! Access token obtained.\n\n",
+                                )
+                                .await
+                                .map_err(|e| {
+                                    let err_msg = format!("Failed to write to stdout: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg)
+                                })?;
+                            output.flush().await.map_err(|e| {
+                                let err_msg = format!("Failed to flush stdout: {e}");
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+
+                            // Create authorized transport, this transport is authorized by the oauth state machine
+                            tracing::info!("Establishing authorized connection to MCP server...");
+                            let am = oauth_state.into_authorization_manager().ok_or_else(|| {
+                                let err_msg = "Failed to get authorization manager";
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg.to_string())
+                            })?;
+                            let client = AuthClient::new(reqwest::Client::default(), am);
+                            let transport = SseClientTransport::start_with_client(
+                                client,
+                                SseClientConfig {
+                                    sse_endpoint: url.into(),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(|e| {
+                                let err_msg = format!("Failed to create authorized transport: {e}");
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+
+                            // Create client and connect to MCP server
+                            let client_info = ClientInfo {
+                                protocol_version: Default::default(),
+                                capabilities: ClientCapabilities::default(),
+                                client_info: Implementation {
+                                    name: env!("CARGO_PKG_NAME").to_string(),
+                                    version: env!("CARGO_PKG_VERSION").to_string(),
+                                },
+                            };
+                            let service =
+                                client_info.into_dyn().serve(transport).await.map_err(|e| {
+                                    let err_msg = format!(
+                                        "Failed to connect to mcp server (name: {}, url: {}, transport: {}). {e}. Please check if the mcp server is running.",
+                                        self.name, url, self.transport
+                                    );
+                                    dual_error!("{}", &err_msg);
+                                    ServerError::McpOperation(err_msg)
+                                })?;
+                            tracing::info!("Successfully connected to MCP server");
+
+                            service
+                        }
+                    };
 
                     // list tools
                     let tools = service.list_all_tools().await.map_err(|e| {
                         let err_msg = format!("Failed to list tools: {e}");
                         dual_error!("{}", &err_msg);
-                        ServerError::Operation(err_msg)
+                        ServerError::McpOperation(err_msg)
                     })?;
                     dual_info!("Found {} tools from {} mcp server", tools.len(), self.name,);
 
@@ -254,43 +511,237 @@ impl McpToolServerConfig {
                     }
                 }
                 McpTransport::StreamHttp => {
-                    let url = self.url.trim_end_matches('/');
-                    if !url.ends_with("/mcp") {
-                        let err_msg = format!(
-                            "Invalid mcp tools stream-http URL: {}. The correct format should end with `/mcp`",
-                            self.url
-                        );
-                        dual_error!("{}", err_msg);
-                        return Err(ServerError::Operation(err_msg.to_string()));
-                    }
-                    dual_debug!("Sync mcp tools from mcp server: {}", url);
+                    let url = server_url.trim_end_matches('/');
 
-                    // create a stream-http transport
-                    let transport = StreamableHttpClientTransport::from_uri(url);
+                    let service = match use_oauth {
+                        false => {
+                            if !url.ends_with("/mcp") {
+                                let err_msg = format!(
+                                    "Invalid mcp tools stream-http URL: {url}. The correct format should end with `/mcp`",
+                                );
+                                dual_error!("{}", err_msg);
+                                return Err(ServerError::Operation(err_msg.to_string()));
+                            }
+                            dual_debug!("Sync mcp tools from mcp server: {}", url);
 
-                    // create a mcp client
-                    let client_info = ClientInfo {
-                        protocol_version: Default::default(),
-                        capabilities: ClientCapabilities::default(),
-                        client_info: Implementation {
-                            name: env!("CARGO_PKG_NAME").to_string(),
-                            version: env!("CARGO_PKG_VERSION").to_string(),
-                        },
+                            // create a stream-http transport
+                            let transport = StreamableHttpClientTransport::from_uri(url);
+
+                            // create a mcp client
+                            let client_info = ClientInfo {
+                                protocol_version: Default::default(),
+                                capabilities: ClientCapabilities::default(),
+                                client_info: Implementation {
+                                    name: env!("CARGO_PKG_NAME").to_string(),
+                                    version: env!("CARGO_PKG_VERSION").to_string(),
+                                },
+                            };
+                            client_info.into_dyn().serve(transport).await.map_err(|e| {
+                                let err_msg = format!(
+                                    "Failed to connect to mcp server (name: {}, url: {}, transport: {}). {e}. Please check if the mcp server is running.",
+                                    self.name, server_url, self.transport
+                                );
+                                dual_error!("{}", &err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?
+                        }
+                        true => {
+                            // it is a http server for handling callback
+                            // Create channel for receiving authorization code
+                            let (code_sender, code_receiver) = oneshot::channel::<String>();
+
+                            // Create app state
+                            let app_state = AppState {
+                                code_receiver: Arc::new(Mutex::new(Some(code_sender))),
+                            };
+
+                            // Start HTTP server for handling callbacks
+                            let app = Router::new()
+                                .route("/callback", get(callback_handler))
+                                .with_state(app_state);
+
+                            let addr = SocketAddr::from(([127, 0, 0, 1], CALLBACK_PORT));
+                            tracing::info!("Starting callback server at: http://{}", addr);
+
+                            // Start server in a separate task
+                            tokio::spawn(async move {
+                                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+                                let result = axum::serve(listener, app).await;
+
+                                if let Err(e) = result {
+                                    tracing::error!("Callback server error: {}", e);
+                                }
+                            });
+
+                            // Get server URL
+                            tracing::info!("Using MCP server OAuth URL: {}", url);
+
+                            // Initialize oauth state machine
+                            let mut oauth_state =
+                                OAuthState::new(url, None).await.map_err(|e| {
+                                    let err_msg =
+                                        format!("Failed to initialize oauth state machine: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg)
+                                })?;
+
+                            // Get metadata to view supported scopes
+                            if let OAuthState::Unauthorized(manager) = &mut oauth_state {
+                                let metadata = manager.discover_metadata().await.map_err(|e| {
+                                    let err_msg = format!("Failed to discover metadata: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg.to_string())
+                                })?;
+                                if let Some(supported_scopes) = metadata.scopes_supported {
+                                    dual_debug!("Server supported scopes: {:?}", supported_scopes);
+                                    // Use server supported scopes
+                                    oauth_state
+                                        .start_authorization(
+                                            &supported_scopes
+                                                .iter()
+                                                .map(|s| s.as_str())
+                                                .collect::<Vec<_>>(),
+                                            MCP_REDIRECT_URI,
+                                        )
+                                        .await
+                                        .map_err(|e| {
+                                            let err_msg =
+                                                format!("Failed to start authorization: {e}");
+                                            dual_error!("{}", err_msg);
+                                            ServerError::McpOperation(err_msg)
+                                        })?;
+                                } else {
+                                    let err_msg = "Failed to get supported scopes from mcp server";
+                                    dual_error!("{}", err_msg);
+                                    return Err(ServerError::McpOperation(err_msg.to_string()));
+                                }
+                            }
+
+                            // Output authorization URL to user
+                            let mut output = BufWriter::new(tokio::io::stdout());
+                            output
+                                .write_all(b"\n=== MCP OAuth Client ===\n\n")
+                                .await
+                                .map_err(|e| {
+                                    let err_msg = format!("Failed to write to stdout: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg)
+                                })?;
+                            output.write_all(b"Please open the following URL in your browser to authorize:\n\n")
+                            .await.map_err(|e| {
+                                let err_msg = format!("Failed to write to stdout: {e}");
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+
+                            output
+                                .write_all(
+                                    oauth_state
+                                        .get_authorization_url()
+                                        .await
+                                        .map_err(|e| {
+                                            let err_msg =
+                                                format!("Failed to get authorization url: {e}");
+                                            dual_error!("{}", err_msg);
+                                            ServerError::McpOperation(err_msg)
+                                        })?
+                                        .as_bytes(),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    let err_msg = format!("Failed to write to stdout: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg)
+                                })?;
+                            output
+                                .write_all(b"\n\nWaiting for browser callback, please do not close this window...\n")
+                                .await.map_err(|e| {
+                                    let err_msg = format!("Failed to write to stdout: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg)
+                                })?;
+                            output.flush().await.map_err(|e| {
+                                let err_msg = format!("Failed to flush stdout: {e}");
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+
+                            // Wait for authorization code
+                            tracing::info!("Waiting for authorization code...");
+                            let auth_code = code_receiver.await.map_err(|e| {
+                                let err_msg = format!("Failed to get authorization code: {e}");
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+                            tracing::info!("Received authorization code: {}", auth_code);
+                            // Exchange code for access token
+                            tracing::info!("Exchanging authorization code for access token...");
+                            oauth_state.handle_callback(&auth_code).await.map_err(|e| {
+                                let err_msg = format!("Failed to handle callback: {e}");
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+                            tracing::info!("Successfully obtained access token");
+
+                            output
+                                .write_all(
+                                    b"\nAuthorization successful! Access token obtained.\n\n",
+                                )
+                                .await
+                                .map_err(|e| {
+                                    let err_msg = format!("Failed to write to stdout: {e}");
+                                    dual_error!("{}", err_msg);
+                                    ServerError::McpOperation(err_msg)
+                                })?;
+                            output.flush().await.map_err(|e| {
+                                let err_msg = format!("Failed to flush stdout: {e}");
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?;
+
+                            // Create authorized transport, this transport is authorized by the oauth state machine
+                            tracing::info!("Establishing authorized connection to MCP server...");
+                            let am = oauth_state.into_authorization_manager().ok_or_else(|| {
+                                let err_msg = "Failed to get authorization manager";
+                                dual_error!("{}", err_msg);
+                                ServerError::McpOperation(err_msg.to_string())
+                            })?;
+                            let client = AuthClient::new(reqwest::Client::default(), am);
+
+                            // Use StreamableHttpClientTransport
+                            let transport = StreamableHttpClientTransport::with_client(
+                                client,
+                                StreamableHttpClientTransportConfig {
+                                    uri: url.into(),
+                                    ..Default::default()
+                                },
+                            );
+
+                            // Create client and connect to MCP server
+                            let client_info = ClientInfo {
+                                protocol_version: Default::default(),
+                                capabilities: ClientCapabilities::default(),
+                                client_info: Implementation {
+                                    name: env!("CARGO_PKG_NAME").to_string(),
+                                    version: env!("CARGO_PKG_VERSION").to_string(),
+                                },
+                            };
+                            client_info.into_dyn().serve(transport).await.map_err(|e| {
+                                let err_msg = format!(
+                                    "Failed to connect to mcp server (name: {}, url: {}, transport: {}). {e}. Please check if the mcp server is running.",
+                                    self.name, url, self.transport
+                                );
+                                dual_error!("{}", &err_msg);
+                                ServerError::McpOperation(err_msg)
+                            })?
+                        }
                     };
-                    let service = client_info.into_dyn().serve(transport).await.map_err(|e| {
-                        let err_msg = format!(
-                            "Failed to connect to mcp server (name: {}, url: {}, transport: {}). {e}. Please check if the mcp server is running.",
-                            self.name, self.url, self.transport
-                        );
-                        dual_error!("{}", &err_msg);
-                        ServerError::Operation(err_msg)
-                    })?;
 
                     // list tools
                     let tools = service.list_all_tools().await.map_err(|e| {
                         let err_msg = format!("Failed to list tools: {e}");
                         dual_error!("{}", &err_msg);
-                        ServerError::Operation(err_msg)
+                        ServerError::McpOperation(err_msg)
                     })?;
                     dual_info!("Found {} tools from {} mcp server", tools.len(), self.name,);
 
@@ -382,4 +833,30 @@ impl std::fmt::Display for Transport {
             Transport::StreamHttp => write!(f, "streamable-http"),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct AppState {
+    code_receiver: Arc<Mutex<Option<oneshot::Sender<String>>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CallbackParams {
+    code: String,
+    #[allow(dead_code)]
+    state: Option<String>,
+}
+
+async fn callback_handler(
+    Query(params): Query<CallbackParams>,
+    State(state): State<AppState>,
+) -> Html<String> {
+    tracing::info!("Received callback with code: {}", params.code);
+
+    // Send the code to the main thread
+    if let Some(sender) = state.code_receiver.lock().await.take() {
+        let _ = sender.send(params.code);
+    }
+    // Return success page
+    Html(CALLBACK_HTML.to_string())
 }
