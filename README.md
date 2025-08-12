@@ -85,7 +85,7 @@ Llama-Nexus is a gateway service for managing and orchestrating LlamaEdge API se
     llama-api-server.wasm \
     --prompt-template llama-3-chat \
     --ctx-size 128000 \
-    --model-name Llama-3.2-3b
+    --model-name Llama-3.2-3b \
     --port 10010
   ```
 
