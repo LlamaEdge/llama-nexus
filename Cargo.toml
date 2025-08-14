@@ -38,6 +38,10 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.7.0", features = ["v4"] }
 
+chrono = "0.4.41"
+sqlx = { version = "0.8.6", features = ["sqlite", "chrono", "runtime-tokio"] }
+dotenvy = "0.15.7"
+
 [[bin]]
 name = "llama-nexus"
 path = "src/main.rs"

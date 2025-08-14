@@ -2,6 +2,16 @@
 host = "127.0.0.1" # The host to listen on.
 port = 3389        # The port to listen on.
 
+# Memory configuration
+[memory]
+enable = false                                    # Enable/disable memory functionality
+database_path = "data/memory.db"                 # Path to SQLite database file
+context_window = 4000                            # Maximum context window for conversations
+auto_summarize = true                            # Enable automatic message summarization
+summarize_threshold = 20                         # Summarize when message count exceeds this number
+max_stored_messages = 100                        # Maximum messages to store per conversation
+cleanup_interval_hours = 24                     # Hours between automatic cleanup operations
+
 # Note that, if any of the MCP tool servers are enabled, then please guarantee that the
 # corresponding mcp server is started before starting the LlamaNexus server.
 

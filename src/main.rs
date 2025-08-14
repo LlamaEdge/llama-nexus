@@ -5,6 +5,7 @@ mod info;
 mod mcp;
 mod server;
 mod utils;
+mod memory;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -67,6 +68,8 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> ServerResult<()> {
+    dotenvy::dotenv().ok();
+
     // parse the command line arguments
     let cli = Cli::parse();
 
@@ -118,7 +121,48 @@ async fn main() -> ServerResult<()> {
         config.server.port,
     ));
 
-    let state = Arc::new(AppState::new(config, ServerInfo::default()));
+    // Initialize memory system if enabled
+    let memory = if let Some(memory_config) = &config.memory {
+        if memory_config.enable {
+            dual_info!("Memory system is enabled");
+
+            // Ensure data directory exists
+            if let Some(parent) = std::path::Path::new(&memory_config.database_path).parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    let err_msg = format!("Failed to create memory data directory: {e}");
+                    dual_error!("{err_msg}");
+                    ServerError::Operation(err_msg)
+                })?;
+            }
+
+            match crate::memory::CompleteChatMemory::new(memory_config.clone()).await {
+                Ok(memory_system) => {
+                    dual_info!("Memory system initialized successfully");
+                    Some(Arc::new(memory_system))
+                }
+                Err(e) => {
+                    dual_error!("Failed to initialize memory system: {}", e);
+                    return Err(ServerError::Operation(format!("Memory initialization failed: {e}")));
+                }
+            }
+        } else {
+            dual_info!("Memory system is disabled");
+            None
+        }
+    } else {
+        dual_info!("Memory system is not configured");
+        None
+    };
+
+    // Initialize application state
+    let mut state = AppState::new(config, ServerInfo::default());
+
+    // Attach memory system to state
+    if let Some(memory_system) = memory {
+        state = state.with_memory(memory_system);
+    }
+
+    let state = Arc::new(state);
 
     // Start the health check task if enabled
     if cli.check_health {
@@ -150,6 +194,18 @@ async fn main() -> ServerResult<()> {
             .route("/v1/images/edits", post(handlers::image_handler))
             .route("/v1/models", get(handlers::models_handler))
             .route("/v1/info", get(handlers::info_handler))
+            .route(
+                "/v1/memory/conversations/{conv_id}/history",
+                get(handlers::get_conversation_history_handler)
+            )
+            .route(
+                "/v1/memory/users/{user_id}/history",
+                get(handlers::get_user_history_handler)
+            )
+            .route(
+                "/v1/memory/users/{user_id}/conversations",
+                get(handlers::list_user_conversations_handler)
+            )
             .route(
                 "/admin/servers/register",
                 post(handlers::admin::register_downstream_server_handler),
@@ -367,6 +423,7 @@ pub(crate) struct AppState {
     config: Arc<RwLock<Config>>,
     server_info: Arc<RwLock<ServerInfo>>,
     models: Arc<RwLock<HashMap<ServerId, Vec<endpoints::models::Model>>>>,
+    memory: Option<Arc<crate::memory::CompleteChatMemory>>,
 }
 impl AppState {
     pub(crate) fn new(config: Config, server_info: ServerInfo) -> Self {
@@ -375,7 +432,13 @@ impl AppState {
             config: Arc::new(RwLock::new(config)),
             server_info: Arc::new(RwLock::new(server_info)),
             models: Arc::new(RwLock::new(HashMap::new())),
+            memory: None,
         }
+    }
+
+    pub(crate) fn with_memory(mut self, memory: Arc<crate::memory::CompleteChatMemory>) -> Self {
+        self.memory = Some(memory);
+        self
     }
 
     pub(crate) async fn register_downstream_server(&self, server: Server) -> ServerResult<()> {

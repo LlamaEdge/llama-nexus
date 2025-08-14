@@ -39,6 +39,8 @@ const CALLBACK_HTML: &str = include_str!("auth/callback.html");
 pub struct Config {
     pub server: ServerConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rag: Option<RagConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_info_push_url: Option<String>,
@@ -86,6 +88,7 @@ impl Default for Config {
                 host: "127.0.0.1".to_string(),
                 port: 8080,
             },
+            memory: None,
             rag: None,
             server_info_push_url: None,
             server_health_push_url: None,
@@ -98,6 +101,31 @@ impl Default for Config {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MemoryConfig {
+    pub enable: bool,
+    pub database_path: String,
+    pub context_window: u64,
+    pub auto_summarize: bool,
+    pub summarize_threshold: u32,
+    pub max_stored_messages: u32,
+    pub cleanup_interval_hours: u64,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            database_path: "data/memory.db".to_string(),
+            context_window: 4000,
+            auto_summarize: true,
+            summarize_threshold: 20,
+            max_stored_messages: 100,
+            cleanup_interval_hours: 24,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
