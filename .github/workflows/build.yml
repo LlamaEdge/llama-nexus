@@ -30,8 +30,6 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    env:
-      SQLX_OFFLINE: true
     steps:
       - name: Clone project
         uses: actions/checkout@v3
@@ -42,10 +40,24 @@ jobs:
           toolchain: nightly
           components: rustfmt, clippy
 
+      - name: Generate SQLx cache if missing
+        run: |
+          # 检查是否存在SQLx缓存文件
+          if [ ! -d ".sqlx" ] || [ -z "$(ls -A .sqlx 2>/dev/null)" ]; then
+            echo "SQLx cache not found, generating..."
+            cargo sqlx prepare
+          else
+            echo "SQLx cache found, using existing cache"
+          fi
+        env:
+          SQLX_OFFLINE: false
+
       - name: Run clippy
         run: |
           cargo +nightly clippy --version
           cargo +nightly clippy --all-features -- -D warnings
+        env:
+          SQLX_OFFLINE: true
 
       - name: Run fmt
         run: |
@@ -53,8 +65,6 @@ jobs:
 
   build_macos:
     runs-on: ${{ matrix.os }}
-    env:
-      SQLX_OFFLINE: true
     strategy:
       matrix:
         os: [macos-13, macos-14, macos-15]
@@ -66,14 +76,25 @@ jobs:
       - name: Install Rust-stable
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      - name: Generate SQLx cache if missing
+        run: |
+          if [ ! -d ".sqlx" ] || [ -z "$(ls -A .sqlx 2>/dev/null)" ]; then
+            echo "SQLx cache not found, generating..."
+            cargo sqlx prepare
+          else
+            echo "SQLx cache found, using existing cache"
+          fi
+        env:
+          SQLX_OFFLINE: false
+
       - name: Build
         run: |
           cargo build --release
+        env:
+          SQLX_OFFLINE: true
 
   build_linux:
     runs-on: ${{ matrix.runner }}
-    env:
-      SQLX_OFFLINE: true
     container:
       image: ${{ matrix.image }}
     strategy:
@@ -107,6 +128,19 @@ jobs:
           toolchain: stable
           target: ${{ matrix.target }}
 
+      - name: Generate SQLx cache if missing
+        run: |
+          if [ ! -d ".sqlx" ] || [ -z "$(ls -A .sqlx 2>/dev/null)" ]; then
+            echo "SQLx cache not found, generating..."
+            cargo sqlx prepare
+          else
+            echo "SQLx cache found, using existing cache"
+          fi
+        env:
+          SQLX_OFFLINE: false
+
       - name: Build
         run: |
           cargo build --release --target ${{ matrix.target }}
+        env:
+          SQLX_OFFLINE: true
