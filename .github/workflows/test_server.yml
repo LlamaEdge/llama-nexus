@@ -68,14 +68,29 @@ jobs:
           curl --location --remote-name https://github.com/Orange-OpenSource/hurl/releases/download/5.0.1/hurl_5.0.1_amd64.deb
           sudo apt update && sudo apt install ./hurl_5.0.1_amd64.deb
 
+      - name: Generate SQLx cache if missing
+        run: |
+          # 检查是否存在SQLx缓存文件
+          if [ ! -d ".sqlx" ] || [ -z "$(ls -A .sqlx 2>/dev/null)" ]; then
+            echo "SQLx cache not found, generating..."
+            cargo sqlx prepare
+          else
+            echo "SQLx cache found, using existing cache"
+          fi
+        env:
+          SQLX_OFFLINE: false
+
       - name: Build LlamaEdge-Nexus
         run: |
           cargo build --release
           cp target/release/llama-nexus ./llama-nexus
+        env:
+          SQLX_OFFLINE: true
 
       # - name: Build llama-api-server.wasm
       #   env:
       #     RUSTFLAGS: "--cfg wasmedge --cfg tokio_unstable"
+      #     SQLX_OFFLINE: true
       #   run: |
       #     git clone -b dev https://github.com/LlamaEdge/LlamaEdge.git
       #     cd LlamaEdge
