@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE conversations SET message_count = ?, total_tokens = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "71ec46a18056b443dbb50c3c83d9f91cd2a1303dc18bd5373ad4b5d4f7572aca"
+}

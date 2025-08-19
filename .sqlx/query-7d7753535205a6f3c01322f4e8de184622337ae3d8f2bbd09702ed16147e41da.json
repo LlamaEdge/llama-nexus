@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, user_id, title, model_name, message_count, updated_at, created_at\n             FROM conversations\n             WHERE user_id = ?\n             ORDER BY updated_at DESC\n             LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "user_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "model_name",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "message_count",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 5,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 6,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "7d7753535205a6f3c01322f4e8de184622337ae3d8f2bbd09702ed16147e41da"
+}

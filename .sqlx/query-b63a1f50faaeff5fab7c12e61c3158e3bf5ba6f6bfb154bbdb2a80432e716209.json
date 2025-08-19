@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE conversations SET summary = ?, last_summary_sequence = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "b63a1f50faaeff5fab7c12e61c3158e3bf5ba6f6bfb154bbdb2a80432e716209"
+}

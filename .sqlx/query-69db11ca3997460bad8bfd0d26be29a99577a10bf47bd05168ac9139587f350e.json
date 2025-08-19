@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(MAX(sequence), 0) + 1 as next_seq FROM messages WHERE conversation_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "next_seq",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "69db11ca3997460bad8bfd0d26be29a99577a10bf47bd05168ac9139587f350e"
+}

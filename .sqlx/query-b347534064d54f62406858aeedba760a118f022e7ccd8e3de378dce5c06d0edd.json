@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT * FROM messages WHERE conversation_id = ? ORDER BY sequence",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "conversation_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "content",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "timestamp",
+        "ordinal": 4,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "sequence",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "tokens",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "tool_calls",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "b347534064d54f62406858aeedba760a118f022e7ccd8e3de378dce5c06d0edd"
+}
