@@ -21,6 +21,7 @@ dependencies = [
  "http",
  "mime_guess",
  "once_cell",
+ "regex",
  "reqwest",
  "rmcp",
  "serde",
@@ -437,8 +438,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 [[package]]
 name = "chat-prompts"
 version = "0.33.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "657a603c47feae5a5f7f06398a005af6c442eb5189b519b1b1ad01ae71f14bf4"
+source = "git+https://github.com/LlamaEdge/LlamaEdge.git?branch=feat-react#e86195736dbd619e3f28041f8eb93ec87c7abd92"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -827,8 +827,7 @@ dependencies = [
 [[package]]
 name = "endpoints"
 version = "0.34.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baed8a5313e11bf93218a978954437f4b8cfb889e48a2b096817156bfdd5eff3"
+source = "git+https://github.com/LlamaEdge/LlamaEdge.git?branch=feat-react#e86195736dbd619e3f28041f8eb93ec87c7abd92"
 dependencies = [
  "indexmap",
  "serde",
