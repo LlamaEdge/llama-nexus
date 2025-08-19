@@ -550,7 +550,7 @@ pub(crate) async fn chat(
             dual_error!("{} - request_id: {}", err_msg, request_id);
             ServerError::Operation(err_msg)
         })?;
-        dual_info!(
+        dual_debug!(
             "Chat history - request_id: {}\n{}",
             request_id,
             serde_json::to_string_pretty(&chat_history).unwrap()
@@ -3374,7 +3374,7 @@ async fn call_mcp_server(
                                                         .json(&request)
                                                 };
 
-                                                dual_info!(
+                                                dual_debug!(
                                                     "Request to downstream chat server - request_id: {}\n{}",
                                                     request_id,
                                                     serde_json::to_string_pretty(&request).unwrap()
