@@ -1,7 +1,9 @@
-use crate::{dual_error, memory::types::*};
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
-use std::str::FromStr;
+
+use crate::{dual_error, memory::types::*};
 
 pub struct MessageStore {
     pool: SqlitePool,
@@ -20,7 +22,7 @@ impl MessageStore {
     /// 此方法会自动连接到 SQLite 数据库并初始化必要的表结构。
     /// 如果数据库文件不存在，SQLite 会自动创建。
     pub async fn new(database_path: &str) -> MemoryResult<Self> {
-        let pool = SqlitePool::connect(&format!("sqlite:{}", database_path)).await?;
+        let pool = SqlitePool::connect(&format!("sqlite:{database_path}")).await?;
 
         let store = Self { pool };
         store.initialize_schema().await?;
@@ -55,8 +57,10 @@ impl MessageStore {
                 tool_calls TEXT,
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
-            "#
-        ).execute(&self.pool).await?;
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
 
         // 添加user_id列（如果不存在）
         let _ = sqlx::query("ALTER TABLE conversations ADD COLUMN user_id TEXT")
@@ -136,7 +140,8 @@ impl MessageStore {
         ).execute(&self.pool).await?;
 
         // 更新会话统计
-        self.update_conversation_stats(&message.conversation_id).await?;
+        self.update_conversation_stats(&message.conversation_id)
+            .await?;
 
         Ok(())
     }
@@ -163,7 +168,7 @@ impl MessageStore {
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| {
-                let err_msg = format!("Failed to fetch conversation: {}", e);
+                let err_msg = format!("Failed to fetch conversation: {e}");
                 dual_error!("{err_msg}");
                 MemoryError::InvalidData(err_msg)
             })?;
@@ -193,7 +198,7 @@ impl MessageStore {
                     summary,
                     last_summary_sequence,
                 })
-            },
+            }
             None => Err(MemoryError::ConversationNotFound(conv_id.to_string())),
         }
     }
@@ -226,14 +231,17 @@ impl MessageStore {
     pub async fn get_recent_conversation_by_user(
         &self,
         user_id: &str,
-        model_name: Option<&str>
+        model_name: Option<&str>,
     ) -> MemoryResult<Option<StoredConversation>> {
         let (query_str, params): (String, Vec<&str>) = if let Some(model) = model_name {
             ("SELECT * FROM conversations WHERE user_id = ? AND model_name = ? ORDER BY updated_at DESC LIMIT 1".to_string(),
              vec![user_id, model])
         } else {
-            ("SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1".to_string(),
-             vec![user_id])
+            (
+                "SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1"
+                    .to_string(),
+                vec![user_id],
+            )
         };
 
         let mut query = sqlx::query(&query_str);
@@ -242,7 +250,7 @@ impl MessageStore {
         }
 
         let row = query.fetch_optional(&self.pool).await.map_err(|e| {
-            let err_msg = format!("Failed to fetch recent conversation for user {}: {}", user_id, e);
+            let err_msg = format!("Failed to fetch recent conversation for user {user_id}: {e}");
             dual_error!("{err_msg}");
             MemoryError::InvalidData(err_msg)
         })?;
@@ -272,7 +280,7 @@ impl MessageStore {
                     summary,
                     last_summary_sequence,
                 }))
-            },
+            }
             None => Ok(None),
         }
     }
@@ -292,7 +300,9 @@ impl MessageStore {
         let rows = sqlx::query!(
             "SELECT * FROM messages WHERE conversation_id = ? ORDER BY sequence",
             conv_id
-        ).fetch_all(&self.pool).await?;
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut messages = Vec::new();
         for row in rows {
@@ -309,7 +319,7 @@ impl MessageStore {
                 id,
                 conversation_id: row.conversation_id,
                 role: MessageRole::from_str(&row.role).map_err(|e| {
-                    let err_msg = format!("Failed to parse message role: {}", e);
+                    let err_msg = format!("Failed to parse message role: {e}");
                     dual_error!("{err_msg}");
                     MemoryError::InvalidData(err_msg)
                 })?,
@@ -336,18 +346,27 @@ impl MessageStore {
     /// # 说明
     /// 返回对话中最近的N条消息，按照序列号升序排列。
     /// 工具调用信息会从 JSON 格式反序列化为结构化数据。
-    pub async fn get_recent_messages(&self, conv_id: &str, limit: usize) -> MemoryResult<Vec<StoredMessage>> {
+    pub async fn get_recent_messages(
+        &self,
+        conv_id: &str,
+        limit: usize,
+    ) -> MemoryResult<Vec<StoredMessage>> {
         let limit_i64 = limit as i64;
-        let rows = sqlx::query("SELECT * FROM messages WHERE conversation_id = ? ORDER BY sequence DESC LIMIT ?")
-            .bind(conv_id)
-            .bind(limit_i64)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY sequence DESC LIMIT ?",
+        )
+        .bind(conv_id)
+        .bind(limit_i64)
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut messages = Vec::new();
-        for row in rows.into_iter().rev() { // 反转以保持时间顺序
+        for row in rows.into_iter().rev() {
+            // 反转以保持时间顺序
             let tool_calls_json: Option<String> = row.try_get("tool_calls").ok();
-            let tool_calls: Vec<StoredToolCall> = if let Some(json_str) = tool_calls_json && !json_str.is_empty() {
+            let tool_calls: Vec<StoredToolCall> = if let Some(json_str) = tool_calls_json
+                && !json_str.is_empty()
+            {
                 serde_json::from_str(&json_str)?
             } else {
                 Vec::new()
@@ -365,7 +384,7 @@ impl MessageStore {
                 id,
                 conversation_id,
                 role: MessageRole::from_str(&role_str).map_err(|e| {
-                    let err_msg = format!("Failed to parse message role: {}", e);
+                    let err_msg = format!("Failed to parse message role: {e}");
                     dual_error!("{err_msg}");
                     MemoryError::InvalidData(err_msg)
                 })?,
@@ -392,6 +411,7 @@ impl MessageStore {
     /// # 说明
     /// 用于获取对话中从某个特定序列号开始的所有消息，常用于增量加载或断点续传场景。
     /// 返回的消息按序列号升序排列。
+    #[allow(dead_code)]
     pub async fn get_messages_from_sequence(
         &self,
         conv_id: &str,
@@ -401,24 +421,26 @@ impl MessageStore {
             "SELECT * FROM messages WHERE conversation_id = ? AND sequence >= ? ORDER BY sequence",
             conv_id,
             from_sequence
-        ).fetch_all(&self.pool).await?;
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut messages = Vec::new();
         for row in rows {
             let tool_calls: Vec<StoredToolCall> = if let Some(tool_calls_json) = &row.tool_calls {
-                serde_json::from_str(&tool_calls_json)?
+                serde_json::from_str(tool_calls_json)?
             } else {
                 Vec::new()
             };
 
             let id = row.id.unwrap();
             let role = MessageRole::from_str(&row.role).map_err(|e| {
-                let err_msg = format!("Failed to parse message role: {}", e);
+                let err_msg = format!("Failed to parse message role: {e}");
                 dual_error!("{err_msg}");
                 MemoryError::InvalidData(err_msg)
             })?;
-             let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(row.timestamp.unwrap(), Utc);
-             let tokens = row.tokens.map(|t| t as usize);
+            let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(row.timestamp.unwrap(), Utc);
+            let tokens = row.tokens.map(|t| t as usize);
 
             messages.push(StoredMessage {
                 id,
@@ -495,7 +517,11 @@ impl MessageStore {
     /// # 说明
     /// 返回按最后更新时间降序排列的对话摘要列表，用于在 UI 中显示对话列表。
     /// 每个摘要包含对话的基本信息但不包含详细的消息内容。
-    pub async fn list_conversations(&self, limit: Option<usize>) -> MemoryResult<Vec<ConversationSummary>> {
+    #[allow(dead_code)]
+    pub async fn list_conversations(
+        &self,
+        limit: Option<usize>,
+    ) -> MemoryResult<Vec<ConversationSummary>> {
         let limit = limit.unwrap_or(100) as i64;
 
         let rows = sqlx::query!(
@@ -504,15 +530,19 @@ impl MessageStore {
              ORDER BY updated_at DESC
              LIMIT ?",
             limit
-        ).fetch_all(&self.pool).await?;
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut summaries = Vec::new();
         for row in rows {
             let id = row.id.unwrap();
             let user_id: Option<String> = row.user_id;
             let message_count = row.message_count.unwrap();
-            let created_at = DateTime::<Utc>::from_naive_utc_and_offset(row.created_at.unwrap(), Utc);
-            let updated_at = DateTime::<Utc>::from_naive_utc_and_offset(row.updated_at.unwrap(), Utc);
+            let created_at =
+                DateTime::<Utc>::from_naive_utc_and_offset(row.created_at.unwrap(), Utc);
+            let updated_at =
+                DateTime::<Utc>::from_naive_utc_and_offset(row.updated_at.unwrap(), Utc);
 
             summaries.push(ConversationSummary {
                 id,
@@ -540,7 +570,11 @@ impl MessageStore {
     /// # 说明
     /// 返回指定用户按最后更新时间降序排列的对话摘要列表。
     /// 每个摘要包含对话的基本信息但不包含详细的消息内容。
-    pub async fn list_conversations_by_user(&self, user_id: &str, limit: Option<usize>) -> MemoryResult<Vec<ConversationSummary>> {
+    pub async fn list_conversations_by_user(
+        &self,
+        user_id: &str,
+        limit: Option<usize>,
+    ) -> MemoryResult<Vec<ConversationSummary>> {
         let limit = limit.unwrap_or(100) as i64;
 
         let rows = sqlx::query!(
@@ -551,15 +585,19 @@ impl MessageStore {
              LIMIT ?",
             user_id,
             limit
-        ).fetch_all(&self.pool).await?;
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut summaries = Vec::new();
         for row in rows {
             let id = row.id.unwrap();
             let user_id_db: Option<String> = row.user_id;
             let message_count = row.message_count.unwrap();
-            let created_at = DateTime::<Utc>::from_naive_utc_and_offset(row.created_at.unwrap(), Utc);
-            let updated_at = DateTime::<Utc>::from_naive_utc_and_offset(row.updated_at.unwrap(), Utc);
+            let created_at =
+                DateTime::<Utc>::from_naive_utc_and_offset(row.created_at.unwrap(), Utc);
+            let updated_at =
+                DateTime::<Utc>::from_naive_utc_and_offset(row.updated_at.unwrap(), Utc);
 
             summaries.push(ConversationSummary {
                 id,
@@ -583,15 +621,23 @@ impl MessageStore {
     /// # 说明
     /// 返回包含对话总数、消息总数、token 总数等统计信息的结构。
     /// 某些统计项（如工具调用数量、数据库大小）当前为简化实现，可能返回默认值。
+    #[allow(dead_code)]
     pub async fn get_stats(&self) -> MemoryResult<MemoryStats> {
         let conv_count = sqlx::query!("SELECT COUNT(*) as count FROM conversations")
-            .fetch_one(&self.pool).await?.count;
+            .fetch_one(&self.pool)
+            .await?
+            .count;
 
         let msg_count = sqlx::query!("SELECT COUNT(*) as count FROM messages")
-            .fetch_one(&self.pool).await?.count;
+            .fetch_one(&self.pool)
+            .await?
+            .count;
 
         let total_tokens = sqlx::query!("SELECT SUM(total_tokens) as total FROM conversations")
-            .fetch_one(&self.pool).await?.total.unwrap_or(0);
+            .fetch_one(&self.pool)
+            .await?
+            .total
+            .unwrap_or(0);
 
         // 简化版统计，实际实现可以更详细
         Ok(MemoryStats {
@@ -608,10 +654,11 @@ impl MessageStore {
     async fn update_conversation_stats(&self, conv_id: &str) -> MemoryResult<()> {
         let row = sqlx::query(
             "SELECT COUNT(*) as msg_count, SUM(COALESCE(tokens, 0)) as total_tokens
-             FROM messages WHERE conversation_id = ?"
+             FROM messages WHERE conversation_id = ?",
         )
         .bind(conv_id)
-        .fetch_one(&self.pool).await?;
+        .fetch_one(&self.pool)
+        .await?;
 
         let msg_count: i64 = row.get(0);
         let total_tokens: Option<i64> = row.get(1);
@@ -638,9 +685,11 @@ impl MessageStore {
     /// # 说明
     /// 由于设置了外键约束的级联删除，删除对话记录时会自动删除该对话下的所有消息。
     /// 此操作不可逆，请谨慎使用。
+    #[allow(dead_code)]
     pub async fn delete_conversation(&self, conv_id: &str) -> MemoryResult<()> {
         sqlx::query!("DELETE FROM conversations WHERE id = ?", conv_id)
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }

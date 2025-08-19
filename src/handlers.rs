@@ -10,8 +10,8 @@ use bytes::Bytes;
 use endpoints::{
     chat::{
         ChatCompletionAssistantMessage, ChatCompletionChunk, ChatCompletionObject,
-        ChatCompletionRequest, ChatCompletionRequestMessage, ChatCompletionToolMessage, Tool,
-        ToolCall, ToolChoice, ToolFunction, ChatCompletionUserMessageContent,
+        ChatCompletionRequest, ChatCompletionRequestMessage, ChatCompletionToolMessage,
+        ChatCompletionUserMessageContent, Tool, ToolCall, ToolChoice, ToolFunction,
     },
     embeddings::EmbeddingRequest,
     models::{ListModelsResponse, Model},
@@ -27,8 +27,8 @@ use crate::{
     error::{ServerError, ServerResult},
     info::ApiServer,
     mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SERVICES, MCP_TOOLS, SEARCH_MCP_SERVER_NAMES},
-    server::{RoutingPolicy, Server, ServerIdToRemove, ServerKind, TargetServerInfo},
     memory::{StoredToolCall, StoredToolResult},
+    server::{RoutingPolicy, Server, ServerIdToRemove, ServerKind, TargetServerInfo},
 };
 
 pub(crate) async fn chat_handler(
@@ -145,14 +145,30 @@ pub(crate) async fn chat(
     let conv_id = if let Some(memory) = &state.memory {
         if let Some(user) = &request.user {
             // 使用全局持久化的对话管理：同一用户无论使用什么模型都复用同一个对话
-            let model_name = request.model.clone().unwrap_or_else(|| "default".to_string());
-            match memory.get_or_create_user_conversation(user, &model_name).await {
+            let model_name = request
+                .model
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            match memory
+                .get_or_create_user_conversation(user, &model_name)
+                .await
+            {
                 Ok(id) => {
-                    dual_debug!("Using conversation {} for user {} - request_id: {}", id, user, request_id);
+                    dual_debug!(
+                        "Using conversation {} for user {} - request_id: {}",
+                        id,
+                        user,
+                        request_id
+                    );
                     Some(id)
                 }
                 Err(e) => {
-                    dual_warn!("Failed to get or create conversation for user {}: {} - request_id: {}", user, e, request_id);
+                    dual_warn!(
+                        "Failed to get or create conversation for user {}: {} - request_id: {}",
+                        user,
+                        e,
+                        request_id
+                    );
                     None
                 }
             }
@@ -176,14 +192,12 @@ pub(crate) async fn chat(
     // )
     // .await?;
 
-
     // 存储用户消息到记忆中
-    if let Some(memory) = &state.memory {
-        if let Some(conv_id) = &conv_id {
-            if let Some(user_msg) = &user_message {
-                let _ = memory.add_user_message(conv_id, user_msg.clone()).await;
-            }
-        }
+    if let Some(memory) = &state.memory
+        && let Some(conv_id) = &conv_id
+        && let Some(user_msg) = &user_message
+    {
+        let _ = memory.add_user_message(conv_id, user_msg.clone()).await;
     }
 
     // let response = build_and_send_request(
@@ -252,170 +266,162 @@ pub(crate) async fn chat(
             // )
             // .await
 
-            let result = {
-                let status = response.status();
+            let status = response.status();
 
-                // check the status code
-                match status {
-                    StatusCode::OK => {
-                        let response_headers = response.headers().clone();
+            // check the status code
+            match status {
+                StatusCode::OK => {
+                    let response_headers = response.headers().clone();
 
-                        // Check if the response requires tool call
-                        let requires_tool_call = parse_requires_tool_call_header(&response_headers);
+                    // Check if the response requires tool call
+                    let requires_tool_call = parse_requires_tool_call_header(&response_headers);
 
-                        if requires_tool_call {
-                            // // Handle tool call in stream mode
-                            // handle_tool_call_stream(
-                            //     response,
-                            //     &mut request,
-                            //     &headers,
-                            //     &chat_server,
-                            //     request_id,
-                            //     cancel_token,
-                            //     conv_id.as_deref(),
-                            //     user_message.as_deref(),
-                            //     &state,
-                            // )
-                            // .await
+                    if requires_tool_call {
+                        // // Handle tool call in stream mode
+                        // handle_tool_call_stream(
+                        //     response,
+                        //     &mut request,
+                        //     &headers,
+                        //     &chat_server,
+                        //     request_id,
+                        //     cancel_token,
+                        //     conv_id.as_deref(),
+                        //     user_message.as_deref(),
+                        //     &state,
+                        // )
+                        // .await
 
-                            let result = {
-                                let tool_calls = extract_tool_calls_from_stream(response, request_id).await?;
+                        let tool_calls =
+                            extract_tool_calls_from_stream(response, request_id).await?;
 
-                                // ? Convert tool calls to stored format for memory
-                                let stored_tool_calls = if let Some(conv_id) = &conv_id {
-                                    Some(convert_tool_calls_to_stored(&tool_calls, conv_id))
-                                } else {
-                                    None
-                                };
+                        // ? Convert tool calls to stored format for memory
+                        let stored_tool_calls = conv_id
+                            .as_ref()
+                            .map(|conv_id| convert_tool_calls_to_stored(&tool_calls, conv_id));
 
+                        // 存储工具调用到记忆中
+                        if let Some(memory) = &state.memory
+                            && let Some(conv_id) = &conv_id
+                        {
+                            // Convert tool calls to stored format
+                            let stored_tool_calls =
+                                convert_tool_calls_to_stored(tool_calls.as_slice(), conv_id);
 
-                                // 存储工具调用到记忆中
-                                if let Some(memory) = &state.memory {
-                                    if let Some(conv_id) = &conv_id {
-                                        // Convert tool calls to stored format
-                                        let stored_tool_calls = convert_tool_calls_to_stored(tool_calls.as_slice(), conv_id);
+                            let _ = memory
+                                .add_assistant_message(conv_id, "", stored_tool_calls)
+                                .await
+                                .map_err(|e| {
+                                    let err_msg =
+                                        format!("Failed to store tool calls to memory: {e}");
+                                    dual_warn!("{} - request_id: {}", err_msg, request_id);
+                                    ServerError::Operation(err_msg)
+                                })?;
+                        }
 
-                                        let _ = memory.add_assistant_message(conv_id, "", stored_tool_calls).await.map_err(|e| {
-                                            let err_msg = format!("Failed to store tool calls to memory: {e}");
-                                            dual_warn!(
-                                                "{} - request_id: {}",
-                                                err_msg, request_id
-                                            );
-                                            ServerError::Operation(err_msg)
-                                        })?;
-                                    }
-                                }
+                        call_mcp_server(
+                            tool_calls.as_slice(),
+                            &mut request,
+                            &headers,
+                            &chat_server,
+                            request_id,
+                            cancel_token,
+                            conv_id.as_deref(),
+                            user_message.as_deref(),
+                            &state,
+                            stored_tool_calls,
+                        )
+                        .await
+                    } else {
+                        // // Handle normal response in stream mode
+                        // handle_normal_stream(response, status, response_headers, request_id, cancel_token, conv_id.as_deref(), user_message.as_deref(), &state)
+                        //     .await
 
+                        // Handle response body reading with cancellation
+                        let bytes = select! {
+                            bytes = response.bytes() => {
+                                bytes.map_err(|e| {
+                                    let err_msg = format!("Failed to get the full response as bytes: {e}");
+                                    dual_error!("{} - request_id: {}", err_msg, request_id);
+                                    ServerError::Operation(err_msg)
+                                })?
+                            }
+                            _ = cancel_token.cancelled() => {
+                                let warn_msg = "Request was cancelled while reading response";
+                                dual_warn!("{} - request_id: {}", warn_msg, request_id);
+                                return Err(ServerError::Operation(warn_msg.to_string()));
+                            }
+                        };
 
-                                let result = call_mcp_server(
-                                    tool_calls.as_slice(),
-                                    &mut request,
-                                    &headers,
-                                    &chat_server,
-                                    request_id,
-                                    cancel_token,
-                                    conv_id.as_deref(),
-                                    user_message.as_deref(),
-                                    &state,
-                                    stored_tool_calls,
-                                )
-                                .await;
-
-                                result
-                            };
-
-                            result
-                        } else {
-                            // // Handle normal response in stream mode
-                            // handle_normal_stream(response, status, response_headers, request_id, cancel_token, conv_id.as_deref(), user_message.as_deref(), &state)
-                            //     .await
-
-                            let result = {
-                                // Handle response body reading with cancellation
-                                let bytes = select! {
-                                    bytes = response.bytes() => {
-                                        bytes.map_err(|e| {
-                                            let err_msg = format!("Failed to get the full response as bytes: {e}");
-                                            dual_error!("{} - request_id: {}", err_msg, request_id);
-                                            ServerError::Operation(err_msg)
-                                        })?
-                                    }
-                                    _ = cancel_token.cancelled() => {
-                                        let warn_msg = "Request was cancelled while reading response";
-                                        dual_warn!("{} - request_id: {}", warn_msg, request_id);
-                                        return Err(ServerError::Operation(warn_msg.to_string()));
-                                    }
-                                };
-
-                                // Extract assistant message for memory storage in streaming response
-                                if let (Some(conv_id), Some(memory)) = (&conv_id, &state.memory) {
-                                    match std::str::from_utf8(&bytes) {
-                                        Ok(response_text) => match extract_assistant_message_from_stream(response_text) {
-                                            Ok(assistant_message) => {
-                                                let _ = memory.add_assistant_message(&conv_id, &assistant_message, vec![]).await.map_err(|e| {
+                        // Extract assistant message for memory storage in streaming response
+                        if let (Some(conv_id), Some(memory)) = (&conv_id, &state.memory) {
+                            match std::str::from_utf8(&bytes) {
+                                Ok(response_text) => {
+                                    match extract_assistant_message_from_stream(response_text) {
+                                        Ok(assistant_message) => {
+                                            let _ = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await.map_err(|e| {
                                                     dual_warn!(
                                                         "Failed to store streaming response to memory: {} - request_id: {}",
                                                         e, request_id
                                                     );
                                                 });
-                                            }
-                                            Err(e) => {
-                                                let warn_msg = format!("Failed to extract assistant message from streaming response: {} - request_id: {}", e, request_id);
-                                                dual_warn!("{}", warn_msg);
-                                            }
-                                        },
+                                        }
                                         Err(e) => {
-                                            let warn_msg = format!("Failed to parse streaming response as UTF-8: {} - request_id: {}", e, request_id);
+                                            let warn_msg = format!(
+                                                "Failed to extract assistant message from streaming response: {e} - request_id: {request_id}",
+                                            );
                                             dual_warn!("{}", warn_msg);
                                         }
                                     }
                                 }
-
-                                // build the response builder
-                                let response_builder = Response::builder().status(status);
-
-                                // copy the response headers
-                                let response_builder = copy_response_headers(response_builder, &response_headers);
-
-                                match response_builder.body(Body::from(bytes)) {
-                                    Ok(response) => {
-                                        dual_info!(
-                                            "Chat request completed successfully - request_id: {}",
-                                            request_id
-                                        );
-                                        Ok(response)
-                                    }
-                                    Err(e) => {
-                                        let err_msg = format!("Failed to create the response: {e}");
-                                        dual_error!("{} - request_id: {}", err_msg, request_id);
-                                        Err(ServerError::Operation(err_msg))
-                                    }
+                                Err(e) => {
+                                    let warn_msg = format!(
+                                        "Failed to parse streaming response as UTF-8: {e} - request_id: {request_id}",
+                                    );
+                                    dual_warn!("{}", warn_msg);
                                 }
-                            };
+                            }
+                        }
 
-                            result
+                        // build the response builder
+                        let response_builder = Response::builder().status(status);
+
+                        // copy the response headers
+                        let response_builder =
+                            copy_response_headers(response_builder, &response_headers);
+
+                        match response_builder.body(Body::from(bytes)) {
+                            Ok(response) => {
+                                dual_info!(
+                                    "Chat request completed successfully - request_id: {}",
+                                    request_id
+                                );
+                                Ok(response)
+                            }
+                            Err(e) => {
+                                let err_msg = format!("Failed to create the response: {e}");
+                                dual_error!("{} - request_id: {}", err_msg, request_id);
+                                Err(ServerError::Operation(err_msg))
+                            }
                         }
                     }
-                    _ => {
-                        // Convert reqwest::Response to axum::Response
-                        let status = response.status();
-
-                        let err_msg = format!("{status}");
-                        dual_error!("{} - request_id: {}", err_msg, request_id);
-
-                        let headers = response.headers().clone();
-                        let bytes = response.bytes().await.map_err(|e| {
-                            let err_msg = format!("Failed to get response bytes: {e}");
-                            dual_error!("{} - request_id: {}", err_msg, request_id);
-                            ServerError::Operation(err_msg)
-                        })?;
-
-                        build_response(status, headers, bytes, request_id)
-                    }
                 }
-            };
+                _ => {
+                    // Convert reqwest::Response to axum::Response
+                    let status = response.status();
 
-            result
+                    let err_msg = format!("{status}");
+                    dual_error!("{} - request_id: {}", err_msg, request_id);
+
+                    let headers = response.headers().clone();
+                    let bytes = response.bytes().await.map_err(|e| {
+                        let err_msg = format!("Failed to get response bytes: {e}");
+                        dual_error!("{} - request_id: {}", err_msg, request_id);
+                        ServerError::Operation(err_msg)
+                    })?;
+
+                    build_response(status, headers, bytes, request_id)
+                }
+            }
         }
         Some(false) | None => {
             // // Handle non-stream response
@@ -432,112 +438,117 @@ pub(crate) async fn chat(
             // )
             // .await
 
-            let result = {
-                let status = response.status();
+            let status = response.status();
 
-                // check the status code
-                match status {
-                    StatusCode::OK => {
-                        let response_headers = response.headers().clone();
+            // check the status code
+            match status {
+                StatusCode::OK => {
+                    let response_headers = response.headers().clone();
 
-                        // Read the response body
-                        let bytes = read_response_bytes(response, request_id, cancel_token.clone()).await?;
-                        let chat_completion = parse_chat_completion(&bytes, request_id)?;
+                    // Read the response body
+                    let bytes =
+                        read_response_bytes(response, request_id, cancel_token.clone()).await?;
+                    let chat_completion = parse_chat_completion(&bytes, request_id)?;
 
-                        // Check if the response requires tool call
-                        let requires_tool_call = !chat_completion.choices[0].message.tool_calls.is_empty();
+                    // Check if the response requires tool call
+                    let requires_tool_call =
+                        !chat_completion.choices[0].message.tool_calls.is_empty();
 
-                        if requires_tool_call {
-                            // ? Convert tool calls to stored format for memory
-                            let stored_tool_calls = if let Some(conv_id) = &conv_id {
-                                Some(convert_tool_calls_to_stored(&chat_completion.choices[0].message.tool_calls, conv_id))
-                            } else {
-                                None
-                            };
-
-                            // // 存储工具调用到记忆中
-                            // if let Some(memory) = &state.memory {
-                            //     if let Some(conv_id) = &conv_id {
-                            //         // Convert tool calls to stored format
-                            //         let stored_tool_calls = convert_tool_calls_to_stored(&chat_completion.choices[0].message.tool_calls, conv_id);
-
-                            //         let _ = memory.add_assistant_message(conv_id, "", stored_tool_calls).await.map_err(|e| {
-                            //             let err_msg = format!("Failed to store tool calls to memory: {e}");
-                            //             dual_warn!(
-                            //                 "{} - request_id: {}",
-                            //                 err_msg, request_id
-                            //             );
-                            //             ServerError::Operation(err_msg)
-                            //         })?;
-                            //     }
-                            // }
-
-                            call_mcp_server(
-                                chat_completion.choices[0].message.tool_calls.as_slice(),
-                                &mut request,
-                                &headers,
-                                &chat_server,
-                                request_id,
-                                cancel_token,
-                                conv_id.as_deref(),
-                                user_message.as_deref(),
-                                &state,
-                                stored_tool_calls,
-                            )
-                            .await
+                    if requires_tool_call {
+                        // ? Convert tool calls to stored format for memory
+                        let stored_tool_calls = if let Some(conv_id) = &conv_id {
+                            Some(convert_tool_calls_to_stored(
+                                &chat_completion.choices[0].message.tool_calls,
+                                conv_id,
+                            ))
                         } else {
-                            // 存储助手消息到记忆中
-                            if let Some(memory) = &state.memory {
-                                if let Some(conv_id) = &conv_id {
-                                    if let Some(assistant_msg) = &chat_completion.choices[0].message.content {
-                                        let _ = memory.add_assistant_message(conv_id, assistant_msg, vec![]).await.map_err(|e| {
-                                            let err_msg = format!("Failed to store assistant message to memory: {e}");
-                                            dual_warn!(
-                                                "{} - request_id: {}",
-                                                err_msg, request_id
-                                            );
-                                        });
-                                    }
-                                }
-                            }
+                            None
+                        };
 
-                            // Handle normal response in non-stream mode
-                            build_response(status, response_headers, bytes, request_id)
+                        // // 存储工具调用到记忆中
+                        // if let Some(memory) = &state.memory {
+                        //     if let Some(conv_id) = &conv_id {
+                        //         // Convert tool calls to stored format
+                        //         let stored_tool_calls = convert_tool_calls_to_stored(&chat_completion.choices[0].message.tool_calls, conv_id);
+
+                        //         let _ = memory.add_assistant_message(conv_id, "", stored_tool_calls).await.map_err(|e| {
+                        //             let err_msg = format!("Failed to store tool calls to memory: {e}");
+                        //             dual_warn!(
+                        //                 "{} - request_id: {}",
+                        //                 err_msg, request_id
+                        //             );
+                        //             ServerError::Operation(err_msg)
+                        //         })?;
+                        //     }
+                        // }
+
+                        call_mcp_server(
+                            chat_completion.choices[0].message.tool_calls.as_slice(),
+                            &mut request,
+                            &headers,
+                            &chat_server,
+                            request_id,
+                            cancel_token,
+                            conv_id.as_deref(),
+                            user_message.as_deref(),
+                            &state,
+                            stored_tool_calls,
+                        )
+                        .await
+                    } else {
+                        // 存储助手消息到记忆中
+                        if let Some(memory) = &state.memory
+                            && let Some(conv_id) = &conv_id
+                            && let Some(assistant_msg) = &chat_completion.choices[0].message.content
+                        {
+                            let _ = memory
+                                .add_assistant_message(conv_id, assistant_msg, vec![])
+                                .await
+                                .map_err(|e| {
+                                    let err_msg =
+                                        format!("Failed to store assistant message to memory: {e}");
+                                    dual_warn!("{} - request_id: {}", err_msg, request_id);
+                                });
                         }
-                    }
-                    _ => {
-                        // Convert reqwest::Response to axum::Response
-                        let status = response.status();
 
-                        let err_msg = format!("{status}");
-                        dual_error!("{} - request_id: {}", err_msg, request_id);
-
-                        let headers = response.headers().clone();
-                        let bytes = response.bytes().await.map_err(|e| {
-                            let err_msg = format!("Failed to get response bytes: {e}");
-                            dual_error!("{} - request_id: {}", err_msg, request_id);
-                            ServerError::Operation(err_msg)
-                        })?;
-
-                        build_response(status, headers, bytes, request_id)
+                        // Handle normal response in non-stream mode
+                        build_response(status, response_headers, bytes, request_id)
                     }
                 }
-            };
+                _ => {
+                    // Convert reqwest::Response to axum::Response
+                    let status = response.status();
 
-            result
+                    let err_msg = format!("{status}");
+                    dual_error!("{} - request_id: {}", err_msg, request_id);
+
+                    let headers = response.headers().clone();
+                    let bytes = response.bytes().await.map_err(|e| {
+                        let err_msg = format!("Failed to get response bytes: {e}");
+                        dual_error!("{} - request_id: {}", err_msg, request_id);
+                        ServerError::Operation(err_msg)
+                    })?;
+
+                    build_response(status, headers, bytes, request_id)
+                }
+            }
         }
     };
 
     // ! print full chat history
-    if let Some(memory) = &state.memory {
-        if let Some(conv_id) = &conv_id {
-            let chat_history = memory.get_full_history(conv_id).await.map_err(|e| {
-                let err_msg = format!("Failed to get chat history: {e}");
-                dual_error!("{} - request_id: {}", err_msg, request_id);
-                ServerError::Operation(err_msg)
-            })?;
-            dual_info!("Chat history - request_id: {}\n{}", request_id, serde_json::to_string_pretty(&chat_history).unwrap());
-        }
+    if let Some(memory) = &state.memory
+        && let Some(conv_id) = &conv_id
+    {
+        let chat_history = memory.get_full_history(conv_id).await.map_err(|e| {
+            let err_msg = format!("Failed to get chat history: {e}");
+            dual_error!("{} - request_id: {}", err_msg, request_id);
+            ServerError::Operation(err_msg)
+        })?;
+        dual_info!(
+            "Chat history - request_id: {}\n{}",
+            request_id,
+            serde_json::to_string_pretty(&chat_history).unwrap()
+        );
     }
 
     response_result
@@ -1295,12 +1306,21 @@ pub(crate) async fn get_conversation_history_handler(
         .unwrap_or("unknown")
         .to_string();
 
-    dual_info!("Getting conversation history for conv_id: {} - request_id: {}", conv_id, request_id);
+    dual_info!(
+        "Getting conversation history for conv_id: {} - request_id: {}",
+        conv_id,
+        request_id
+    );
 
     if let Some(memory) = &state.memory {
         match memory.get_full_history(&conv_id).await {
             Ok(messages) => {
-                dual_info!("Retrieved {} messages for conversation {} - request_id: {}", messages.len(), conv_id, request_id);
+                dual_info!(
+                    "Retrieved {} messages for conversation {} - request_id: {}",
+                    messages.len(),
+                    conv_id,
+                    request_id
+                );
 
                 let response = serde_json::json!({
                     "conversation_id": conv_id,
@@ -1318,13 +1338,21 @@ pub(crate) async fn get_conversation_history_handler(
                     })
             }
             Err(e) => {
-                dual_error!("Failed to get conversation history for {}: {} - request_id: {}", conv_id, e, request_id);
+                dual_error!(
+                    "Failed to get conversation history for {}: {} - request_id: {}",
+                    conv_id,
+                    e,
+                    request_id
+                );
                 Response::builder()
                     .status(StatusCode::NOT_FOUND)
                     .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::json!({
-                        "error": format!("Conversation not found: {}", e)
-                    }).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "error": format!("Conversation not found: {}", e)
+                        })
+                        .to_string(),
+                    ))
                     .map_err(|e| {
                         let err_msg = format!("Failed to create error response: {e}");
                         dual_error!("{err_msg} - request_id: {request_id}");
@@ -1337,9 +1365,12 @@ pub(crate) async fn get_conversation_history_handler(
         Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::json!({
-                "error": "Memory system is not enabled"
-            }).to_string()))
+            .body(Body::from(
+                serde_json::json!({
+                    "error": "Memory system is not enabled"
+                })
+                .to_string(),
+            ))
             .map_err(|e| {
                 let err_msg = format!("Failed to create error response: {e}");
                 dual_error!("{err_msg} - request_id: {request_id}");
@@ -1360,12 +1391,21 @@ pub(crate) async fn get_user_history_handler(
         .unwrap_or("unknown")
         .to_string();
 
-    dual_info!("Getting user history for user_id: {} - request_id: {}", user_id, request_id);
+    dual_info!(
+        "Getting user history for user_id: {} - request_id: {}",
+        user_id,
+        request_id
+    );
 
     if let Some(memory) = &state.memory {
         match memory.get_user_full_history(&user_id).await {
             Ok(messages) => {
-                dual_info!("Retrieved {} messages for user {} - request_id: {}", messages.len(), user_id, request_id);
+                dual_info!(
+                    "Retrieved {} messages for user {} - request_id: {}",
+                    messages.len(),
+                    user_id,
+                    request_id
+                );
 
                 let response = serde_json::json!({
                     "user_id": user_id,
@@ -1383,13 +1423,21 @@ pub(crate) async fn get_user_history_handler(
                     })
             }
             Err(e) => {
-                dual_error!("Failed to get user history for {}: {} - request_id: {}", user_id, e, request_id);
+                dual_error!(
+                    "Failed to get user history for {}: {} - request_id: {}",
+                    user_id,
+                    e,
+                    request_id
+                );
                 Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::json!({
-                        "error": format!("Failed to retrieve user history: {}", e)
-                    }).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "error": format!("Failed to retrieve user history: {}", e)
+                        })
+                        .to_string(),
+                    ))
                     .map_err(|e| {
                         let err_msg = format!("Failed to create error response: {e}");
                         dual_error!("{err_msg} - request_id: {request_id}");
@@ -1402,9 +1450,12 @@ pub(crate) async fn get_user_history_handler(
         Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::json!({
-                "error": "Memory system is not enabled"
-            }).to_string()))
+            .body(Body::from(
+                serde_json::json!({
+                    "error": "Memory system is not enabled"
+                })
+                .to_string(),
+            ))
             .map_err(|e| {
                 let err_msg = format!("Failed to create error response: {e}");
                 dual_error!("{err_msg} - request_id: {request_id}");
@@ -1426,17 +1477,24 @@ pub(crate) async fn list_user_conversations_handler(
         .unwrap_or("unknown")
         .to_string();
 
-    dual_info!("Listing conversations for user_id: {} - request_id: {}", user_id, request_id);
+    dual_info!(
+        "Listing conversations for user_id: {} - request_id: {}",
+        user_id,
+        request_id
+    );
 
     // Parse limit parameter
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<usize>().ok());
+    let limit = params.get("limit").and_then(|s| s.parse::<usize>().ok());
 
     if let Some(memory) = &state.memory {
         match memory.list_user_conversations(&user_id, limit).await {
             Ok(conversations) => {
-                dual_info!("Retrieved {} conversations for user {} - request_id: {}", conversations.len(), user_id, request_id);
+                dual_info!(
+                    "Retrieved {} conversations for user {} - request_id: {}",
+                    conversations.len(),
+                    user_id,
+                    request_id
+                );
 
                 let response = serde_json::json!({
                     "user_id": user_id,
@@ -1455,13 +1513,21 @@ pub(crate) async fn list_user_conversations_handler(
                     })
             }
             Err(e) => {
-                dual_error!("Failed to list conversations for user {}: {} - request_id: {}", user_id, e, request_id);
+                dual_error!(
+                    "Failed to list conversations for user {}: {} - request_id: {}",
+                    user_id,
+                    e,
+                    request_id
+                );
                 Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::json!({
-                        "error": format!("Failed to retrieve user conversations: {}", e)
-                    }).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "error": format!("Failed to retrieve user conversations: {}", e)
+                        })
+                        .to_string(),
+                    ))
                     .map_err(|e| {
                         let err_msg = format!("Failed to create error response: {e}");
                         dual_error!("{err_msg} - request_id: {request_id}");
@@ -1474,9 +1540,12 @@ pub(crate) async fn list_user_conversations_handler(
         Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::json!({
-                "error": "Memory system is not enabled"
-            }).to_string()))
+            .body(Body::from(
+                serde_json::json!({
+                    "error": "Memory system is not enabled"
+                })
+                .to_string(),
+            ))
             .map_err(|e| {
                 let err_msg = format!("Failed to create error response: {e}");
                 dual_error!("{err_msg} - request_id: {request_id}");
@@ -1888,15 +1957,14 @@ fn extract_user_message(request: &ChatCompletionRequest) -> Option<String> {
                     ChatCompletionUserMessageContent::Text(text) => Some(text.clone()),
                     ChatCompletionUserMessageContent::Parts(parts) => {
                         // 提取文本部分
-                        let text_parts: Vec<String> = parts.iter().filter_map(|part| {
-                            // 简化处理，直接尝试转换为字符串
-                            // 这里可能需要根据实际的part类型来处理
-                            if let Ok(text) = serde_json::to_string(part) {
-                                Some(text)
-                            } else {
-                                None
-                            }
-                        }).collect();
+                        let text_parts: Vec<String> = parts
+                            .iter()
+                            .filter_map(|part| {
+                                // 简化处理，直接尝试转换为字符串
+                                // 这里可能需要根据实际的part类型来处理
+                                serde_json::to_string(part).ok()
+                            })
+                            .collect();
                         if text_parts.is_empty() {
                             None
                         } else {
@@ -1915,20 +1983,24 @@ fn convert_tool_calls_to_stored(
     tool_calls: &[ToolCall],
     _conv_id: &str, // 预留参数，可能用于会话上下文
 ) -> Vec<StoredToolCall> {
-    tool_calls.iter().enumerate().map(|(idx, tc)| {
-        let arguments = match serde_json::from_str(&tc.function.arguments) {
-            Ok(value) => value,
-            Err(_) => serde_json::Value::String(tc.function.arguments.clone()),
-        };
+    tool_calls
+        .iter()
+        .enumerate()
+        .map(|(idx, tc)| {
+            let arguments = match serde_json::from_str(&tc.function.arguments) {
+                Ok(value) => value,
+                Err(_) => serde_json::Value::String(tc.function.arguments.clone()),
+            };
 
-        StoredToolCall {
-            id: tc.id.clone(),
-            name: tc.function.name.clone(),
-            arguments,
-            result: None, // 工具结果稍后添加
-            sequence: idx as i32,
-        }
-    }).collect()
+            StoredToolCall {
+                id: tc.id.clone(),
+                name: tc.function.name.clone(),
+                arguments,
+                result: None, // 工具结果稍后添加
+                sequence: idx as i32,
+            }
+        })
+        .collect()
 }
 
 /// Add tool results to stored tool calls
@@ -1948,6 +2020,7 @@ fn add_tool_results_to_stored(
 }
 
 /// Store messages to memory
+#[allow(dead_code)]
 async fn store_messages_to_memory(
     state: &Arc<AppState>,
     conv_id: &str,
@@ -1961,10 +2034,17 @@ async fn store_messages_to_memory(
         if let Some(user_content) = user_message {
             match memory.add_user_message(conv_id, user_content).await {
                 Ok(_) => {
-                    dual_debug!("Successfully stored user message to memory - request_id: {}", request_id);
+                    dual_debug!(
+                        "Successfully stored user message to memory - request_id: {}",
+                        request_id
+                    );
                 }
                 Err(e) => {
-                    dual_warn!("Failed to store user message to memory: {} - request_id: {}", e, request_id);
+                    dual_warn!(
+                        "Failed to store user message to memory: {} - request_id: {}",
+                        e,
+                        request_id
+                    );
                 }
             }
         }
@@ -1972,22 +2052,42 @@ async fn store_messages_to_memory(
         // 存储助手消息（可能包含工具调用）
         if let Some(assistant_content) = &assistant_message {
             let stored_tool_calls = tool_calls.unwrap_or_default();
-            match memory.add_assistant_message(conv_id, assistant_content, stored_tool_calls).await {
+            match memory
+                .add_assistant_message(conv_id, assistant_content, stored_tool_calls)
+                .await
+            {
                 Ok(_) => {
-                    dual_debug!("Successfully stored assistant message to memory - request_id: {}", request_id);
+                    dual_debug!(
+                        "Successfully stored assistant message to memory - request_id: {}",
+                        request_id
+                    );
                 }
                 Err(e) => {
-                    dual_warn!("Failed to store assistant message to memory: {} - request_id: {}", e, request_id);
+                    dual_warn!(
+                        "Failed to store assistant message to memory: {} - request_id: {}",
+                        e,
+                        request_id
+                    );
                 }
             }
         } else if let Some(stored_tool_calls) = tool_calls {
             // 当没有assistant_message但有tool_calls时，存储一个空内容的助手消息来保存工具调用信息
-            match memory.add_assistant_message(conv_id, "", stored_tool_calls).await {
+            match memory
+                .add_assistant_message(conv_id, "", stored_tool_calls)
+                .await
+            {
                 Ok(_) => {
-                    dual_debug!("Successfully stored tool calls to memory (no assistant message) - request_id: {}", request_id);
+                    dual_debug!(
+                        "Successfully stored tool calls to memory (no assistant message) - request_id: {}",
+                        request_id
+                    );
                 }
                 Err(e) => {
-                    dual_warn!("Failed to store tool calls to memory: {} - request_id: {}", e, request_id);
+                    dual_warn!(
+                        "Failed to store tool calls to memory: {} - request_id: {}",
+                        e,
+                        request_id
+                    );
                 }
             }
         }
@@ -2045,6 +2145,7 @@ async fn get_chat_server(
 /// * Tool call deserialization error: Try disabling tool choice and retry
 /// * Other errors: Return error directly, no retry
 /// * Retry logic: Maximum one retry to avoid infinite loops
+#[allow(dead_code)]
 async fn send_request_with_retry(
     chat_server: &TargetServerInfo,
     request: &mut ChatCompletionRequest,
@@ -2140,6 +2241,7 @@ async fn send_request_with_retry(
 /// * When cancel_token is triggered, function immediately returns cancellation error
 /// * Cancellation logs warning messages for debugging and monitoring
 /// * Cancellation operation releases related resources to prevent leaks
+#[allow(dead_code)]
 async fn build_and_send_request(
     chat_server: &TargetServerInfo,
     request: &ChatCompletionRequest,
@@ -2197,6 +2299,8 @@ async fn build_and_send_request(
 /// * `chat_service_url` - Chat service URL
 /// * `request_id` - Request ID
 /// * `cancel_token` - Cancellation token
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 async fn handle_stream_response(
     response: reqwest::Response,
     request: &mut ChatCompletionRequest,
@@ -2234,8 +2338,17 @@ async fn handle_stream_response(
                 .await
             } else {
                 // Handle normal response in stream mode
-                handle_normal_stream(response, status, response_headers, request_id, cancel_token, conv_id, user_message, state)
-                    .await
+                handle_normal_stream(
+                    response,
+                    status,
+                    response_headers,
+                    request_id,
+                    cancel_token,
+                    conv_id,
+                    user_message,
+                    state,
+                )
+                .await
             }
         }
         _ => {
@@ -2293,6 +2406,8 @@ async fn handle_stream_response(
 /// * Cancellation operation: Log warning and return cancellation error
 /// * Tool call error: Decide whether to continue based on error type
 /// * Response building error: Return build failure error
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 async fn handle_non_stream_response(
     response: reqwest::Response,
     request: &mut ChatCompletionRequest,
@@ -2321,7 +2436,10 @@ async fn handle_non_stream_response(
             if requires_tool_call {
                 // Convert tool calls to stored format for memory
                 let stored_tool_calls = if let Some(conv_id) = conv_id {
-                    Some(convert_tool_calls_to_stored(&chat_completion.choices[0].message.tool_calls, conv_id))
+                    Some(convert_tool_calls_to_stored(
+                        &chat_completion.choices[0].message.tool_calls,
+                        conv_id,
+                    ))
                 } else {
                     None
                 };
@@ -2344,19 +2462,19 @@ async fn handle_non_stream_response(
                 let assistant_message = chat_completion.choices[0].message.content.clone();
 
                 // 存储助手消息到记忆中
-                if let Some(memory) = &state.memory {
-                    if let Some(conv_id) = conv_id {
-                        if let Some(assistant_msg) = &assistant_message {
-                            let _ = memory.add_assistant_message(conv_id, assistant_msg, vec![]).await.map_err(|e| {
-                                let err_msg = format!("Failed to store assistant message to memory: {e}");
-                                dual_warn!(
-                                    "{} - request_id: {}",
-                                    err_msg, request_id
-                                );
-                                ServerError::Operation(err_msg)
-                            })?;
-                        }
-                    }
+                if let Some(memory) = &state.memory
+                    && let Some(conv_id) = conv_id
+                    && let Some(assistant_msg) = &assistant_message
+                {
+                    let _ = memory
+                        .add_assistant_message(conv_id, assistant_msg, vec![])
+                        .await
+                        .map_err(|e| {
+                            let err_msg =
+                                format!("Failed to store assistant message to memory: {e}");
+                            dual_warn!("{} - request_id: {}", err_msg, request_id);
+                            ServerError::Operation(err_msg)
+                        })?;
                 }
 
                 // Handle normal response in non-stream mode
@@ -2395,6 +2513,8 @@ async fn handle_non_stream_response(
 /// * `chat_server` - Chat server information
 /// * `request_id` - Request ID
 /// * `cancel_token` - Cancellation token
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 async fn handle_tool_call_stream(
     response: reqwest::Response,
     request: &mut ChatCompletionRequest,
@@ -2409,13 +2529,10 @@ async fn handle_tool_call_stream(
     let tool_calls = extract_tool_calls_from_stream(response, request_id).await?;
 
     // Convert tool calls to stored format for memory
-    let stored_tool_calls = if let Some(conv_id) = conv_id {
-        Some(convert_tool_calls_to_stored(&tool_calls, conv_id))
-    } else {
-        None
-    };
+    let stored_tool_calls =
+        conv_id.map(|conv_id| convert_tool_calls_to_stored(&tool_calls, conv_id));
 
-    let result = call_mcp_server(
+    call_mcp_server(
         tool_calls.as_slice(),
         request,
         headers,
@@ -2427,9 +2544,7 @@ async fn handle_tool_call_stream(
         state,
         stored_tool_calls.clone(),
     )
-    .await;
-
-    result
+    .await
 }
 
 /// Parse tool call identifier from HTTP response headers
@@ -2444,6 +2559,8 @@ fn parse_requires_tool_call_header(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 async fn handle_normal_stream(
     response: reqwest::Response,
     status: StatusCode,
@@ -2471,24 +2588,24 @@ async fn handle_normal_stream(
     };
 
     // Extract assistant message for memory storage in streaming response
-    if let (Some(conv_id), Some(user_msg), Some(_)) = (conv_id, user_message, &state.memory) {
-        if let Ok(response_text) = std::str::from_utf8(&bytes) {
-            if let Ok(assistant_message) = extract_assistant_message_from_stream(response_text) {
-                if let Err(e) = store_messages_to_memory(
-                    state,
-                    conv_id,
-                    Some(user_msg.to_string()),
-                    Some(assistant_message),
-                    None,
-                    request_id,
-                ).await {
-                    dual_warn!(
-                        "Failed to store streaming response to memory: {} - request_id: {}",
-                        e, request_id
-                    );
-                }
-            }
-        }
+    if let (Some(conv_id), Some(user_msg), Some(_)) = (conv_id, user_message, &state.memory)
+        && let Ok(response_text) = std::str::from_utf8(&bytes)
+        && let Ok(assistant_message) = extract_assistant_message_from_stream(response_text)
+        && let Err(e) = store_messages_to_memory(
+            state,
+            conv_id,
+            Some(user_msg.to_string()),
+            Some(assistant_message),
+            None,
+            request_id,
+        )
+        .await
+    {
+        dual_warn!(
+            "Failed to store streaming response to memory: {} - request_id: {}",
+            e,
+            request_id
+        );
     }
 
     // build the response builder
@@ -2522,35 +2639,28 @@ fn extract_assistant_message_from_stream(response_text: &str) -> ServerResult<St
 
     // Parse SSE format response
     for line in response_text.lines() {
-        if line.starts_with("data: ") {
-            let data_part = &line[6..]; // Remove "data: " prefix
-
+        if let Some(data_part) = line.strip_prefix("data: ") {
             // Skip [DONE] marker
             if data_part.trim() == "[DONE]" {
                 continue;
             }
 
             // Try to parse as JSON
-            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data_part) {
-                // Extract content from choices array
-                if let Some(choices) = chunk.get("choices") {
-                    if let Some(choice) = choices.get(0) {
-                        if let Some(delta) = choice.get("delta") {
-                            if let Some(content) = delta.get("content") {
-                                if let Some(content_str) = content.as_str() {
-                                    content_parts.push(content_str.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
+            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data_part)
+                && let Some(choices) = chunk.get("choices")
+                && let Some(choice) = choices.get(0)
+                && let Some(delta) = choice.get("delta")
+                && let Some(content) = delta.get("content")
+                && let Some(content_str) = content.as_str()
+            {
+                content_parts.push(content_str.to_string());
             }
         }
     }
 
     if content_parts.is_empty() {
         return Err(ServerError::Operation(
-            "No assistant message content found in streaming response".to_string()
+            "No assistant message content found in streaming response".to_string(),
         ));
     }
 
@@ -2561,6 +2671,7 @@ fn extract_assistant_message_from_stream(response_text: &str) -> ServerResult<St
 ///
 /// This function handles both streaming and non-streaming responses, extracting the assistant message
 /// and storing it to memory if all required conditions are met.
+#[allow(dead_code)]
 async fn extract_and_store_final_assistant_message(
     bytes: &Bytes,
     request: &ChatCompletionRequest,
@@ -2578,12 +2689,14 @@ async fn extract_and_store_final_assistant_message(
                 } else {
                     None
                 }
-            },
+            }
             Some(false) | None => {
                 // For non-streaming responses, parse JSON
                 let bytes_obj = Bytes::from(bytes.to_vec());
                 if let Ok(chat_completion) = parse_chat_completion(&bytes_obj, request_id) {
-                    chat_completion.choices.first()
+                    chat_completion
+                        .choices
+                        .first()
                         .and_then(|choice| choice.message.content.clone())
                 } else {
                     None
@@ -2600,7 +2713,8 @@ async fn extract_and_store_final_assistant_message(
                 Some(final_response),
                 None, // No tool calls in the final response
                 request_id,
-            ).await;
+            )
+            .await;
         }
     }
 }
@@ -2788,6 +2902,7 @@ fn copy_response_headers(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn call_mcp_server(
     tool_calls: &[ToolCall],
     request: &mut ChatCompletionRequest,
@@ -2796,7 +2911,7 @@ async fn call_mcp_server(
     request_id: impl AsRef<str>,
     cancel_token: CancellationToken,
     conv_id: Option<&str>,
-    user_message: Option<&str>,
+    _user_message: Option<&str>,
     state: &Arc<AppState>,
     mut stored_tool_calls: Option<Vec<StoredToolCall>>,
 ) -> ServerResult<axum::response::Response> {
@@ -2906,9 +3021,14 @@ async fn call_mcp_server(
                                         dual_info!("The mcp tool call result: {:#?}", text.text);
 
                                         // 存储工具调用及结果到记忆中
-                                        if let (Some(conv_id), Some(mut stored_tcs), Some(memory)) = (conv_id, stored_tool_calls.as_mut(), &state.memory) {
+                                        if let (Some(conv_id), Some(stored_tcs), Some(memory)) =
+                                            (conv_id, stored_tool_calls.as_mut(), &state.memory)
+                                        {
                                             // Add tool results to stored tool calls
-                                            add_tool_results_to_stored(&mut stored_tcs, &[text.text.clone()]);
+                                            add_tool_results_to_stored(
+                                                stored_tcs,
+                                                std::slice::from_ref(&text.text),
+                                            );
 
                                             let _ = memory.add_assistant_message(conv_id, "", stored_tcs.clone()).await.map_err(|e| {
                                                 dual_warn!(
@@ -3122,9 +3242,13 @@ async fn call_mcp_server(
                                                     }
                                                 }
 
-                                                match response_builder.body(Body::from(bytes.clone())) {
+                                                match response_builder
+                                                    .body(Body::from(bytes.clone()))
+                                                {
                                                     Ok(response) => {
-                                                        if let (Some(conv_id), Some(memory)) = (conv_id, &state.memory) {
+                                                        if let (Some(conv_id), Some(memory)) =
+                                                            (conv_id, &state.memory)
+                                                        {
                                                             // 存储最终的助手消息到记忆中
                                                             match request.stream {
                                                                 Some(true) => {
@@ -3133,18 +3257,18 @@ async fn call_mcp_server(
                                                                             match extract_assistant_message_from_stream(response_text) {
                                                                                 Ok(assistant_message) => {
                                                                                     if let Err(e) = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await {
-                                                                                        let warn_msg = format!("Failed to add assistant message to memory: {}", e);
+                                                                                        let warn_msg = format!("Failed to add assistant message to memory: {e}");
                                                                                         dual_warn!("{} - request_id: {}", warn_msg, request_id);
                                                                                     }
                                                                                 }
                                                                                 Err(e) => {
-                                                                                    let warn_msg = format!("Failed to extract assistant message from stream: {}", e);
+                                                                                    let warn_msg = format!("Failed to extract assistant message from stream: {e}");
                                                                                     dual_warn!("{} - request_id: {}", warn_msg, request_id);
                                                                                 }
                                                                             }
                                                                         },
                                                                         Err(e) => {
-                                                                            let warn_msg = format!("Failed to parse SSE stream: {}", e);
+                                                                            let warn_msg = format!("Failed to parse SSE stream: {e}");
                                                                             dual_warn!("{} - request_id: {}", warn_msg, request_id);
                                                                         }
                                                                     }
@@ -3152,15 +3276,13 @@ async fn call_mcp_server(
                                                                 Some(false) | None => {
                                                                     match parse_chat_completion(&bytes, request_id) {
                                                                         Ok(chat_completion) => {
-                                                                            if let Some(assistant_message) = chat_completion.choices.first().and_then(|choice| choice.message.content.clone()) {
-                                                                                if let Err(e) = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await {
-                                                                                    let warn_msg = format!("Failed to add assistant message to memory: {}", e);
+                                                                            if let Some(assistant_message) = chat_completion.choices.first().and_then(|choice| choice.message.content.clone()) && let Err(e) = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await {
+                                                                                    let warn_msg = format!("Failed to add assistant message to memory: {e}");
                                                                                     dual_warn!("{} - request_id: {}", warn_msg, request_id);
                                                                                 }
-                                                                            }
                                                                         },
                                                                         Err(e) => {
-                                                                            let warn_msg = format!("Failed to parse chat completion: {}", e);
+                                                                            let warn_msg = format!("Failed to parse chat completion: {e}");
                                                                             dual_warn!("{} - request_id: {}", warn_msg, request_id);
                                                                         }
                                                                     }
@@ -3296,9 +3418,13 @@ async fn call_mcp_server(
                                                     }
                                                 };
 
-                                                match response_builder.body(Body::from(bytes.clone())) {
+                                                match response_builder
+                                                    .body(Body::from(bytes.clone()))
+                                                {
                                                     Ok(response) => {
-                                                        if let (Some(conv_id), Some(memory)) = (conv_id, &state.memory) {
+                                                        if let (Some(conv_id), Some(memory)) =
+                                                            (conv_id, &state.memory)
+                                                        {
                                                             // 存储最终的助手消息到记忆中
                                                             match request.stream {
                                                                 Some(true) => {
@@ -3307,18 +3433,18 @@ async fn call_mcp_server(
                                                                             match extract_assistant_message_from_stream(response_text) {
                                                                                 Ok(assistant_message) => {
                                                                                     if let Err(e) = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await {
-                                                                                        let warn_msg = format!("Failed to add assistant message to memory: {}", e);
+                                                                                        let warn_msg = format!("Failed to add assistant message to memory: {e}");
                                                                                         dual_warn!("{} - request_id: {}", warn_msg, request_id);
                                                                                     }
                                                                                 }
                                                                                 Err(e) => {
-                                                                                    let warn_msg = format!("Failed to extract assistant message from stream: {}", e);
+                                                                                    let warn_msg = format!("Failed to extract assistant message from stream: {e}");
                                                                                     dual_warn!("{} - request_id: {}", warn_msg, request_id);
                                                                                 }
                                                                             }
                                                                         },
                                                                         Err(e) => {
-                                                                            let warn_msg = format!("Failed to parse SSE stream: {}", e);
+                                                                            let warn_msg = format!("Failed to parse SSE stream: {e}");
                                                                             dual_warn!("{} - request_id: {}", warn_msg, request_id);
                                                                         }
                                                                     }
@@ -3326,15 +3452,14 @@ async fn call_mcp_server(
                                                                 Some(false) | None => {
                                                                     match parse_chat_completion(&bytes, request_id) {
                                                                         Ok(chat_completion) => {
-                                                                            if let Some(assistant_message) = chat_completion.choices.first().and_then(|choice| choice.message.content.clone()) {
-                                                                                if let Err(e) = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await {
-                                                                                    let warn_msg = format!("Failed to add assistant message to memory: {}", e);
+                                                                            if let Some(assistant_message) = chat_completion.choices.first().and_then(|choice| choice.message.content.clone()) && let Err(e) = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await {
+                                                                                    let warn_msg = format!("Failed to add assistant message to memory: {e}");
                                                                                     dual_warn!("{} - request_id: {}", warn_msg, request_id);
                                                                                 }
-                                                                            }
+
                                                                         },
                                                                         Err(e) => {
-                                                                            let warn_msg = format!("Failed to parse chat completion: {}", e);
+                                                                            let warn_msg = format!("Failed to parse chat completion: {e}");
                                                                             dual_warn!("{} - request_id: {}", warn_msg, request_id);
                                                                         }
                                                                     }

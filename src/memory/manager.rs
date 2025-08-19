@@ -1,8 +1,13 @@
-use crate::{config::MemoryConfig, memory::{store::MessageStore, summarizer::MessageSummarizer, types::*}};
 use std::collections::HashMap;
+
+use chrono::Utc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use chrono::Utc;
+
+use crate::{
+    config::MemoryConfig,
+    memory::{store::MessageStore, summarizer::MessageSummarizer, types::*},
+};
 
 /// 完整的聊天记忆管理器
 ///
@@ -123,7 +128,12 @@ impl CompleteChatMemory {
     /// 4. 设置初始的上下文参数（如最大 token 数等）
     ///
     /// 创建的对话具有空的消息历史和上下文缓存。
-    pub async fn create_conversation(&self, model_name: &str, user_id: Option<String>, title: Option<String>) -> MemoryResult<String> {
+    pub async fn create_conversation(
+        &self,
+        model_name: &str,
+        user_id: Option<String>,
+        title: Option<String>,
+    ) -> MemoryResult<String> {
         let conv_id = Uuid::new_v4().to_string();
         let conversation = StoredConversation {
             id: conv_id.clone(),
@@ -149,7 +159,10 @@ impl CompleteChatMemory {
             max_context_tokens: self.max_context_tokens(),
         };
 
-        self.context_cache.lock().await.insert(conv_id.clone(), context);
+        self.context_cache
+            .lock()
+            .await
+            .insert(conv_id.clone(), context);
 
         Ok(conv_id)
     }
@@ -175,14 +188,19 @@ impl CompleteChatMemory {
         model_name: &str,
     ) -> MemoryResult<String> {
         // 尝试获取用户的任何对话（不区分模型）
-        if let Some(recent_conv) = self.store.get_recent_conversation_by_user(user_id, None).await? {
+        if let Some(recent_conv) = self
+            .store
+            .get_recent_conversation_by_user(user_id, None)
+            .await?
+        {
             // 对话存在，直接复用，确保其在缓存中
             self.ensure_conversation_in_cache(&recent_conv.id).await?;
             return Ok(recent_conv.id);
         }
 
         // 没有找到对话，创建新的
-        self.create_conversation(model_name, Some(user_id.to_string()), None).await
+        self.create_conversation(model_name, Some(user_id.to_string()), None)
+            .await
     }
 
     /// 确保对话在缓存中
@@ -203,7 +221,10 @@ impl CompleteChatMemory {
             let conversation = self.store.get_conversation(conv_id).await?;
 
             // 加载最近的消息到工作上下文
-            let recent_messages = self.store.get_recent_messages(conv_id, self.max_working_messages()).await?;
+            let recent_messages = self
+                .store
+                .get_recent_messages(conv_id, self.max_working_messages())
+                .await?;
 
             let context = ContextMemory {
                 conversation_id: conv_id.to_string(),
@@ -238,7 +259,11 @@ impl CompleteChatMemory {
     ///
     /// # 错误
     /// * `MemoryError::ConversationNotFound` - 当指定的对话不存在时
-    pub async fn add_user_message(&self, conv_id: &str, content: String) -> MemoryResult<StoredMessage> {
+    pub async fn add_user_message(
+        &self,
+        conv_id: &str,
+        content: String,
+    ) -> MemoryResult<StoredMessage> {
         let sequence = self.store.get_next_sequence(conv_id).await?;
         let message = StoredMessage {
             id: Uuid::new_v4().to_string(),
@@ -255,7 +280,8 @@ impl CompleteChatMemory {
         self.store.store_message(&message).await?;
 
         // 第二层：更新工作上下文
-        self.update_working_context(conv_id, message.clone()).await?;
+        self.update_working_context(conv_id, message.clone())
+            .await?;
 
         Ok(message)
     }
@@ -299,7 +325,8 @@ impl CompleteChatMemory {
         self.store.store_message(&message).await?;
 
         // 第二层：更新工作上下文
-        self.update_working_context(conv_id, message.clone()).await?;
+        self.update_working_context(conv_id, message.clone())
+            .await?;
 
         Ok(message)
     }
@@ -322,17 +349,20 @@ impl CompleteChatMemory {
     ///
     /// # 错误
     /// * `MemoryError::ConversationNotFound` - 当指定的对话不存在时
+    #[allow(dead_code)]
     pub async fn get_model_context<T>(&self, conv_id: &str) -> MemoryResult<Vec<T>>
     where
         T: From<ModelMessage>,
-     {
+    {
         let model_messages = self.get_model_context_internal(conv_id).await?;
         Ok(model_messages.into_iter().map(From::from).collect())
     }
 
+    #[allow(dead_code)]
     async fn get_model_context_internal(&self, conv_id: &str) -> MemoryResult<Vec<ModelMessage>> {
         let cache = self.context_cache.lock().await;
-        let context = cache.get(conv_id)
+        let context = cache
+            .get(conv_id)
             .ok_or_else(|| MemoryError::ConversationNotFound(conv_id.to_string()))?;
 
         let mut model_messages = Vec::new();
@@ -341,7 +371,7 @@ impl CompleteChatMemory {
         if let Some(summary) = &context.summary {
             model_messages.push(ModelMessage {
                 role: "system".to_string(),
-                content: format!("Previous conversation summary: {}", summary),
+                content: format!("Previous conversation summary: {summary}"),
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -366,9 +396,14 @@ impl CompleteChatMemory {
         Ok(model_messages)
     }
 
-    async fn update_working_context(&self, conv_id: &str, new_message: StoredMessage) -> MemoryResult<()> {
+    async fn update_working_context(
+        &self,
+        conv_id: &str,
+        new_message: StoredMessage,
+    ) -> MemoryResult<()> {
         let mut cache = self.context_cache.lock().await;
-        let context = cache.get_mut(conv_id)
+        let context = cache
+            .get_mut(conv_id)
             .ok_or_else(|| MemoryError::ConversationNotFound(conv_id.to_string()))?;
 
         context.working_messages.push(new_message);
@@ -376,8 +411,8 @@ impl CompleteChatMemory {
 
         // 检查是否需要截断和摘要
         if context.total_tokens > context.max_context_tokens
-            || context.working_messages.len() > self.max_working_messages() {
-
+            || context.working_messages.len() > self.max_working_messages()
+        {
             drop(cache); // 释放锁，避免在异步操作中持有
             self.truncate_and_summarize(conv_id).await?;
         }
@@ -391,14 +426,16 @@ impl CompleteChatMemory {
         }
 
         let mut cache = self.context_cache.lock().await;
-        let context = cache.get_mut(conv_id)
+        let context = cache
+            .get_mut(conv_id)
             .ok_or_else(|| MemoryError::ConversationNotFound(conv_id.to_string()))?;
 
         // 计算要保留的消息数量
         let keep_count = self.calculate_keep_count(&context.working_messages);
 
         if keep_count < context.working_messages.len() {
-            let to_summarize: Vec<StoredMessage> = context.working_messages
+            let to_summarize: Vec<StoredMessage> = context
+                .working_messages
                 .drain(0..(context.working_messages.len() - keep_count))
                 .collect();
 
@@ -406,7 +443,8 @@ impl CompleteChatMemory {
                 drop(cache); // 释放锁进行异步操作
 
                 // 生成摘要
-                let new_summary = self.summarizer
+                let new_summary = self
+                    .summarizer
                     .summarize_stored_messages(&to_summarize, None) // 简化版本
                     .await?;
 
@@ -419,7 +457,9 @@ impl CompleteChatMemory {
                 // 更新数据库中的摘要
                 let last_sequence = to_summarize.last().map(|m| m.sequence);
                 drop(cache);
-                self.store.update_conversation_summary(conv_id, &new_summary, last_sequence).await?;
+                self.store
+                    .update_conversation_summary(conv_id, &new_summary, last_sequence)
+                    .await?;
             }
         }
 
@@ -427,14 +467,17 @@ impl CompleteChatMemory {
     }
 
     fn calculate_keep_count(&self, messages: &[StoredMessage]) -> usize {
-        let target_tokens = (self.max_context_tokens() as f32 * (1.0 - self.summary_trigger_ratio())) as usize;
+        let target_tokens =
+            (self.max_context_tokens() as f32 * (1.0 - self.summary_trigger_ratio())) as usize;
         let mut current_tokens = 0;
         let mut keep_count = 0;
 
         // 从后往前计算，保留最近的消息
         for message in messages.iter().rev() {
             let msg_tokens = self.estimate_message_tokens(message);
-            if current_tokens + msg_tokens <= target_tokens && keep_count < self.max_working_messages() {
+            if current_tokens + msg_tokens <= target_tokens
+                && keep_count < self.max_working_messages()
+            {
                 current_tokens += msg_tokens;
                 keep_count += 1;
             } else {
@@ -447,7 +490,10 @@ impl CompleteChatMemory {
     }
 
     fn calculate_total_tokens(&self, messages: &[StoredMessage]) -> usize {
-        messages.iter().map(|m| self.estimate_message_tokens(m)).sum()
+        messages
+            .iter()
+            .map(|m| self.estimate_message_tokens(m))
+            .sum()
     }
 
     fn estimate_message_tokens(&self, message: &StoredMessage) -> usize {
@@ -457,15 +503,19 @@ impl CompleteChatMemory {
         content_tokens + tool_tokens
     }
 
+    #[allow(dead_code)]
     fn convert_to_model_tool_calls(&self, tool_calls: &[StoredToolCall]) -> Vec<ModelToolCall> {
-        tool_calls.iter().map(|tc| ModelToolCall {
-            id: tc.id.clone(),
-            r#type: "function".to_string(),
-            function: ModelToolFunction {
-                name: tc.name.clone(),
-                arguments: tc.arguments.to_string(),
-            },
-        }).collect()
+        tool_calls
+            .iter()
+            .map(|tc| ModelToolCall {
+                id: tc.id.clone(),
+                r#type: "function".to_string(),
+                function: ModelToolFunction {
+                    name: tc.name.clone(),
+                    arguments: tc.arguments.to_string(),
+                },
+            })
+            .collect()
     }
 
     /// 获取指定对话的元数据（metadata）
@@ -490,6 +540,7 @@ impl CompleteChatMemory {
     ///
     /// # 错误
     /// * `MemoryError::ConversationNotFound` - 当指定的对话不存在时
+    #[allow(dead_code)]
     pub async fn get_conversation(&self, conv_id: &str) -> MemoryResult<StoredConversation> {
         self.store.get_conversation(conv_id).await
     }
@@ -505,7 +556,11 @@ impl CompleteChatMemory {
     /// # 说明
     /// 返回按最后更新时间降序排列的对话摘要列表，用于在 UI 中显示对话历史。
     /// 每个摘要包含对话的基本信息但不包含详细的消息内容，适合快速浏览。
-    pub async fn list_conversations(&self, limit: Option<usize>) -> MemoryResult<Vec<ConversationSummary>> {
+    #[allow(dead_code)]
+    pub async fn list_conversations(
+        &self,
+        limit: Option<usize>,
+    ) -> MemoryResult<Vec<ConversationSummary>> {
         self.store.list_conversations(limit).await
     }
 
@@ -523,7 +578,11 @@ impl CompleteChatMemory {
     /// 每个摘要包含对话的基本信息但不包含详细的消息内容，适合快速浏览。
     ///
     /// 注意：虽然当前系统设计为用户与对话的1:1关系，但此方法支持一个用户拥有多个对话的场景。
-    pub async fn list_user_conversations(&self, user_id: &str, limit: Option<usize>) -> MemoryResult<Vec<ConversationSummary>> {
+    pub async fn list_user_conversations(
+        &self,
+        user_id: &str,
+        limit: Option<usize>,
+    ) -> MemoryResult<Vec<ConversationSummary>> {
         self.store.list_conversations_by_user(user_id, limit).await
     }
 
@@ -567,7 +626,11 @@ impl CompleteChatMemory {
     /// * `MemoryError::DatabaseError` - 当数据库查询失败时
     pub async fn get_user_full_history(&self, user_id: &str) -> MemoryResult<Vec<StoredMessage>> {
         // 1. 获取用户的对话ID
-        if let Some(conv) = self.store.get_recent_conversation_by_user(user_id, None).await? {
+        if let Some(conv) = self
+            .store
+            .get_recent_conversation_by_user(user_id, None)
+            .await?
+        {
             // 2. 获取完整聊天记录
             self.store.get_full_history(&conv.id).await
         } else {
@@ -590,6 +653,7 @@ impl CompleteChatMemory {
     ///
     /// 注意：此操作不可逆，请谨慎使用。由于设置了外键约束的级联删除，
     /// 删除对话时会自动删除该对话下的所有消息。
+    #[allow(dead_code)]
     pub async fn delete_conversation(&self, conv_id: &str) -> MemoryResult<()> {
         // 从缓存中移除
         self.context_cache.lock().await.remove(conv_id);
@@ -610,6 +674,7 @@ impl CompleteChatMemory {
     /// - 数据库大小等信息
     ///
     /// 这些统计信息可用于监控系统使用情况、容量规划和性能分析。
+    #[allow(dead_code)]
     pub async fn get_stats(&self) -> MemoryResult<MemoryStats> {
         self.store.get_stats().await
     }

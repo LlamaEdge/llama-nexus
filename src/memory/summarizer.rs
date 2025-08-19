@@ -4,6 +4,7 @@ use crate::memory::types::*;
 ///
 /// 用于将对话中的多条消息压缩成简洁的摘要，以节省上下文空间。
 /// 支持增量摘要，可以基于现有摘要和新消息生成更新的摘要。
+#[allow(dead_code)]
 pub struct MessageSummarizer {
     // 这里可以配置使用哪个模型进行摘要
     model_name: Option<String>,
@@ -56,13 +57,16 @@ impl MessageSummarizer {
         self.generate_summary_via_llm(&prompt).await
     }
 
-    fn build_summary_prompt(&self, messages: &[StoredMessage], existing_summary: Option<&str>) -> String {
+    fn build_summary_prompt(
+        &self,
+        messages: &[StoredMessage],
+        existing_summary: Option<&str>,
+    ) -> String {
         let mut prompt = String::new();
 
         if let Some(prev_summary) = existing_summary {
             prompt.push_str(&format!(
-                "Previous conversation summary:\\n{}\\n\\nNew messages to incorporate:\\n\\n",
-                prev_summary
+                "Previous conversation summary:\\n{prev_summary}\\n\\nNew messages to incorporate:\\n\\n",
             ));
         } else {
             prompt.push_str("Please summarize the following conversation:\\n\\n");
@@ -78,8 +82,10 @@ impl MessageSummarizer {
                     if result.success {
                         prompt.push_str(" (successful)\\n");
                     } else {
-                        prompt.push_str(&format!(" (failed: {})\\n",
-                            result.error.as_deref().unwrap_or("unknown error")));
+                        prompt.push_str(&format!(
+                            " (failed: {})\\n",
+                            result.error.as_deref().unwrap_or("unknown error")
+                        ));
                     }
                 } else {
                     prompt.push_str("\\n");
@@ -94,7 +100,7 @@ impl MessageSummarizer {
              2. Key decisions or conclusions\\n\\
              3. Tools used and their purposes\\n\\
              4. Any unresolved issues\\n\\n\\
-             Summary:"
+             Summary:",
         );
 
         prompt
@@ -114,7 +120,7 @@ impl MessageSummarizer {
         let message_count = prompt.matches("**").count() / 2;
         let has_tools = prompt.contains("Used tool:");
 
-        let mut summary = format!("Conversation with {} messages", message_count);
+        let mut summary = format!("Conversation with {message_count} messages");
         if has_tools {
             summary.push_str(" involving tool usage");
         }

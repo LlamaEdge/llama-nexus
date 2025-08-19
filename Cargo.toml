@@ -10,8 +10,10 @@ axum = { version = "^0.8", features = ["tokio", "http2", "multipart"] }
 bitflags = "2.8.0"
 bytes = "1.10.1"
 chat-prompts = { version = "0.33.1" }
+chrono = "0.4.41"
 clap = { version = "^4.5", features = ["cargo", "derive"] }
 config = { version = "^0.15", features = ["toml"] }
+dotenvy = "0.15.7"
 endpoints = { version = "0.34.0", features = ["whisper", "rag", "index"] }
 futures-util = "0.3"
 http = "1.2"
@@ -28,6 +30,7 @@ rmcp = { version = "0.5.0", features = [
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sqlx = { version = "0.8.6", features = ["sqlite", "chrono", "runtime-tokio"] }
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7.13"
@@ -37,10 +40,6 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.7.0", features = ["v4"] }
-
-chrono = "0.4.41"
-sqlx = { version = "0.8.6", features = ["sqlite", "chrono", "runtime-tokio"] }
-dotenvy = "0.15.7"
 
 [[bin]]
 name = "llama-nexus"

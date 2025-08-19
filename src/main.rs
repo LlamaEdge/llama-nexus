@@ -3,9 +3,9 @@ mod error;
 mod handlers;
 mod info;
 mod mcp;
+mod memory;
 mod server;
 mod utils;
-mod memory;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -142,7 +142,9 @@ async fn main() -> ServerResult<()> {
                 }
                 Err(e) => {
                     dual_error!("Failed to initialize memory system: {}", e);
-                    return Err(ServerError::Operation(format!("Memory initialization failed: {e}")));
+                    return Err(ServerError::Operation(format!(
+                        "Memory initialization failed: {e}"
+                    )));
                 }
             }
         } else {
@@ -196,15 +198,15 @@ async fn main() -> ServerResult<()> {
             .route("/v1/info", get(handlers::info_handler))
             .route(
                 "/v1/memory/conversations/{conv_id}/history",
-                get(handlers::get_conversation_history_handler)
+                get(handlers::get_conversation_history_handler),
             )
             .route(
                 "/v1/memory/users/{user_id}/history",
-                get(handlers::get_user_history_handler)
+                get(handlers::get_user_history_handler),
             )
             .route(
                 "/v1/memory/users/{user_id}/conversations",
-                get(handlers::list_user_conversations_handler)
+                get(handlers::list_user_conversations_handler),
             )
             .route(
                 "/admin/servers/register",

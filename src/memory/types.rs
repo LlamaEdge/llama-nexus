@@ -84,6 +84,7 @@ pub struct StoredConversation {
 
 // 运行时的上下文管理
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ContextMemory {
     pub conversation_id: String,
     pub working_messages: Vec<StoredMessage>,
@@ -94,6 +95,7 @@ pub struct ContextMemory {
 
 // 用于与模型交互的消息格式
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ModelMessage {
     pub role: String,
     pub content: String,
@@ -113,8 +115,6 @@ pub struct ModelToolFunction {
     pub name: String,
     pub arguments: String,
 }
-
-
 
 // 统计信息
 #[derive(Debug, Serialize)]
@@ -142,6 +142,7 @@ pub struct ConversationSummary {
 
 // 导出格式
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ConversationExport {
     pub conversation: StoredConversation,
     pub messages: Vec<StoredMessage>,
@@ -151,6 +152,7 @@ pub struct ConversationExport {
 
 // 错误类型
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum MemoryError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
