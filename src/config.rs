@@ -103,15 +103,44 @@ pub struct ServerConfig {
     pub port: u16,
 }
 
+/// Memory system configuration
+///
+/// Controls the behavior of conversation memory management including
+/// automatic summarization and message retention policies.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MemoryConfig {
+    /// Enable or disable memory functionality
     pub enable: bool,
+    /// Path to SQLite database file for storing conversation history
     pub database_path: String,
+    /// Maximum context window size in tokens
     pub context_window: u64,
+    /// Enable automatic message summarization when limits are reached
     pub auto_summarize: bool,
+
+    /// Base number for calculating minimum messages to keep after summarization.
+    /// Actual kept messages = summarize_threshold / 2
+    /// This should be LESS than max_stored_messages to allow effective summarization.
+    ///
+    /// Note: The name "summarize_threshold" is somewhat misleading - it's not the threshold
+    /// for triggering summarization, but rather the base for calculating retention count.
+    /// A more descriptive name would be "min_keep_messages_base" or similar.
     pub summarize_threshold: u32,
+
+    /// Maximum number of messages to store before triggering summarization.
+    /// When message count reaches this limit, summarization is automatically triggered.
+    /// This should be GREATER than summarize_threshold for proper operation.
+    ///
+    /// This name accurately reflects its purpose as the trigger point for summarization.
     pub max_stored_messages: u32,
-    pub cleanup_interval_hours: u64,
+
+    /// Base URL for the summary service used to generate conversation summaries.
+    /// This service is called when automatic summarization is triggered.
+    pub summary_service_base_url: String,
+
+    /// API key for authenticating with the summary service.
+    /// Leave empty if the summary service doesn't require authentication.
+    pub summary_service_api_key: String,
 }
 
 impl Default for MemoryConfig {
@@ -121,9 +150,12 @@ impl Default for MemoryConfig {
             database_path: "data/memory.db".to_string(),
             context_window: 4000,
             auto_summarize: true,
-            summarize_threshold: 20,
-            max_stored_messages: 100,
-            cleanup_interval_hours: 24,
+            // Default configuration follows the principle: max_stored_messages > summarize_threshold
+            // This allows for effective summarization: 20 messages trigger → keep 6 → summarize 14
+            summarize_threshold: 12, // Keep 6 messages minimum (12/2)
+            max_stored_messages: 20, // Trigger summarization at 20 messages
+            summary_service_base_url: "http://localhost:10086/v1".to_string(),
+            summary_service_api_key: String::new(),
         }
     }
 }

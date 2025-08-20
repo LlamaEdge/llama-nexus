@@ -77,7 +77,11 @@ impl CompleteChatMemory {
         let store = MessageStore::new(&config.database_path).await?;
 
         // 创建消息摘要器
-        let summarizer = MessageSummarizer::new(None);
+        let summarizer = MessageSummarizer::new(
+            None,
+            &config.summary_service_base_url,
+            &config.summary_service_api_key,
+        );
 
         Ok(Self {
             store,
@@ -350,16 +354,7 @@ impl CompleteChatMemory {
     /// # 错误
     /// * `MemoryError::ConversationNotFound` - 当指定的对话不存在时
     #[allow(dead_code)]
-    pub async fn get_model_context<T>(&self, conv_id: &str) -> MemoryResult<Vec<T>>
-    where
-        T: From<ModelMessage>,
-    {
-        let model_messages = self.get_model_context_internal(conv_id).await?;
-        Ok(model_messages.into_iter().map(From::from).collect())
-    }
-
-    #[allow(dead_code)]
-    async fn get_model_context_internal(&self, conv_id: &str) -> MemoryResult<Vec<ModelMessage>> {
+    pub async fn get_model_context(&self, conv_id: &str) -> MemoryResult<Vec<ModelMessage>> {
         let cache = self.context_cache.lock().await;
         let context = cache
             .get(conv_id)
@@ -370,7 +365,7 @@ impl CompleteChatMemory {
         // 如果有摘要，添加到system message
         if let Some(summary) = &context.summary {
             model_messages.push(ModelMessage {
-                role: "system".to_string(),
+                role: ModelRole::System,
                 content: format!("Previous conversation summary: {summary}"),
                 tool_calls: None,
                 tool_call_id: None,
@@ -379,18 +374,46 @@ impl CompleteChatMemory {
 
         // 转换工作消息为模型格式
         for stored_msg in &context.working_messages {
+            // 处理Assistant消息的工具调用
             let tool_calls = if !stored_msg.tool_calls.is_empty() {
                 Some(self.convert_to_model_tool_calls(&stored_msg.tool_calls))
             } else {
                 None
             };
 
+            // 添加Assistant消息（包含工具调用请求，但不含结果）
             model_messages.push(ModelMessage {
-                role: stored_msg.role.to_string(),
+                role: stored_msg.role.into(),
                 content: stored_msg.content.clone(),
                 tool_calls,
                 tool_call_id: None,
             });
+
+            // 为每个有执行结果的工具调用生成独立的tool消息
+            for tool_call in &stored_msg.tool_calls {
+                if let Some(result) = &tool_call.result {
+                    let tool_result_content = if result.success {
+                        // 成功的工具调用：返回实际结果
+                        match &result.content {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        }
+                    } else {
+                        // 失败的工具调用：返回错误信息
+                        format!(
+                            "Tool execution failed: {}",
+                            result.error.as_deref().unwrap_or("Unknown error")
+                        )
+                    };
+
+                    model_messages.push(ModelMessage {
+                        role: ModelRole::Tool,
+                        content: tool_result_content,
+                        tool_calls: None,
+                        tool_call_id: Some(tool_call.id.clone()),
+                    });
+                }
+            }
         }
 
         Ok(model_messages)
@@ -440,12 +463,14 @@ impl CompleteChatMemory {
                 .collect();
 
             if !to_summarize.is_empty() {
+                // 获取现有摘要用于增量摘要生成
+                let existing_summary = context.summary.clone();
                 drop(cache); // 释放锁进行异步操作
 
                 // 生成摘要
                 let new_summary = self
                     .summarizer
-                    .summarize_stored_messages(&to_summarize, None) // 简化版本
+                    .summarize_stored_messages(&to_summarize, existing_summary.as_deref())
                     .await?;
 
                 // 更新上下文和数据库
@@ -486,7 +511,41 @@ impl CompleteChatMemory {
         }
 
         // 至少保留配置的最小消息数
-        keep_count.max(self.keep_recent_messages().min(messages.len()))
+        let min_keep = self.keep_recent_messages().min(messages.len());
+        let ideal_keep = keep_count.max(min_keep);
+
+        // 确保消息对的完整性：调整保留数量以避免拆散 user-assistant 对
+        self.adjust_for_message_pairs(messages, ideal_keep)
+    }
+
+    /// 调整保留数量以确保 user-assistant 消息对的完整性
+    fn adjust_for_message_pairs(&self, messages: &[StoredMessage], mut keep_count: usize) -> usize {
+        if keep_count >= messages.len() {
+            return messages.len();
+        }
+
+        let split_index = messages.len() - keep_count;
+
+        // 检查分割点是否会拆散消息对
+        if split_index > 0 && split_index < messages.len() {
+            let prev_msg = &messages[split_index - 1];
+            let curr_msg = &messages[split_index];
+
+            // 如果前一条是 User 消息，当前是 Assistant 消息，说明会拆散一对
+            if matches!(prev_msg.role, MessageRole::User)
+                && matches!(curr_msg.role, MessageRole::Assistant)
+            {
+                // 选择策略：优先完整保留消息对
+                // 选项1：多保留一条（包含完整的user-assistant对）
+                if keep_count < messages.len() {
+                    keep_count += 1;
+                }
+                // 选项2：少保留一条（避免拆散，将user消息也放入摘要）
+                // keep_count = keep_count.saturating_sub(1);
+            }
+        }
+
+        keep_count
     }
 
     fn calculate_total_tokens(&self, messages: &[StoredMessage]) -> usize {
@@ -503,13 +562,12 @@ impl CompleteChatMemory {
         content_tokens + tool_tokens
     }
 
-    #[allow(dead_code)]
     fn convert_to_model_tool_calls(&self, tool_calls: &[StoredToolCall]) -> Vec<ModelToolCall> {
         tool_calls
             .iter()
             .map(|tc| ModelToolCall {
                 id: tc.id.clone(),
-                r#type: "function".to_string(),
+                ty: "function".to_string(),
                 function: ModelToolFunction {
                     name: tc.name.clone(),
                     arguments: tc.arguments.to_string(),
@@ -584,6 +642,32 @@ impl CompleteChatMemory {
         limit: Option<usize>,
     ) -> MemoryResult<Vec<ConversationSummary>> {
         self.store.list_conversations_by_user(user_id, limit).await
+    }
+
+    /// 获取对话的当前工作消息
+    ///
+    /// # 参数
+    /// * `conv_id` - 对话的唯一标识符
+    ///
+    /// # 返回值
+    /// * `MemoryResult<Vec<StoredMessage>>` - 成功时返回工作消息列表，失败时返回 MemoryError
+    ///
+    /// # 说明
+    /// 返回对话的当前工作上下文中的消息，按序列号升序排列。这些是当前用于模型推理的消息，
+    /// 不包括已被摘要化的历史消息。与 `get_full_history` 不同，此方法只返回活跃的工作消息。
+    ///
+    /// 工作消息是内存管理器当前维护的消息集合，通常是最近的N条消息，具体数量由配置决定。
+    /// 当消息历史过长时，旧消息会被摘要化，只保留最近的工作消息用于模型推理。
+    ///
+    /// # 错误
+    /// * `MemoryError::ConversationNotFound` - 当指定的对话不存在时
+    pub async fn get_working_messages(&self, conv_id: &str) -> MemoryResult<Vec<StoredMessage>> {
+        let cache = self.context_cache.lock().await;
+        let context = cache
+            .get(conv_id)
+            .ok_or_else(|| MemoryError::ConversationNotFound(conv_id.to_string()))?;
+
+        Ok(context.working_messages.clone())
     }
 
     /// 获取对话的完整消息历史

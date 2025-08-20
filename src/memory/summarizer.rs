@@ -1,4 +1,10 @@
-use crate::memory::types::*;
+use axum::http::StatusCode;
+use endpoints::chat::{
+    ChatCompletionObject, ChatCompletionRequestBuilder, ChatCompletionRequestMessage,
+};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+
+use crate::{dual_info, memory::types::*};
 
 /// 消息摘要生成器
 ///
@@ -8,6 +14,8 @@ use crate::memory::types::*;
 pub struct MessageSummarizer {
     // 这里可以配置使用哪个模型进行摘要
     model_name: Option<String>,
+    summary_service_base_url: String,
+    summary_service_api_key: String,
 }
 
 impl MessageSummarizer {
@@ -21,8 +29,16 @@ impl MessageSummarizer {
     ///
     /// # 说明
     /// 如果不指定模型名称，将使用默认模型进行摘要生成。
-    pub fn new(model_name: Option<String>) -> Self {
-        Self { model_name }
+    pub fn new(
+        model_name: Option<String>,
+        summary_service_base_url: impl AsRef<str>,
+        summary_service_api_key: impl AsRef<str>,
+    ) -> Self {
+        Self {
+            model_name,
+            summary_service_base_url: summary_service_base_url.as_ref().to_string(),
+            summary_service_api_key: summary_service_api_key.as_ref().to_string(),
+        }
     }
 
     /// 为存储的消息生成摘要
@@ -46,6 +62,8 @@ impl MessageSummarizer {
         messages: &[StoredMessage],
         existing_summary: Option<&str>,
     ) -> MemoryResult<String> {
+        dual_info!("Summarizing stored messages");
+
         if messages.is_empty() {
             return Ok(existing_summary.unwrap_or("").to_string());
         }
@@ -106,38 +124,67 @@ impl MessageSummarizer {
         prompt
     }
 
-    async fn generate_summary_via_llm(&self, prompt: &str) -> MemoryResult<String> {
-        // 这里需要实际调用LLM API
-        // 暂时返回一个模拟的摘要
+    async fn generate_summary_via_llm(&self, prompt: impl AsRef<str>) -> MemoryResult<String> {
+        let user_message = ChatCompletionRequestMessage::new_user_message(
+            endpoints::chat::ChatCompletionUserMessageContent::Text(prompt.as_ref().to_string()),
+            None,
+        );
+        let chat_completion = ChatCompletionRequestBuilder::new(&[user_message])
+            .with_max_completion_tokens(8192)
+            .build();
 
-        // 实际实现中，这里会：
-        // 1. 构造API请求
-        // 2. 调用配置的模型
-        // 3. 解析响应
-        // 4. 返回摘要文本
+        // 构造API请求
+        let url = format!(
+            "{}/chat/completions",
+            &self.summary_service_base_url.trim_end_matches('/')
+        );
 
-        // 模拟摘要生成
-        let message_count = prompt.matches("**").count() / 2;
-        let has_tools = prompt.contains("Used tool:");
+        let mut request = reqwest::Client::new()
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&chat_completion);
 
-        let mut summary = format!("Conversation with {message_count} messages");
-        if has_tools {
-            summary.push_str(" involving tool usage");
+        if !self.summary_service_api_key.is_empty() {
+            request = request.header(
+                AUTHORIZATION,
+                format!("Bearer {}", &self.summary_service_api_key),
+            );
         }
-        summary.push('.');
 
-        Ok(summary)
+        let response = request.send().await.map_err(|e| {
+            MemoryError::SummarizationFailed(format!("Failed to forward request: {e}"))
+        })?;
+
+        // 解析响应
+        match response.status() {
+            StatusCode::OK => {
+                let bytes = response.bytes().await.map_err(|e| {
+                    let err_msg = format!("Failed to get the full response as bytes: {e}");
+                    MemoryError::SummarizationFailed(err_msg)
+                })?;
+
+                let chat_completion: ChatCompletionObject = serde_json::from_slice(&bytes)
+                    .map_err(|e| {
+                        let err_msg = format!("Failed to parse the response: {e}");
+                        MemoryError::SummarizationFailed(err_msg)
+                    })?;
+
+                let summary = chat_completion.choices[0]
+                    .message
+                    .content
+                    .as_deref()
+                    .unwrap();
+
+                Ok(summary.to_string())
+            }
+            _ => {
+                // Convert reqwest::Response to axum::Response
+                let status = response.status();
+
+                let err_msg = format!("Failed to generate summary from LLM: {status}");
+
+                Err(MemoryError::SummarizationFailed(err_msg))
+            }
+        }
     }
-
-    // // 实际的LLM调用实现
-    // async fn call_llm_for_summary(&self, prompt: &str) -> MemoryResult<String> {
-    //     // TODO: 实现实际的LLM API调用
-    //     // 可能需要：
-    //     // - HTTP客户端
-    //     // - API密钥管理
-    //     // - 错误处理
-    //     // - 重试逻辑
-
-    //     Err(MemoryError::SummarizationFailed("Not implemented".to_string()))
-    // }
 }

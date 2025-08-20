@@ -12,7 +12,7 @@ use endpoints::{
         ChatCompletionAssistantMessage, ChatCompletionChunk, ChatCompletionChunkChoice,
         ChatCompletionChunkChoiceDelta, ChatCompletionObject, ChatCompletionRequest,
         ChatCompletionRequestMessage, ChatCompletionRole, ChatCompletionToolMessage,
-        ChatCompletionUserMessageContent, Tool, ToolCall, ToolChoice, ToolFunction,
+        ChatCompletionUserMessageContent, Function, Tool, ToolCall, ToolChoice, ToolFunction,
     },
     common::FinishReason,
     embeddings::EmbeddingRequest,
@@ -33,7 +33,7 @@ use crate::{
     error::{ServerError, ServerResult},
     info::ApiServer,
     mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SERVICES, MCP_TOOLS, SEARCH_MCP_SERVER_NAMES},
-    memory::{StoredToolCall, StoredToolResult},
+    memory::{ModelRole, ModelToolCall, StoredToolCall, StoredToolResult},
     server::{RoutingPolicy, Server, ServerIdToRemove, ServerKind, TargetServerInfo},
 };
 
@@ -188,16 +188,6 @@ pub(crate) async fn chat(
     // Get target server
     let chat_server = get_chat_server(&state, request_id).await?;
 
-    // // Send request and handle response
-    // let response = send_request_with_retry(
-    //     &chat_server,
-    //     &mut request,
-    //     &headers,
-    //     request_id,
-    //     cancel_token.clone(),
-    // )
-    // .await?;
-
     // 存储用户消息到记忆中
     if let Some(memory) = &state.memory
         && let Some(conv_id) = &conv_id
@@ -205,15 +195,6 @@ pub(crate) async fn chat(
     {
         let _ = memory.add_user_message(conv_id, user_msg.clone()).await;
     }
-
-    // let response = build_and_send_request(
-    //     &chat_server,
-    //     &mut request,
-    //     &headers,
-    //     cancel_token.clone(),
-    //     request_id,
-    // )
-    // .await?;
 
     // Build and send request
     let response = {
@@ -234,7 +215,7 @@ pub(crate) async fn chat(
             client = client.header(AUTHORIZATION, auth_str);
         }
 
-        dual_info!(
+        dual_debug!(
             "Request to downstream chat server - request_id: {}\n{}",
             request_id,
             serde_json::to_string_pretty(&request).unwrap()
@@ -258,20 +239,6 @@ pub(crate) async fn chat(
     // Handle response based on stream mode
     let response_result = match request.stream {
         Some(true) => {
-            // // Handle stream response
-            // handle_stream_response(
-            //     response,
-            //     &mut request,
-            //     &headers,
-            //     &chat_server,
-            //     request_id,
-            //     cancel_token,
-            //     conv_id.as_deref(),
-            //     user_message.as_deref(),
-            //     &state,
-            // )
-            // .await
-
             let status = response.status();
 
             // check the status code
@@ -283,46 +250,13 @@ pub(crate) async fn chat(
                     let requires_tool_call = parse_requires_tool_call_header(&response_headers);
 
                     if requires_tool_call {
-                        // // Handle tool call in stream mode
-                        // handle_tool_call_stream(
-                        //     response,
-                        //     &mut request,
-                        //     &headers,
-                        //     &chat_server,
-                        //     request_id,
-                        //     cancel_token,
-                        //     conv_id.as_deref(),
-                        //     user_message.as_deref(),
-                        //     &state,
-                        // )
-                        // .await
-
                         let tool_calls =
                             extract_tool_calls_from_stream(response, request_id).await?;
 
-                        // ? Convert tool calls to stored format for memory
+                        // Convert tool calls to stored format for memory
                         let stored_tool_calls = conv_id
                             .as_ref()
                             .map(|conv_id| convert_tool_calls_to_stored(&tool_calls, conv_id));
-
-                        // 存储工具调用到记忆中
-                        if let Some(memory) = &state.memory
-                            && let Some(conv_id) = &conv_id
-                        {
-                            // Convert tool calls to stored format
-                            let stored_tool_calls =
-                                convert_tool_calls_to_stored(tool_calls.as_slice(), conv_id);
-
-                            let _ = memory
-                                .add_assistant_message(conv_id, "", stored_tool_calls)
-                                .await
-                                .map_err(|e| {
-                                    let err_msg =
-                                        format!("Failed to store tool calls to memory: {e}");
-                                    dual_warn!("{} - request_id: {}", err_msg, request_id);
-                                    ServerError::Operation(err_msg)
-                                })?;
-                        }
 
                         call_mcp_server(
                             tool_calls.as_slice(),
@@ -338,10 +272,6 @@ pub(crate) async fn chat(
                         )
                         .await
                     } else {
-                        // // Handle normal response in stream mode
-                        // handle_normal_stream(response, status, response_headers, request_id, cancel_token, conv_id.as_deref(), user_message.as_deref(), &state)
-                        //     .await
-
                         // Handle response body reading with cancellation
                         let bytes = select! {
                             bytes = response.bytes() => {
@@ -430,20 +360,6 @@ pub(crate) async fn chat(
             }
         }
         Some(false) | None => {
-            // // Handle non-stream response
-            // handle_non_stream_response(
-            //     response,
-            //     &mut request,
-            //     &headers,
-            //     &chat_server,
-            //     request_id,
-            //     cancel_token,
-            //     conv_id.as_deref(),
-            //     user_message.as_deref(),
-            //     &state,
-            // )
-            // .await
-
             let status = response.status();
 
             // check the status code
@@ -461,7 +377,7 @@ pub(crate) async fn chat(
                         !chat_completion.choices[0].message.tool_calls.is_empty();
 
                     if requires_tool_call {
-                        // ? Convert tool calls to stored format for memory
+                        // Convert tool calls to stored format for memory
                         let stored_tool_calls = if let Some(conv_id) = &conv_id {
                             Some(convert_tool_calls_to_stored(
                                 &chat_completion.choices[0].message.tool_calls,
@@ -470,23 +386,6 @@ pub(crate) async fn chat(
                         } else {
                             None
                         };
-
-                        // // 存储工具调用到记忆中
-                        // if let Some(memory) = &state.memory {
-                        //     if let Some(conv_id) = &conv_id {
-                        //         // Convert tool calls to stored format
-                        //         let stored_tool_calls = convert_tool_calls_to_stored(&chat_completion.choices[0].message.tool_calls, conv_id);
-
-                        //         let _ = memory.add_assistant_message(conv_id, "", stored_tool_calls).await.map_err(|e| {
-                        //             let err_msg = format!("Failed to store tool calls to memory: {e}");
-                        //             dual_warn!(
-                        //                 "{} - request_id: {}",
-                        //                 err_msg, request_id
-                        //             );
-                        //             ServerError::Operation(err_msg)
-                        //         })?;
-                        //     }
-                        // }
 
                         call_mcp_server(
                             chat_completion.choices[0].message.tool_calls.as_slice(),
@@ -551,9 +450,35 @@ pub(crate) async fn chat(
             ServerError::Operation(err_msg)
         })?;
         dual_debug!(
-            "Chat history - request_id: {}\n{}",
+            "Full history - request_id: {}\n{}",
             request_id,
             serde_json::to_string_pretty(&chat_history).unwrap()
+        );
+
+        let working_messages = memory.get_working_messages(conv_id).await.map_err(|e| {
+            let err_msg = format!("Failed to get working messages: {e}");
+            dual_error!("{} - request_id: {}", err_msg, request_id);
+            ServerError::Operation(err_msg)
+        })?;
+        dual_debug!(
+            "Working messages - request_id: {}\n{}",
+            request_id,
+            serde_json::to_string_pretty(&working_messages).unwrap()
+        );
+
+        let context = memory.get_model_context(conv_id).await.map_err(|e| {
+            let err_msg = format!("Failed to get model context: {e}");
+            dual_error!("{} - request_id: {}", err_msg, request_id);
+            ServerError::Operation(err_msg)
+        })?;
+        let context: Vec<ChatCompletionRequestMessage> = context
+            .into_iter()
+            .map(|model_msg| model_msg.into())
+            .collect();
+        dual_debug!(
+            "Model context - request_id: {}\n{}",
+            request_id,
+            serde_json::to_string_pretty(&context).unwrap()
         );
     }
 
@@ -2025,82 +1950,6 @@ fn add_tool_results_to_stored(
     }
 }
 
-/// Store messages to memory
-#[allow(dead_code)]
-async fn store_messages_to_memory(
-    state: &Arc<AppState>,
-    conv_id: &str,
-    user_message: Option<String>,
-    assistant_message: Option<String>,
-    tool_calls: Option<Vec<StoredToolCall>>,
-    request_id: &str,
-) -> ServerResult<()> {
-    if let Some(memory) = &state.memory {
-        // 存储用户消息
-        if let Some(user_content) = user_message {
-            match memory.add_user_message(conv_id, user_content).await {
-                Ok(_) => {
-                    dual_debug!(
-                        "Successfully stored user message to memory - request_id: {}",
-                        request_id
-                    );
-                }
-                Err(e) => {
-                    dual_warn!(
-                        "Failed to store user message to memory: {} - request_id: {}",
-                        e,
-                        request_id
-                    );
-                }
-            }
-        }
-
-        // 存储助手消息（可能包含工具调用）
-        if let Some(assistant_content) = &assistant_message {
-            let stored_tool_calls = tool_calls.unwrap_or_default();
-            match memory
-                .add_assistant_message(conv_id, assistant_content, stored_tool_calls)
-                .await
-            {
-                Ok(_) => {
-                    dual_debug!(
-                        "Successfully stored assistant message to memory - request_id: {}",
-                        request_id
-                    );
-                }
-                Err(e) => {
-                    dual_warn!(
-                        "Failed to store assistant message to memory: {} - request_id: {}",
-                        e,
-                        request_id
-                    );
-                }
-            }
-        } else if let Some(stored_tool_calls) = tool_calls {
-            // 当没有assistant_message但有tool_calls时，存储一个空内容的助手消息来保存工具调用信息
-            match memory
-                .add_assistant_message(conv_id, "", stored_tool_calls)
-                .await
-            {
-                Ok(_) => {
-                    dual_debug!(
-                        "Successfully stored tool calls to memory (no assistant message) - request_id: {}",
-                        request_id
-                    );
-                }
-                Err(e) => {
-                    dual_warn!(
-                        "Failed to store tool calls to memory: {} - request_id: {}",
-                        e,
-                        request_id
-                    );
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 async fn get_chat_server(
     state: &Arc<AppState>,
     request_id: &str,
@@ -2125,434 +1974,6 @@ async fn get_chat_server(
     }
 }
 
-/// Send chat request to downstream server with intelligent retry mechanism
-///
-/// This function implements the following features:
-/// 1. First attempt to send request to downstream server
-/// 2. If tool call deserialization error occurs, intelligently retry:
-///    - Check if request contains tool definitions
-///    - Check if current tool choice is non-None state
-///    - If conditions are met, reset tool choice to None and retry
-/// 3. This retry mechanism solves cases where some downstream servers don't support tool calls
-///
-/// # Arguments
-///
-/// * `chat_server` - The downstream chat server to send request to
-/// * `request` - Chat completion request, may be modified (e.g., reset tool choice)
-/// * `headers` - HTTP request headers, including authentication info
-/// * `request_id` - Request ID for log tracking
-/// * `cancel_token` - Cancellation token for request cancellation support
-///
-/// # Returns
-/// * `Ok(response)` - Successfully obtained downstream server response
-/// * `Err(ServerError)` - Request failed or still failed after retry
-///
-/// # Error Handling Strategy
-/// * Tool call deserialization error: Try disabling tool choice and retry
-/// * Other errors: Return error directly, no retry
-/// * Retry logic: Maximum one retry to avoid infinite loops
-#[allow(dead_code)]
-async fn send_request_with_retry(
-    chat_server: &TargetServerInfo,
-    request: &mut ChatCompletionRequest,
-    headers: &HeaderMap,
-    request_id: &str,
-    cancel_token: CancellationToken,
-) -> ServerResult<reqwest::Response> {
-    // First attempt to send request to downstream server
-    let response = build_and_send_request(
-        chat_server,
-        request,
-        headers,
-        cancel_token.clone(),
-        request_id,
-    )
-    .await;
-
-    match response {
-        // If first request succeeds, return response directly
-        Ok(response) => Ok(response),
-        Err(e) => {
-            let err_str = e.to_string();
-
-            // Check if it's a tool call deserialization error
-            // This error usually occurs when downstream server doesn't support tool calls
-            if err_str.contains("Failed to deserialize generated tool calls") {
-                // Verify if retry is possible:
-                // 1. Request must contain tool definitions
-                // 2. Tool definitions cannot be empty
-                if let Some(tools) = &request.tools
-                    && !tools.is_empty()
-                {
-                    // Check if current tool choice is non-None state
-                    // Only non-None state needs to be reset to None for retry
-                    if let Some(tool_choice) = &request.tool_choice
-                        && *tool_choice != ToolChoice::None
-                    {
-                        // Reset tool choice to None, disable tool call functionality
-                        request.tool_choice = None;
-                        dual_info!(
-                            "Retrying request without tool choice - request_id: {}",
-                            request_id
-                        );
-
-                        // Re-send with reset request
-                        let response = build_and_send_request(
-                            chat_server,
-                            request,
-                            headers,
-                            cancel_token,
-                            request_id,
-                        )
-                        .await
-                        .map_err(|e| {
-                            let err_msg = format!("Failed to send request: {e}");
-                            dual_error!("{} - request_id: {}", err_msg, request_id);
-                            ServerError::Operation(err_msg)
-                        })?;
-
-                        return Ok(response);
-                    }
-                }
-            }
-
-            // Non-tool call related error, return directly, no retry
-            let err_msg = format!("Failed to send request: {e}");
-            dual_error!("{} - request_id: {}", err_msg, request_id);
-            Err(ServerError::Operation(err_msg))
-        }
-    }
-}
-
-/// Build and send HTTP request to downstream server with cancellation support
-///
-/// This function implements the following features:
-/// 1. Build HTTP client and set necessary request headers
-/// 2. Send JSON-formatted chat completion request to downstream server
-/// 3. Support cancellation of ongoing requests via CancellationToken
-/// 4. Provide detailed error information and cancellation logs
-///
-/// # Arguments
-///
-/// * `chat_server` - The downstream chat server to send request to
-/// * `request` - Chat completion request object
-/// * `headers` - HTTP request headers, including authentication info
-/// * `cancel_token` - Cancellation token for request cancellation support
-///
-/// # Returns
-/// * `Ok(response)` - Successfully obtained downstream server response
-/// * `Err(ServerError)` - Request failed or was cancelled
-///
-/// # Cancellation Features
-/// * When cancel_token is triggered, function immediately returns cancellation error
-/// * Cancellation logs warning messages for debugging and monitoring
-/// * Cancellation operation releases related resources to prevent leaks
-#[allow(dead_code)]
-async fn build_and_send_request(
-    chat_server: &TargetServerInfo,
-    request: &ChatCompletionRequest,
-    headers: &HeaderMap,
-    cancel_token: CancellationToken,
-    request_id: &str,
-) -> ServerResult<reqwest::Response> {
-    let url = format!("{}/chat/completions", chat_server.url.trim_end_matches('/'));
-    let mut client = reqwest::Client::new().post(&url);
-
-    // Add common headers
-    client = client.header(CONTENT_TYPE, "application/json");
-
-    // Add authorization header
-    if let Some(api_key) = &chat_server.api_key
-        && !api_key.is_empty()
-    {
-        client = client.header(AUTHORIZATION, api_key);
-    } else if let Some(auth) = headers.get("authorization")
-        && let Ok(auth_str) = auth.to_str()
-    {
-        client = client.header(AUTHORIZATION, auth_str);
-    }
-
-    dual_info!(
-        "Request to downstream chat server - request_id: {}\n{}",
-        request_id,
-        serde_json::to_string_pretty(request).unwrap()
-    );
-
-    // Use select! to support cancellation
-    select! {
-        response = client.json(request).send() => {
-            response.map_err(|e| ServerError::Operation(format!("Failed to forward request: {e}")))
-        }
-        _ = cancel_token.cancelled() => {
-            let warn_msg = "Request was cancelled by client";
-            dual_warn!("{}", warn_msg);
-            Err(ServerError::Operation(warn_msg.to_string()))
-        }
-    }
-}
-
-/// Handle streaming chat responses, supporting tool calls and normal streaming responses
-///
-/// Choose processing path based on tool call identifier in response headers:
-/// - Tool call needed: Extract tool call information from stream and call MCP server
-/// - Normal streaming response: Directly process streaming data and return
-///
-/// # Arguments
-///
-/// * `response` - HTTP response from downstream server
-/// * `request` - Chat request, may be modified
-/// * `headers` - HTTP request headers
-/// * `chat_service_url` - Chat service URL
-/// * `request_id` - Request ID
-/// * `cancel_token` - Cancellation token
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-async fn handle_stream_response(
-    response: reqwest::Response,
-    request: &mut ChatCompletionRequest,
-    headers: &HeaderMap,
-    chat_server: &TargetServerInfo,
-    request_id: &str,
-    cancel_token: CancellationToken,
-    conv_id: Option<&str>,
-    user_message: Option<&str>,
-    state: &Arc<AppState>,
-) -> ServerResult<axum::response::Response> {
-    let status = response.status();
-
-    // check the status code
-    match status {
-        StatusCode::OK => {
-            let response_headers = response.headers().clone();
-
-            // Check if the response requires tool call
-            let requires_tool_call = parse_requires_tool_call_header(&response_headers);
-
-            if requires_tool_call {
-                // Handle tool call in stream mode
-                handle_tool_call_stream(
-                    response,
-                    request,
-                    headers,
-                    chat_server,
-                    request_id,
-                    cancel_token,
-                    conv_id,
-                    user_message,
-                    state,
-                )
-                .await
-            } else {
-                // Handle normal response in stream mode
-                handle_normal_stream(
-                    response,
-                    status,
-                    response_headers,
-                    request_id,
-                    cancel_token,
-                    conv_id,
-                    user_message,
-                    state,
-                )
-                .await
-            }
-        }
-        _ => {
-            // Convert reqwest::Response to axum::Response
-            let status = response.status();
-
-            let err_msg = format!("{status}");
-            dual_error!("{} - request_id: {}", err_msg, request_id);
-
-            let headers = response.headers().clone();
-            let bytes = response.bytes().await.map_err(|e| {
-                let err_msg = format!("Failed to get response bytes: {e}");
-                dual_error!("{} - request_id: {}", err_msg, request_id);
-                ServerError::Operation(err_msg)
-            })?;
-
-            build_response(status, headers, bytes, request_id)
-        }
-    }
-}
-
-/// Handle non-streaming chat responses, supporting both tool calls and normal responses
-///
-/// This function implements the following features:
-/// 1. Read complete response data from downstream server (with cancellation support)
-/// 2. Parse tool call identifier from response headers
-/// 3. Choose different processing paths based on tool call requirements:
-///    - Tool call needed: Parse response and call MCP server
-///    - Normal response: Directly build and return response
-/// 4. Provide complete error handling and cancellation support
-///
-/// # Arguments
-///
-/// * `response` - HTTP response object from downstream server
-/// * `request` - Chat completion request, may be modified (e.g., add tool call results)
-/// * `headers` - HTTP request headers for subsequent requests
-/// * `chat_service_url` - Chat service URL for re-requesting after tool calls
-/// * `request_id` - Request ID for log tracking and error handling
-/// * `cancel_token` - Cancellation token for request cancellation support
-///
-/// # Returns
-/// * `Ok(response)` - Successfully built HTTP response
-/// * `Err(ServerError)` - Error occurred during processing or was cancelled
-///
-/// # Processing Flow
-/// 1. Extract response status code and header information
-/// 2. Read response body data (with cancellation support)
-/// 3. Check if tool call is required
-/// 4. Choose processing path based on tool call requirements:
-///    - Tool call path: Parse response → Call MCP → Re-request → Return result
-///    - Normal path: Directly build response and return
-///
-/// # Error Handling
-/// * Response reading error: Return detailed error information
-/// * Cancellation operation: Log warning and return cancellation error
-/// * Tool call error: Decide whether to continue based on error type
-/// * Response building error: Return build failure error
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-async fn handle_non_stream_response(
-    response: reqwest::Response,
-    request: &mut ChatCompletionRequest,
-    headers: &HeaderMap,
-    chat_server: &TargetServerInfo,
-    request_id: &str,
-    cancel_token: CancellationToken,
-    conv_id: Option<&str>,
-    user_message: Option<&str>,
-    state: &Arc<AppState>,
-) -> ServerResult<axum::response::Response> {
-    let status = response.status();
-
-    // check the status code
-    match status {
-        StatusCode::OK => {
-            let response_headers = response.headers().clone();
-
-            // Read the response body
-            let bytes = read_response_bytes(response, request_id, cancel_token.clone()).await?;
-            let chat_completion = parse_chat_completion(&bytes, request_id)?;
-
-            // Check if the response requires tool call
-            let requires_tool_call = !chat_completion.choices[0].message.tool_calls.is_empty();
-
-            if requires_tool_call {
-                // Convert tool calls to stored format for memory
-                let stored_tool_calls = if let Some(conv_id) = conv_id {
-                    Some(convert_tool_calls_to_stored(
-                        &chat_completion.choices[0].message.tool_calls,
-                        conv_id,
-                    ))
-                } else {
-                    None
-                };
-
-                call_mcp_server(
-                    chat_completion.choices[0].message.tool_calls.as_slice(),
-                    request,
-                    headers,
-                    chat_server,
-                    request_id,
-                    cancel_token,
-                    conv_id,
-                    user_message,
-                    state,
-                    stored_tool_calls,
-                )
-                .await
-            } else {
-                // Extract assistant message for memory storage
-                let assistant_message = chat_completion.choices[0].message.content.clone();
-
-                // 存储助手消息到记忆中
-                if let Some(memory) = &state.memory
-                    && let Some(conv_id) = conv_id
-                    && let Some(assistant_msg) = &assistant_message
-                {
-                    let _ = memory
-                        .add_assistant_message(conv_id, assistant_msg, vec![])
-                        .await
-                        .map_err(|e| {
-                            let err_msg =
-                                format!("Failed to store assistant message to memory: {e}");
-                            dual_warn!("{} - request_id: {}", err_msg, request_id);
-                            ServerError::Operation(err_msg)
-                        })?;
-                }
-
-                // Handle normal response in non-stream mode
-                build_response(status, response_headers, bytes, request_id)
-            }
-        }
-        _ => {
-            // Convert reqwest::Response to axum::Response
-            let status = response.status();
-
-            let err_msg = format!("{status}");
-            dual_error!("{} - request_id: {}", err_msg, request_id);
-
-            let headers = response.headers().clone();
-            let bytes = response.bytes().await.map_err(|e| {
-                let err_msg = format!("Failed to get response bytes: {e}");
-                dual_error!("{} - request_id: {}", err_msg, request_id);
-                ServerError::Operation(err_msg)
-            })?;
-
-            build_response(status, headers, bytes, request_id)
-        }
-    }
-}
-
-/// Handle tool calls in streaming responses
-///
-/// Parse tool call information from streaming response, call MCP server to execute tools,
-/// then add tool execution results to the request and re-send the request.
-///
-/// # Arguments
-///
-/// * `response` - HTTP response from downstream server
-/// * `request` - Chat request, will be modified to include tool call results
-/// * `headers` - HTTP request headers
-/// * `chat_server` - Chat server information
-/// * `request_id` - Request ID
-/// * `cancel_token` - Cancellation token
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-async fn handle_tool_call_stream(
-    response: reqwest::Response,
-    request: &mut ChatCompletionRequest,
-    headers: &HeaderMap,
-    chat_server: &TargetServerInfo,
-    request_id: &str,
-    cancel_token: CancellationToken,
-    conv_id: Option<&str>,
-    user_message: Option<&str>,
-    state: &Arc<AppState>,
-) -> ServerResult<axum::response::Response> {
-    let tool_calls = extract_tool_calls_from_stream(response, request_id).await?;
-
-    // Convert tool calls to stored format for memory
-    let stored_tool_calls =
-        conv_id.map(|conv_id| convert_tool_calls_to_stored(&tool_calls, conv_id));
-
-    call_mcp_server(
-        tool_calls.as_slice(),
-        request,
-        headers,
-        chat_server,
-        request_id,
-        cancel_token,
-        conv_id,
-        user_message,
-        state,
-        stored_tool_calls.clone(),
-    )
-    .await
-}
-
 /// Parse tool call identifier from HTTP response headers
 ///
 /// Check if the "requires-tool-call" field exists in response headers and parse it as boolean.
@@ -2563,77 +1984,6 @@ fn parse_requires_tool_call_header(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<bool>().ok())
         .unwrap_or(false)
-}
-
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-async fn handle_normal_stream(
-    response: reqwest::Response,
-    status: StatusCode,
-    response_headers: HeaderMap,
-    request_id: &str,
-    cancel_token: CancellationToken,
-    conv_id: Option<&str>,
-    user_message: Option<&str>,
-    state: &Arc<AppState>,
-) -> ServerResult<axum::response::Response> {
-    // Handle response body reading with cancellation
-    let bytes = select! {
-        bytes = response.bytes() => {
-            bytes.map_err(|e| {
-                let err_msg = format!("Failed to get the full response as bytes: {e}");
-                dual_error!("{} - request_id: {}", err_msg, request_id);
-                ServerError::Operation(err_msg)
-            })?
-        }
-        _ = cancel_token.cancelled() => {
-            let warn_msg = "Request was cancelled while reading response";
-            dual_warn!("{} - request_id: {}", warn_msg, request_id);
-            return Err(ServerError::Operation(warn_msg.to_string()));
-        }
-    };
-
-    // Extract assistant message for memory storage in streaming response
-    if let (Some(conv_id), Some(user_msg), Some(_)) = (conv_id, user_message, &state.memory)
-        && let Ok(response_text) = std::str::from_utf8(&bytes)
-        && let Ok(assistant_message) = extract_assistant_message_from_stream(response_text)
-        && let Err(e) = store_messages_to_memory(
-            state,
-            conv_id,
-            Some(user_msg.to_string()),
-            Some(assistant_message),
-            None,
-            request_id,
-        )
-        .await
-    {
-        dual_warn!(
-            "Failed to store streaming response to memory: {} - request_id: {}",
-            e,
-            request_id
-        );
-    }
-
-    // build the response builder
-    let response_builder = Response::builder().status(status);
-
-    // copy the response headers
-    let response_builder = copy_response_headers(response_builder, &response_headers);
-
-    match response_builder.body(Body::from(bytes)) {
-        Ok(response) => {
-            dual_info!(
-                "Chat request completed successfully - request_id: {}",
-                request_id
-            );
-            Ok(response)
-        }
-        Err(e) => {
-            let err_msg = format!("Failed to create the response: {e}");
-            dual_error!("{} - request_id: {}", err_msg, request_id);
-            Err(ServerError::Operation(err_msg))
-        }
-    }
 }
 
 /// Extract assistant message content from streaming response
@@ -2671,58 +2021,6 @@ fn extract_assistant_message_from_stream(response_text: &str) -> ServerResult<St
     }
 
     Ok(content_parts.join(""))
-}
-
-/// Extract and store final assistant message for memory storage
-///
-/// This function handles both streaming and non-streaming responses, extracting the assistant message
-/// and storing it to memory if all required conditions are met.
-#[allow(dead_code)]
-async fn extract_and_store_final_assistant_message(
-    bytes: &Bytes,
-    request: &ChatCompletionRequest,
-    conv_id: Option<&str>,
-    stored_tool_calls: Option<&Vec<StoredToolCall>>,
-    state: &Arc<AppState>,
-    request_id: &str,
-) {
-    if let (Some(conv_id), Some(_), Some(_)) = (conv_id, &state.memory, stored_tool_calls) {
-        let final_assistant_message = match request.stream {
-            Some(true) => {
-                // For streaming responses, extract from SSE format
-                if let Ok(response_text) = std::str::from_utf8(bytes) {
-                    extract_assistant_message_from_stream(response_text).ok()
-                } else {
-                    None
-                }
-            }
-            Some(false) | None => {
-                // For non-streaming responses, parse JSON
-                let bytes_obj = Bytes::from(bytes.to_vec());
-                if let Ok(chat_completion) = parse_chat_completion(&bytes_obj, request_id) {
-                    chat_completion
-                        .choices
-                        .first()
-                        .and_then(|choice| choice.message.content.clone())
-                } else {
-                    None
-                }
-            }
-        };
-
-        // Store only the final assistant response as a separate message
-        if let Some(final_response) = final_assistant_message {
-            let _ = store_messages_to_memory(
-                state,
-                conv_id,
-                None, // No user message this time, already stored with tool calls
-                Some(final_response),
-                None, // No tool calls in the final response
-                request_id,
-            )
-            .await;
-        }
-    }
 }
 
 /// Read HTTP response body data with cancellation support
@@ -4039,6 +3337,70 @@ async fn run_in_react_mode(
                     todo!()
                 }
             }
+        }
+    }
+}
+
+impl From<crate::memory::types::ModelMessage> for ChatCompletionRequestMessage {
+    fn from(msg: crate::memory::types::ModelMessage) -> Self {
+        match msg.role {
+            ModelRole::System => {
+                ChatCompletionRequestMessage::new_system_message(&msg.content, None)
+            }
+            ModelRole::User => ChatCompletionRequestMessage::new_user_message(
+                ChatCompletionUserMessageContent::Text(msg.content),
+                None,
+            ),
+            ModelRole::Assistant => {
+                match msg.tool_calls {
+                    Some(tool_calls) => {
+                        // 如果存在工具调用，则将其包含在请求消息中
+                        // ChatCompletionRequestMessage::Assistant(
+                        //     ChatCompletionAssistantMessage::new(msg.content, None, Some(tool_call.clone())),
+                        // )
+
+                        let tool_calls = tool_calls
+                            .into_iter()
+                            .map(|tool_call| tool_call.into())
+                            .collect();
+
+                        ChatCompletionRequestMessage::new_assistant_message(
+                            Some(msg.content),
+                            None,
+                            Some(tool_calls),
+                        )
+                    }
+                    None => {
+                        // 否则只包含消息内容
+                        // ChatCompletionRequestMessage::Assistant(
+                        //     ChatCompletionAssistantMessage::new(msg.content, None, None),
+                        // )
+
+                        ChatCompletionRequestMessage::new_assistant_message(
+                            Some(msg.content),
+                            None,
+                            None,
+                        )
+                    }
+                }
+            }
+            ModelRole::Tool => ChatCompletionRequestMessage::Tool(ChatCompletionToolMessage::new(
+                &msg.content,
+                msg.tool_call_id.as_deref().unwrap(),
+            )),
+        }
+    }
+}
+
+impl From<ModelToolCall> for ToolCall {
+    fn from(tool_call: ModelToolCall) -> Self {
+        ToolCall {
+            id: tool_call.id,
+            ty: tool_call.ty,
+            function: Function {
+                name: tool_call.function.name,
+                arguments: tool_call.function.arguments,
+            },
         }
     }
 }

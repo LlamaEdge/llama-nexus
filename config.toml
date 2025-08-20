@@ -6,11 +6,19 @@ port = 3389        # The port to listen on.
 [memory]
 enable = false                                    # Enable/disable memory functionality
 database_path = "data/memory.db"                 # Path to SQLite database file
-context_window = 4000                            # Maximum context window for conversations
+context_window = 8192                            # Maximum context window for conversations
 auto_summarize = true                            # Enable automatic message summarization
-summarize_threshold = 20                         # Summarize when message count exceeds this number
-max_stored_messages = 100                        # Maximum messages to store per conversation
-cleanup_interval_hours = 24                     # Hours between automatic cleanup operations
+summary_service_base_url = "http://localhost:10086/v1"  # Base URL for summary service
+summary_service_api_key = ""                            # API key for summary service (leave empty if not required)
+
+# Message summarization configuration:
+# - When message count reaches 'max_stored_messages', summarization is triggered
+# - After summarization, at least 'summarize_threshold/2' recent messages are kept
+# - Relationship: max_stored_messages > summarize_threshold (recommended)
+# - Example: 20 messages trigger → keep 6 recent → summarize 14 old messages
+max_stored_messages = 20                         # Trigger summarization when message count reaches this limit
+summarize_threshold = 12                         # Base number for calculating minimum kept messages (kept = threshold/2)
+
 
 # Note that, if any of the MCP tool servers are enabled, then please guarantee that the
 # corresponding mcp server is started before starting the LlamaNexus server.

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum MessageRole {
     User,
     Assistant,
@@ -30,6 +30,17 @@ impl std::str::FromStr for MessageRole {
             "system" => Ok(MessageRole::System),
             "tool" => Ok(MessageRole::Tool),
             _ => Err(anyhow::anyhow!("Invalid message role: {}", s)),
+        }
+    }
+}
+
+impl From<ModelRole> for MessageRole {
+    fn from(role: ModelRole) -> Self {
+        match role {
+            ModelRole::User => MessageRole::User,
+            ModelRole::Assistant => MessageRole::Assistant,
+            ModelRole::System => MessageRole::System,
+            ModelRole::Tool => MessageRole::Tool,
         }
     }
 }
@@ -97,16 +108,60 @@ pub struct ContextMemory {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct ModelMessage {
-    pub role: String,
+    pub role: ModelRole,
     pub content: String,
     pub tool_calls: Option<Vec<ModelToolCall>>,
     pub tool_call_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ModelRole {
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+impl std::fmt::Display for ModelRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModelRole::User => write!(f, "user"),
+            ModelRole::Assistant => write!(f, "assistant"),
+            ModelRole::System => write!(f, "system"),
+            ModelRole::Tool => write!(f, "tool"),
+        }
+    }
+}
+
+impl std::str::FromStr for ModelRole {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "user" => Ok(ModelRole::User),
+            "assistant" => Ok(ModelRole::Assistant),
+            "system" => Ok(ModelRole::System),
+            "tool" => Ok(ModelRole::Tool),
+            _ => Err(anyhow::anyhow!("Invalid model role: {}", s)),
+        }
+    }
+}
+
+impl From<MessageRole> for ModelRole {
+    fn from(role: MessageRole) -> Self {
+        match role {
+            MessageRole::User => ModelRole::User,
+            MessageRole::Assistant => ModelRole::Assistant,
+            MessageRole::System => ModelRole::System,
+            MessageRole::Tool => ModelRole::Tool,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelToolCall {
     pub id: String,
-    pub r#type: String,
+    pub ty: String,
     pub function: ModelToolFunction,
 }
 
