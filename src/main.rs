@@ -180,23 +180,39 @@ async fn main() -> ServerResult<()> {
         .allow_origin(Any);
 
     // Set up the router
-    let app =
-        Router::new()
-            .route("/v1/chat/completions", post(handlers::chat_handler))
-            .route("/v1/embeddings", post(handlers::embeddings_handler))
-            .route(
-                "/v1/audio/transcriptions",
-                post(handlers::audio_transcriptions_handler),
-            )
-            .route(
-                "/v1/audio/translations",
-                post(handlers::audio_translations_handler),
-            )
-            .route("/v1/audio/speech", post(handlers::audio_tts_handler))
-            .route("/v1/images/generations", post(handlers::image_handler))
-            .route("/v1/images/edits", post(handlers::image_handler))
-            .route("/v1/models", get(handlers::models_handler))
-            .route("/v1/info", get(handlers::info_handler))
+    let mut app = Router::new()
+        .route("/v1/chat/completions", post(handlers::chat_handler))
+        .route("/v1/embeddings", post(handlers::embeddings_handler))
+        .route(
+            "/v1/audio/transcriptions",
+            post(handlers::audio_transcriptions_handler),
+        )
+        .route(
+            "/v1/audio/translations",
+            post(handlers::audio_translations_handler),
+        )
+        .route("/v1/audio/speech", post(handlers::audio_tts_handler))
+        .route("/v1/images/generations", post(handlers::image_handler))
+        .route("/v1/images/edits", post(handlers::image_handler))
+        .route("/v1/models", get(handlers::models_handler))
+        .route("/v1/info", get(handlers::info_handler))
+        .route(
+            "/admin/servers/register",
+            post(handlers::admin::register_downstream_server_handler),
+        )
+        .route(
+            "/admin/servers/unregister",
+            post(handlers::admin::remove_downstream_server_handler),
+        )
+        .route(
+            "/admin/servers",
+            get(handlers::admin::list_downstream_servers_handler),
+        );
+
+    // Add memory endpoints only if memory is enabled
+    if state.memory.is_some() {
+        dual_info!("Memory endpoints are enabled");
+        app = app
             .route(
                 "/v1/memory/conversations/{conv_id}/history",
                 get(handlers::get_conversation_history_handler),
@@ -208,19 +224,12 @@ async fn main() -> ServerResult<()> {
             .route(
                 "/v1/memory/users/{user_id}/conversations",
                 get(handlers::list_user_conversations_handler),
-            )
-            .route(
-                "/admin/servers/register",
-                post(handlers::admin::register_downstream_server_handler),
-            )
-            .route(
-                "/admin/servers/unregister",
-                post(handlers::admin::remove_downstream_server_handler),
-            )
-            .route(
-                "/admin/servers",
-                get(handlers::admin::list_downstream_servers_handler),
-            )
+            );
+    } else {
+        dual_info!("Memory endpoints are disabled");
+    }
+
+    let app = app
             .layer(cors)
             .layer(TraceLayer::new_for_http())
             .layer(axum::middleware::from_fn(
