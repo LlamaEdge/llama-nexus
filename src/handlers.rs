@@ -192,8 +192,13 @@ pub(crate) async fn chat(
     if let Some(memory) = &state.memory
         && let Some(conv_id) = &conv_id
         && let Some(user_msg) = &user_message
+        && let Err(e) = memory.add_user_message(conv_id, user_msg.clone()).await
     {
-        let _ = memory.add_user_message(conv_id, user_msg.clone()).await;
+        dual_error!(
+            "Failed to add user message to memory: {} - request_id: {}",
+            e,
+            request_id
+        );
     }
 
     // Build and send request
@@ -294,12 +299,20 @@ pub(crate) async fn chat(
                                 Ok(response_text) => {
                                     match extract_assistant_message_from_stream(response_text) {
                                         Ok(assistant_message) => {
-                                            let _ = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await.map_err(|e| {
-                                                    dual_warn!(
-                                                        "Failed to store streaming response to memory: {} - request_id: {}",
-                                                        e, request_id
-                                                    );
-                                                });
+                                            if let Err(e) = memory
+                                                .add_assistant_message(
+                                                    conv_id,
+                                                    &assistant_message,
+                                                    vec![],
+                                                )
+                                                .await
+                                            {
+                                                dual_error!(
+                                                    "Failed to add assistant message to memory: {} - request_id: {}",
+                                                    e,
+                                                    request_id
+                                                );
+                                            }
                                         }
                                         Err(e) => {
                                             let warn_msg = format!(
@@ -405,15 +418,15 @@ pub(crate) async fn chat(
                         if let Some(memory) = &state.memory
                             && let Some(conv_id) = &conv_id
                             && let Some(assistant_msg) = &chat_completion.choices[0].message.content
-                        {
-                            let _ = memory
+                            && let Err(e) = memory
                                 .add_assistant_message(conv_id, assistant_msg, vec![])
                                 .await
-                                .map_err(|e| {
-                                    let err_msg =
-                                        format!("Failed to store assistant message to memory: {e}");
-                                    dual_warn!("{} - request_id: {}", err_msg, request_id);
-                                });
+                        {
+                            dual_error!(
+                                "Failed to add assistant message to memory: {} - request_id: {}",
+                                e,
+                                request_id
+                            );
                         }
 
                         // Handle normal response in non-stream mode
@@ -2334,13 +2347,20 @@ async fn call_mcp_server(
                                                 std::slice::from_ref(&text.text),
                                             );
 
-                                            let _ = memory.add_assistant_message(conv_id, "", stored_tcs.clone()).await.map_err(|e| {
-                                                dual_warn!(
+                                            if let Err(e) = memory
+                                                .add_assistant_message(
+                                                    conv_id,
+                                                    "",
+                                                    stored_tcs.clone(),
+                                                )
+                                                .await
+                                            {
+                                                dual_error!(
                                                     "Failed to store tool calls to memory: {} - request_id: {}",
                                                     e,
                                                     request_id
                                                 );
-                                            });
+                                            }
                                         }
 
                                         match SEARCH_MCP_SERVER_NAMES
@@ -2561,8 +2581,7 @@ async fn call_mcp_server(
                                                                             match extract_assistant_message_from_stream(response_text) {
                                                                                 Ok(assistant_message) => {
                                                                                     if let Err(e) = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await {
-                                                                                        let warn_msg = format!("Failed to add assistant message to memory: {e}");
-                                                                                        dual_warn!("{} - request_id: {}", warn_msg, request_id);
+                                                                                        dual_error!("Failed to add assistant message to memory: {e} - request_id: {}", request_id);
                                                                                     }
                                                                                 }
                                                                                 Err(e) => {
@@ -2581,9 +2600,8 @@ async fn call_mcp_server(
                                                                     match parse_chat_completion(&bytes, request_id) {
                                                                         Ok(chat_completion) => {
                                                                             if let Some(assistant_message) = chat_completion.choices.first().and_then(|choice| choice.message.content.clone()) && let Err(e) = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await {
-                                                                                    let warn_msg = format!("Failed to add assistant message to memory: {e}");
-                                                                                    dual_warn!("{} - request_id: {}", warn_msg, request_id);
-                                                                                }
+                                                                                dual_error!("Failed to add assistant message to memory: {e} - request_id: {}", request_id);
+                                                                            }
                                                                         },
                                                                         Err(e) => {
                                                                             let warn_msg = format!("Failed to parse chat completion: {e}");
@@ -2737,8 +2755,7 @@ async fn call_mcp_server(
                                                                             match extract_assistant_message_from_stream(response_text) {
                                                                                 Ok(assistant_message) => {
                                                                                     if let Err(e) = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await {
-                                                                                        let warn_msg = format!("Failed to add assistant message to memory: {e}");
-                                                                                        dual_warn!("{} - request_id: {}", warn_msg, request_id);
+                                                                                        dual_warn!("Failed to add assistant message to memory: {e} - request_id: {}", request_id);
                                                                                     }
                                                                                 }
                                                                                 Err(e) => {
@@ -2757,9 +2774,8 @@ async fn call_mcp_server(
                                                                     match parse_chat_completion(&bytes, request_id) {
                                                                         Ok(chat_completion) => {
                                                                             if let Some(assistant_message) = chat_completion.choices.first().and_then(|choice| choice.message.content.clone()) && let Err(e) = memory.add_assistant_message(conv_id, &assistant_message, vec![]).await {
-                                                                                    let warn_msg = format!("Failed to add assistant message to memory: {e}");
-                                                                                    dual_warn!("{} - request_id: {}", warn_msg, request_id);
-                                                                                }
+                                                                                dual_warn!("Failed to add assistant message to memory: {e} - request_id: {}", request_id);
+                                                                            }
 
                                                                         },
                                                                         Err(e) => {
