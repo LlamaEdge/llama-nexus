@@ -229,8 +229,8 @@ async fn main() -> ServerResult<()> {
         dual_info!("Memory endpoints are disabled");
     }
 
-    let app = app
-            .layer(cors)
+    let app =
+        app.layer(cors)
             .layer(TraceLayer::new_for_http())
             .layer(axum::middleware::from_fn(
                 |mut req: Request<Body>, next: axum::middleware::Next| async move {
