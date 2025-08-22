@@ -13,10 +13,11 @@ This document provides detailed information about Memory feature configuration p
     - [2. database\_path](#2-database_path)
     - [3. context\_window](#3-context_window)
     - [4. auto\_summarize](#4-auto_summarize)
-    - [5. summary\_service\_base\_url](#5-summary_service_base_url)
-    - [6. summary\_service\_api\_key](#6-summary_service_api_key)
-    - [7. max\_stored\_messages](#7-max_stored_messages)
-    - [8. summarize\_threshold](#8-summarize_threshold)
+    - [5. summarization\_strategy](#5-summarization_strategy)
+    - [6. summary\_service\_base\_url](#6-summary_service_base_url)
+    - [7. summary\_service\_api\_key](#7-summary_service_api_key)
+    - [8. max\_stored\_messages](#8-max_stored_messages)
+    - [9. summarize\_threshold](#9-summarize_threshold)
   - [Configuration Relationship Diagram](#configuration-relationship-diagram)
   - [Best Practices](#best-practices)
     - [1. Parameter Configuration Recommendations](#1-parameter-configuration-recommendations)
@@ -34,6 +35,7 @@ enable = true
 database_path = "data/memory.db"
 context_window = 8192
 auto_summarize = true
+summarization_strategy = "Incremental"
 summary_service_base_url = "http://localhost:10086/v1"
 summary_service_api_key = ""
 max_stored_messages = 20
@@ -157,7 +159,68 @@ auto_summarize = false # Disable automatic summarization
 
 ---
 
-### 5. summary_service_base_url
+### 5. summarization_strategy
+
+**Function**: Choose summarization strategy to control how summaries are generated and their quality.
+
+**Configuration**:
+
+```toml
+summarization_strategy = "Incremental"  # Incremental summarization strategy (default)
+summarization_strategy = "FullHistory"  # Full history summarization strategy
+```
+
+**Strategy Descriptions**:
+
+**Incremental Summarization (Incremental)**:
+
+- **How it works**: Generate updated summary based on existing summary + new messages
+- **Advantages**: High efficiency, low computational overhead, fast response time
+- **Disadvantages**: May lose some context information over time
+- **Use cases**: High-frequency conversations, resource-constrained environments, simple dialogues
+
+**Full History Summarization (FullHistory)**:
+
+- **How it works**: Regenerate summary based on all relevant historical messages
+- **Advantages**: Complete context, high summary quality, preserves information integrity
+- **Disadvantages**: High computational overhead, longer response time
+- **Use cases**: Complex tasks, long-term conversations, high-quality requirements
+
+**Configuration Recommendations**:
+
+```toml
+# High-frequency scenario configuration
+[memory]
+summarization_strategy = "Incremental"
+max_stored_messages = 15
+summarize_threshold = 10
+context_window = 4096
+
+# High-quality scenario configuration
+[memory]
+summarization_strategy = "FullHistory"
+max_stored_messages = 25
+summarize_threshold = 15
+context_window = 16384
+```
+
+**Performance Comparison**:
+
+| Strategy Type | Response Time | Computational Cost | Summary Quality | Context Preservation |
+|---------------|---------------|---------------------|-----------------|---------------------|
+| Incremental | Fast | Low | Medium | May decrease |
+| Full History | Slow | High | High | Complete |
+
+**Considerations**:
+
+- Default is `Incremental` strategy for backward compatibility
+- `FullHistory` strategy significantly increases computation time and resource consumption
+- Choose appropriate strategy based on specific application scenarios
+- Configuration can be adjusted dynamically at runtime
+
+---
+
+### 6. summary_service_base_url
 
 **Function**: Specify the base URL for external service used for message summarization.
 
@@ -195,7 +258,7 @@ summary_service_base_url = "https://your-custom-llm-service.com/v1"
 
 ---
 
-### 6. summary_service_api_key
+### 7. summary_service_api_key
 
 **Function**: API key for accessing the summarization service.
 
@@ -228,7 +291,7 @@ export SUMMARY_API_KEY="your-api-key"
 
 ---
 
-### 7. max_stored_messages
+### 8. max_stored_messages
 
 **Function**: Set the message count threshold for triggering automatic summarization.
 
@@ -259,7 +322,7 @@ max_stored_messages = 20  # Trigger summarization at 20 messages
 
 ---
 
-### 8. summarize_threshold
+### 9. summarize_threshold
 
 **Function**: Define the calculation base for the number of recent messages to retain after summarization.
 
@@ -317,6 +380,7 @@ context_window = 8192
 max_stored_messages = 20
 summarize_threshold = 12
 auto_summarize = true
+summarization_strategy = "Incremental"
 
 # High-frequency conversation configuration
 [memory]
@@ -325,15 +389,31 @@ context_window = 4096
 max_stored_messages = 15
 summarize_threshold = 10
 auto_summarize = true
+summarization_strategy = "Incremental"
 
-# Long conversation configuration
+# High-quality long conversation configuration
 [memory]
 enable = true
 context_window = 16384
-max_stored_messages = 30
-summarize_threshold = 18
+max_stored_messages = 25
+summarize_threshold = 15
 auto_summarize = true
+summarization_strategy = "FullHistory"
 ```
+
+**Summarization Strategy Selection Guide**:
+
+- **Choose Incremental Summarization when**:
+  - High-frequency conversation interactions
+  - Strict response time requirements
+  - Resource-constrained deployment environments
+  - Relatively simple conversation content
+
+- **Choose Full History Summarization when**:
+  - Complex multi-turn task conversations
+  - Need to maintain complete context
+  - Extremely high summary quality requirements
+  - Important decision-support conversations
 
 ### 2. Performance Optimization
 
@@ -342,12 +422,20 @@ auto_summarize = true
   - Summarization trigger frequency
   - Memory usage
   - Response time
+  - **Summary generation time**:
+    - Incremental summarization: usually < 2 seconds
+    - Full history summarization: may be > 5 seconds
 
 - **Tuning Strategies**:
   - Adjust thresholds based on actual conversation patterns
   - Monitor summarization service performance
   - Regularly clean up expired data
   - Optimize database queries
+  - **Summarization strategy tuning**:
+    - Choose appropriate summarization strategy based on load conditions
+    - Use incremental summarization under high load
+    - Use full history summarization when high quality is required
+    - Monitor summary quality and adjust accordingly
 
 ### 3. Troubleshooting
 
@@ -372,6 +460,12 @@ auto_summarize = true
    - Verify `database_path` permissions
    - Check disk space
    - Regularly backup database files
+
+5. **Summarization Strategy Related Issues**
+   - **Full history summarization responds slowly**: Consider switching to incremental summarization strategy
+   - **Incremental summarization quality degradation**: Periodically use full history summarization to regenerate baseline summaries
+   - **Incoherent summary content**: Check summarization service configuration and prompt settings
+   - **Historical information loss**: Consider using full history summarization strategy
 
 ## Summary
 

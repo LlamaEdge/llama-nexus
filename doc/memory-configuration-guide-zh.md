@@ -9,10 +9,11 @@
     - [2. database\_path](#2-database_path)
     - [3. context\_window](#3-context_window)
     - [4. auto\_summarize](#4-auto_summarize)
-    - [5. summary\_service\_base\_url](#5-summary_service_base_url)
-    - [6. summary\_service\_api\_key](#6-summary_service_api_key)
-    - [7. max\_stored\_messages](#7-max_stored_messages)
-    - [8. summarize\_threshold](#8-summarize_threshold)
+    - [5. summarization\_strategy](#5-summarization_strategy)
+    - [6. summary\_service\_base\_url](#6-summary_service_base_url)
+    - [7. summary\_service\_api\_key](#7-summary_service_api_key)
+    - [8. max\_stored\_messages](#8-max_stored_messages)
+    - [9. summarize\_threshold](#9-summarize_threshold)
   - [配置关系图](#配置关系图)
   - [最佳实践](#最佳实践)
     - [1. 参数配置建议](#1-参数配置建议)
@@ -30,6 +31,7 @@ enable = true
 database_path = "data/memory.db"
 context_window = 8192
 auto_summarize = true
+summarization_strategy = "Incremental"
 summary_service_base_url = "http://localhost:10086/v1"
 summary_service_api_key = ""
 max_stored_messages = 20
@@ -153,7 +155,68 @@ auto_summarize = false # 禁用自动总结
 
 ---
 
-### 5. summary_service_base_url
+### 5. summarization_strategy
+
+**功能**：选择摘要生成策略，控制摘要的生成方式和质量。
+
+**配置**：
+
+```toml
+summarization_strategy = "Incremental"  # 增量摘要策略（默认）
+summarization_strategy = "FullHistory"  # 完整历史摘要策略
+```
+
+**策略说明**：
+
+**增量摘要（Incremental）**：
+
+- **工作原理**：基于现有摘要 + 新消息生成更新摘要
+- **优点**：效率高，计算开销小，响应时间快
+- **缺点**：可能随时间丢失部分上下文信息
+- **适用场景**：高频对话、资源受限环境、简单对话
+
+**完整历史摘要（FullHistory）**：
+
+- **工作原理**：基于所有相关历史消息重新生成摘要
+- **优点**：上下文完整，摘要质量高，信息保持完整
+- **缺点**：计算开销大，响应时间长
+- **适用场景**：复杂任务、长期对话、高质量要求
+
+**配置建议**：
+
+```toml
+# 高频场景配置
+[memory]
+summarization_strategy = "Incremental"
+max_stored_messages = 15
+summarize_threshold = 10
+context_window = 4096
+
+# 高质量场景配置
+[memory]
+summarization_strategy = "FullHistory"
+max_stored_messages = 25
+summarize_threshold = 15
+context_window = 16384
+```
+
+**性能对比**：
+
+| 策略类型 | 响应时间 | 计算开销 | 摘要质量 | 上下文保持 |
+|---------|---------|---------|---------|-----------|
+| 增量摘要 | 快 | 低 | 中等 | 可能降低 |
+| 完整历史 | 慢 | 高 | 高 | 完整保持 |
+
+**注意事项**：
+
+- 默认为 `Incremental` 策略，保持向后兼容
+- `FullHistory` 策略会显著增加计算时间和资源消耗
+- 建议根据具体应用场景选择合适的策略
+- 可以在运行时动态调整配置
+
+---
+
+### 6. summary_service_base_url
 
 **功能**：指定用于消息总结的外部服务的基础 URL。
 
@@ -191,7 +254,7 @@ summary_service_base_url = "https://your-custom-llm-service.com/v1"
 
 ---
 
-### 6. summary_service_api_key
+### 7. summary_service_api_key
 
 **功能**：用于访问总结服务的 API 密钥。
 
@@ -224,7 +287,7 @@ export SUMMARY_API_KEY="your-api-key"
 
 ---
 
-### 7. max_stored_messages
+### 8. max_stored_messages
 
 **功能**：设置触发自动总结的消息数量阈值。
 
@@ -255,7 +318,7 @@ max_stored_messages = 20  # 20条消息时触发总结
 
 ---
 
-### 8. summarize_threshold
+### 9. summarize_threshold
 
 **功能**：定义总结后保留的最近消息数量的计算基数。
 
@@ -313,6 +376,7 @@ context_window = 8192
 max_stored_messages = 20
 summarize_threshold = 12
 auto_summarize = true
+summarization_strategy = "Incremental"
 
 # 高频对话配置
 [memory]
@@ -321,15 +385,33 @@ context_window = 4096
 max_stored_messages = 15
 summarize_threshold = 10
 auto_summarize = true
+summarization_strategy = "Incremental"
 
-# 长对话配置
+# 高质量长对话配置
 [memory]
 enable = true
 context_window = 16384
-max_stored_messages = 30
+max_stored_messages = 25
+summarize_threshold = 15
+auto_summarize = true
+summarization_strategy = "FullHistory"
+```
+
+**摘要策略选择指南**：
+
+- **选择增量摘要（Incremental）的场景**：
+  - 高频率的对话交互
+  - 对响应时间有严格要求
+  - 资源受限的部署环境
+  - 相对简单的对话内容
+
+- **选择完整历史摘要（FullHistory）的场景**：
+  - 复杂的多轮任务对话
+  - 需要保持完整上下文的场景
+  - 对摘要质量要求极高
+  - 重要的决策支持对话
 summarize_threshold = 18
 auto_summarize = true
-```
 
 ### 2. 性能优化
 
@@ -338,12 +420,20 @@ auto_summarize = true
   - 总结触发频率
   - 内存使用量
   - 响应时间
+  - **摘要生成时间**：
+    - 增量摘要：通常 < 2 秒
+    - 完整历史摘要：可能 > 5 秒
 
 - **调优策略**：
   - 根据实际对话模式调整阈值
   - 监控总结服务的性能
   - 定期清理过期数据
   - 优化数据库查询
+  - **摘要策略调优**：
+    - 根据负载情况选择合适的摘要策略
+    - 在高负载时使用增量摘要
+    - 在质量要求高时使用完整历史摘要
+    - 监控摘要质量并适时调整
 
 ### 3. 故障排除
 
@@ -367,6 +457,13 @@ auto_summarize = true
 4. **数据库相关问题**
    - 验证 `database_path` 的权限
    - 检查磁盘空间
+   - 定期备份数据库文件
+
+5. **摘要策略相关问题**
+   - **完整历史摘要响应慢**：考虑切换到增量摘要策略
+   - **增量摘要质量下降**：定期使用完整历史摘要重新生成基准摘要
+   - **摘要内容不连贯**：检查摘要服务的配置和提示词设置
+   - **历史信息丢失**：考虑使用完整历史摘要策略
    - 定期备份数据库文件
 
 ## 总结
