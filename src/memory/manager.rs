@@ -491,6 +491,35 @@ impl CompleteChatMemory {
         Ok(())
     }
 
+    /// 计算在摘要截断时应该保留的消息数量
+    ///
+    /// # 参数
+    /// * `messages` - 当前工作上下文中的消息列表
+    ///
+    /// # 返回值
+    /// * `usize` - 应该保留的消息数量
+    ///
+    /// # 算法说明
+    /// 此方法采用多层决策算法来确定最优的消息保留数量：
+    ///
+    /// ## 第一层：基于 Token 的动态计算
+    /// - 计算目标保留的 token 数量：`max_context_tokens * (1 - summary_trigger_ratio)`
+    /// - 默认保留20%的上下文空间给工作消息（80%触发摘要时）
+    /// - 从最新消息开始反向累计，直到达到 token 或数量限制
+    ///
+    /// ## 第二层：配置最小值保证
+    /// - 确保至少保留配置的最小消息数（`summarize_threshold/2`）
+    /// - 取较大值：max(token_based_count, config_min_count)
+    ///
+    /// ## 第三层：消息对完整性调整
+    /// - 调用 `adjust_for_message_pairs` 确保不会拆散 user-assistant 消息对
+    /// - 如果分割点会打断对话对，会适当调整保留数量
+    ///
+    /// # 设计目标
+    /// - **智能平衡**：在节省上下文空间和保持信息完整性之间找到平衡
+    /// - **配置驱动**：支持通过配置参数调整保留策略
+    /// - **对话连贯**：确保保留的消息在语义上完整
+    /// - **性能优化**：避免过度保留导致的上下文膨胀
     fn calculate_keep_count(&self, messages: &[StoredMessage]) -> usize {
         let target_tokens =
             (self.max_context_tokens() as f32 * (1.0 - self.summary_trigger_ratio())) as usize;
