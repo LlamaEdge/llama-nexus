@@ -148,7 +148,7 @@ impl Default for MemoryConfig {
         Self {
             enable: false,
             database_path: "data/memory.db".to_string(),
-            context_window: 4000,
+            context_window: 8192,
             auto_summarize: true,
             // Default configuration follows the principle: max_stored_messages > summarize_threshold
             // This allows for effective summarization: 20 messages trigger → keep 6 → summarize 14
