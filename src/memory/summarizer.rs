@@ -4,18 +4,22 @@ use endpoints::chat::{
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 
-use crate::{dual_info, memory::types::*};
+use crate::{config::SummarizationStrategy, dual_debug, dual_info, memory::types::*};
 
 /// 消息摘要生成器
 ///
 /// 用于将对话中的多条消息压缩成简洁的摘要，以节省上下文空间。
-/// 支持增量摘要，可以基于现有摘要和新消息生成更新的摘要。
+/// 支持两种摘要策略：
+/// 1. 增量摘要：基于现有摘要和新消息生成更新的摘要（效率更高）
+/// 2. 完整历史摘要：基于所有历史消息重新生成摘要（上下文更完整）
 #[allow(dead_code)]
 pub struct MessageSummarizer {
     // 这里可以配置使用哪个模型进行摘要
     model_name: Option<String>,
     summary_service_base_url: String,
     summary_service_api_key: String,
+    /// 摘要策略配置
+    summarization_strategy: SummarizationStrategy,
 }
 
 impl MessageSummarizer {
@@ -23,6 +27,9 @@ impl MessageSummarizer {
     ///
     /// # 参数
     /// * `model_name` - 可选的模型名称，用于指定使用哪个 LLM 进行摘要生成
+    /// * `summary_service_base_url` - 摘要服务的基础 URL
+    /// * `summary_service_api_key` - 摘要服务的 API 密钥
+    /// * `summarization_strategy` - 摘要策略（增量摘要或完整历史摘要）
     ///
     /// # 返回值
     /// * `Self` - MessageSummarizer 实例
@@ -33,11 +40,13 @@ impl MessageSummarizer {
         model_name: Option<String>,
         summary_service_base_url: impl AsRef<str>,
         summary_service_api_key: impl AsRef<str>,
+        summarization_strategy: SummarizationStrategy,
     ) -> Self {
         Self {
             model_name,
             summary_service_base_url: summary_service_base_url.as_ref().to_string(),
             summary_service_api_key: summary_service_api_key.as_ref().to_string(),
+            summarization_strategy,
         }
     }
 
@@ -46,13 +55,16 @@ impl MessageSummarizer {
     /// # 参数
     /// * `messages` - 需要摘要的消息列表
     /// * `existing_summary` - 可选的现有摘要，用于增量摘要生成
+    /// * `full_history_messages` - 可选的完整历史消息，用于完整历史摘要策略
     ///
     /// # 返回值
     /// * `MemoryResult<String>` - 成功时返回生成的摘要文本，失败时返回 MemoryError
     ///
     /// # 说明
-    /// 此方法会将输入的消息列表转换为简洁的摘要文本。如果提供了现有摘要，
-    /// 将基于该摘要和新消息生成更新的摘要，适用于增量摘要场景。
+    /// 此方法支持两种摘要策略：
+    /// 1. 增量摘要：基于现有摘要和新消息生成更新的摘要
+    /// 2. 完整历史摘要：基于所有历史消息重新生成摘要
+    ///
     /// 摘要包含主要话题、关键决策、使用的工具以及未解决的问题。
     ///
     /// # 错误
@@ -61,21 +73,41 @@ impl MessageSummarizer {
         &self,
         messages: &[StoredMessage],
         existing_summary: Option<&str>,
+        full_history_messages: Option<&[StoredMessage]>,
     ) -> MemoryResult<String> {
-        dual_info!("Summarizing stored messages");
+        dual_info!(
+            "Summarizing stored messages using strategy: {}",
+            self.summarization_strategy
+        );
 
         if messages.is_empty() {
             return Ok(existing_summary.unwrap_or("").to_string());
         }
 
-        let prompt = self.build_summary_prompt(messages, existing_summary);
+        let prompt = match self.summarization_strategy {
+            SummarizationStrategy::Incremental => {
+                self.build_incremental_summary_prompt(messages, existing_summary)
+            }
+            SummarizationStrategy::FullHistory => {
+                self.build_full_history_summary_prompt(full_history_messages.unwrap_or(messages))
+            }
+        };
 
-        // 这里需要调用LLM API来生成摘要
-        // 暂时返回一个简单的摘要格式
+        dual_debug!("Prompt for summary generation:\n{}", prompt);
+
+        // 调用LLM API来生成摘要
         self.generate_summary_via_llm(&prompt).await
     }
 
-    fn build_summary_prompt(
+    /// 构建增量摘要提示词
+    ///
+    /// # 参数
+    /// * `messages` - 新增的消息列表
+    /// * `existing_summary` - 现有的摘要
+    ///
+    /// # 返回值
+    /// * `String` - 构建的提示词
+    fn build_incremental_summary_prompt(
         &self,
         messages: &[StoredMessage],
         existing_summary: Option<&str>,
@@ -90,6 +122,38 @@ impl MessageSummarizer {
             prompt.push_str("Please summarize the following conversation:\\n\\n");
         }
 
+        self.add_messages_to_prompt(&mut prompt, messages);
+        self.add_summary_requirements(&mut prompt);
+
+        prompt
+    }
+
+    /// 构建完整历史摘要提示词
+    ///
+    /// # 参数
+    /// * `all_history_messages` - 所有需要摘要的历史消息
+    ///
+    /// # 返回值
+    /// * `String` - 构建的提示词
+    fn build_full_history_summary_prompt(&self, all_history_messages: &[StoredMessage]) -> String {
+        let mut prompt = String::new();
+
+        prompt.push_str(
+            "Please create a comprehensive summary of the following conversation history:\\n\\n",
+        );
+
+        self.add_messages_to_prompt(&mut prompt, all_history_messages);
+        self.add_summary_requirements(&mut prompt);
+
+        prompt
+    }
+
+    /// 将消息添加到提示词中
+    ///
+    /// # 参数
+    /// * `prompt` - 提示词字符串（可变引用）
+    /// * `messages` - 要添加的消息列表
+    fn add_messages_to_prompt(&self, prompt: &mut String, messages: &[StoredMessage]) {
         for msg in messages {
             prompt.push_str(&format!("**{}:** {}\\n", msg.role, msg.content));
 
@@ -111,7 +175,13 @@ impl MessageSummarizer {
             }
             prompt.push('\n');
         }
+    }
 
+    /// 添加摘要要求到提示词中
+    ///
+    /// # 参数
+    /// * `prompt` - 提示词字符串（可变引用）
+    fn add_summary_requirements(&self, prompt: &mut String) {
         prompt.push_str(
             "\\nProvide a concise summary that captures:\\n\\
              1. Main topics discussed\\n\\
@@ -120,8 +190,6 @@ impl MessageSummarizer {
              4. Any unresolved issues\\n\\n\\
              Summary:",
         );
-
-        prompt
     }
 
     async fn generate_summary_via_llm(&self, prompt: impl AsRef<str>) -> MemoryResult<String> {

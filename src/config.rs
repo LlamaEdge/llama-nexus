@@ -103,6 +103,27 @@ pub struct ServerConfig {
     pub port: u16,
 }
 
+/// Summarization strategy for handling conversation history
+#[derive(Debug, Default, Copy, Deserialize, Serialize, Clone, PartialEq)]
+pub enum SummarizationStrategy {
+    /// Incremental summarization: Use existing summary + new messages
+    /// This is more efficient but may lose some context over time
+    #[default]
+    Incremental,
+    /// Full history summarization: Re-summarize all historical messages
+    /// This provides better context but is more computationally expensive
+    FullHistory,
+}
+
+impl std::fmt::Display for SummarizationStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            SummarizationStrategy::Incremental => write!(f, "Incremental"),
+            SummarizationStrategy::FullHistory => write!(f, "FullHistory"),
+        }
+    }
+}
+
 /// Memory system configuration
 ///
 /// Controls the behavior of conversation memory management including
@@ -117,6 +138,11 @@ pub struct MemoryConfig {
     pub context_window: u64,
     /// Enable automatic message summarization when limits are reached
     pub auto_summarize: bool,
+
+    /// Summarization strategy to use when generating summaries
+    /// - Incremental: Use existing summary + new messages (default, more efficient)
+    /// - FullHistory: Re-summarize all historical messages (better context, more expensive)
+    pub summarization_strategy: SummarizationStrategy,
 
     /// Base number for calculating minimum messages to keep after summarization.
     /// Actual kept messages = summarize_threshold / 2
@@ -150,6 +176,7 @@ impl Default for MemoryConfig {
             database_path: "data/memory.db".to_string(),
             context_window: 8192,
             auto_summarize: true,
+            summarization_strategy: SummarizationStrategy::default(),
             // Default configuration follows the principle: max_stored_messages > summarize_threshold
             // This allows for effective summarization: 20 messages trigger → keep 6 → summarize 14
             summarize_threshold: 12, // Keep 6 messages minimum (12/2)

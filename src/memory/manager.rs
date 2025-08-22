@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     config::MemoryConfig,
+    dual_debug,
     memory::{store::MessageStore, summarizer::MessageSummarizer, types::*},
 };
 
@@ -81,6 +82,7 @@ impl CompleteChatMemory {
             None,
             &config.summary_service_base_url,
             &config.summary_service_api_key,
+            config.summarization_strategy,
         );
 
         Ok(Self {
@@ -465,13 +467,34 @@ impl CompleteChatMemory {
             if !to_summarize.is_empty() {
                 // 获取现有摘要用于增量摘要生成
                 let existing_summary = context.summary.clone();
+
+                // 对于完整历史摘要策略，需要获取所有需要摘要的历史消息
+                let full_history_messages = if matches!(
+                    self.config.summarization_strategy,
+                    crate::config::SummarizationStrategy::FullHistory
+                ) {
+                    // 从数据库获取所有历史消息用于完整历史摘要
+                    Some(
+                        self.get_all_historical_messages_for_summary(conv_id, &to_summarize)
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+
                 drop(cache); // 释放锁进行异步操作
 
                 // 生成摘要
                 let new_summary = self
                     .summarizer
-                    .summarize_stored_messages(&to_summarize, existing_summary.as_deref())
+                    .summarize_stored_messages(
+                        &to_summarize,
+                        existing_summary.as_deref(),
+                        full_history_messages.as_deref(),
+                    )
                     .await?;
+
+                dual_debug!("Updated summary for conversation {conv_id}: {new_summary}");
 
                 // 更新上下文和数据库
                 let mut cache = self.context_cache.lock().await;
@@ -773,6 +796,61 @@ impl CompleteChatMemory {
 
         // 从数据库中删除
         self.store.delete_conversation(conv_id).await
+    }
+
+    /// 获取用于完整历史摘要的所有历史消息
+    ///
+    /// # 参数
+    /// * `conv_id` - 对话 ID
+    /// * `current_to_summarize` - 当前需要摘要的消息列表
+    ///
+    /// # 返回值
+    /// * `MemoryResult<Vec<StoredMessage>>` - 包含所有需要摘要的历史消息
+    ///
+    /// # 说明
+    /// 对于完整历史摘要策略，我们需要获取：
+    /// 1. `current_to_summarize` 中的所有消息
+    /// 2. 数据库中序列号小于 `current_to_summarize` 最小序列号的历史消息
+    ///
+    /// 例如：
+    /// - 如果 `current_to_summarize` 包含序列号 [3,4] 的消息
+    /// - 数据库中包含序列号 [1,2,3,4,5,6,...] 的消息
+    /// - 则返回序列号 [1,2,3,4] 的消息用于摘要
+    ///
+    /// 这样可以避免重复包含消息，确保摘要包含完整的历史上下文。
+    async fn get_all_historical_messages_for_summary(
+        &self,
+        conv_id: &str,
+        current_to_summarize: &[StoredMessage],
+    ) -> MemoryResult<Vec<StoredMessage>> {
+        // 从数据库获取所有历史消息
+        let historical_messages = self.store.get_full_history(conv_id).await?;
+
+        // 找到 current_to_summarize 中的最小序列号
+        let min_current_sequence = current_to_summarize
+            .iter()
+            .map(|msg| msg.sequence)
+            .min()
+            .unwrap_or(i64::MAX);
+
+        // 只保留序列号小于 current_to_summarize 最小序列号的历史消息
+        let mut filtered_historical: Vec<StoredMessage> = historical_messages
+            .into_iter()
+            .filter(|msg| msg.sequence < min_current_sequence)
+            .collect();
+
+        // 将过滤后的历史消息和当前要摘要的消息合并
+        filtered_historical.extend_from_slice(current_to_summarize);
+
+        // 按序列号排序，确保消息顺序正确
+        filtered_historical.sort_by_key(|msg| msg.sequence);
+
+        dual_debug!(
+            "All messages for summary (filtered):\n{}",
+            serde_json::to_string_pretty(&filtered_historical).unwrap()
+        );
+
+        Ok(filtered_historical)
     }
 
     /// 获取内存系统的统计信息

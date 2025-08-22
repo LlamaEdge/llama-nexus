@@ -11,6 +11,11 @@ auto_summarize = true                            # Enable automatic message summ
 summary_service_base_url = "http://localhost:10086/v1"  # Base URL for summary service
 summary_service_api_key = ""                            # API key for summary service (leave empty if not required)
 
+# Summarization strategies:
+# - "Incremental": Use existing summary + new messages (default, more efficient)
+# - "FullHistory": Re-summarize all historical messages (better context, more expensive)
+summarization_strategy = "Incremental"
+
 # Message summarization configuration:
 # - When message count reaches 'max_stored_messages', summarization is triggered
 # - After summarization, at least 'summarize_threshold/2' recent messages are kept
