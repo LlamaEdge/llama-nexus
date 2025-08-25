@@ -31,7 +31,7 @@ impl MessageStore {
         } else {
             // 用户提供的是文件路径，需要添加协议和参数
             // mode=rwc: r(read) + w(write) + c(create if not exists)
-            format!("sqlite:{}?mode=rwc", database_path)
+            format!("sqlite:{database_path}?mode=rwc")
         };
 
         let pool = SqlitePool::connect(&connection_string).await?;
