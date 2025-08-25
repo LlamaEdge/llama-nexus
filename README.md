@@ -2,6 +2,16 @@
 
 Llama-Nexus is a gateway service for managing and orchestrating LlamaEdge API servers. It provides a unified interface to various AI services including chat completions, audio processing, image generation, and text-to-speech capabilities. Compatible with OpenAI API, Llama-Nexus allows you to use familiar API formats while working with open-source models. With Llama-Nexus, you can easily register and manage multiple API servers, handle requests, and monitor the health of your AI services.
 
+- [Llama-Nexus](#llama-nexus)
+  - [Installation](#installation)
+  - [Usage](#usage)
+  - [Command Line Usage](#command-line-usage)
+  - [Development](#development)
+    - [Prerequisites](#prerequisites)
+    - [Building from Source](#building-from-source)
+    - [CI/CD Notes](#cicd-notes)
+    - [Troubleshooting](#troubleshooting)
+
 ## Installation
 
 - Download Llama-Nexus binary
@@ -172,3 +182,70 @@ Options:
   -V, --version
           Print version
 ```
+
+## Development
+
+This section provides guidance for developers who want to contribute to Llama-Nexus or build from source.
+
+### Prerequisites
+
+- [Rust](https://rustup.rs/) (latest stable version)
+
+> **Note:** SQLite is automatically bundled with the project via `libsqlite3-sys` crate. No separate SQLite installation is required.
+
+### Building from Source
+
+1. **Clone the repository:**
+
+   ```bash
+   git clone https://github.com/LlamaEdge/llama-nexus.git
+   cd llama-nexus
+   ```
+
+2. **Build the project:**
+
+   ```bash
+   # For development builds
+   SQLX_OFFLINE=true cargo build
+
+   # For release builds
+   SQLX_OFFLINE=true cargo build --release
+   ```
+
+   > **Important:** Always use `SQLX_OFFLINE=true` during compilation to avoid requiring a database connection at build time.
+
+3. **Run the application:**
+
+   ```bash
+   # Development mode
+   cargo run
+
+   # Release mode
+   cargo run --release
+
+   # Or run the binary directly
+   ./target/release/llama-nexus
+   ```
+
+### CI/CD Notes
+
+When setting up continuous integration:
+
+- Use `SQLX_OFFLINE=true` for all build and test commands
+- The `.sqlx/` directory contains query metadata and should be committed
+- Database files (`data/memory.db`) should be excluded from version control
+- No actual database instance is required for compilation or testing
+
+### Troubleshooting
+
+**Build Issues:**
+
+- Ensure `SQLX_OFFLINE=true` is set during compilation
+- Run `cargo sqlx prepare` after modifying SQL queries
+- Check that `.sqlx/` directory is present and up-to-date
+
+**Runtime Issues:**
+
+- Ensure the `data/` directory exists (created automatically)
+- Check database permissions if running in restricted environments
+- Verify `memory.enable` setting in `config.toml` matches your requirements
