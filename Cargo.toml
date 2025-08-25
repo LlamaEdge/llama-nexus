@@ -13,7 +13,6 @@ chat-prompts = { version = "0.34.0" }
 chrono = "0.4.41"
 clap = { version = "^4.5", features = ["cargo", "derive"] }
 config = { version = "^0.15", features = ["toml"] }
-dotenvy = "0.15.7"
 endpoints = { version = "0.34.1", features = ["whisper", "rag", "index"] }
 futures-util = "0.3"
 http = "1.2"

@@ -15,7 +15,6 @@ dependencies = [
  "chrono",
  "clap",
  "config",
- "dotenvy",
  "endpoints",
  "futures-util",
  "http",

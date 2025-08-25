@@ -69,8 +69,6 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> ServerResult<()> {
-    dotenvy::dotenv().ok();
-
     // parse the command line arguments
     let cli = Cli::parse();
 
