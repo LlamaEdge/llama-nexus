@@ -13,7 +13,9 @@ impl MessageStore {
     /// 创建一个新的 MessageStore 实例
     ///
     /// # 参数
-    /// * `database_path` - SQLite 数据库文件的路径
+    /// * `database_path` - SQLite 数据库文件路径或完整的 SQLite URL
+    ///   - 文件路径示例: `"data/memory.db"`, `"/tmp/app.db"`
+    ///   - SQLite URL 示例: `"sqlite:data/memory.db?mode=rwc"`, `"sqlite::memory:"`
     ///
     /// # 返回值
     /// * `MemoryResult<Self>` - 成功时返回 MessageStore 实例，失败时返回 MemoryError
@@ -21,8 +23,18 @@ impl MessageStore {
     /// # 说明
     /// 此方法会自动连接到 SQLite 数据库并初始化必要的表结构。
     /// 如果数据库文件不存在，SQLite 会自动创建。
+    /// 支持简单文件路径和完整的 SQLite URL 格式。
     pub async fn new(database_path: &str) -> MemoryResult<Self> {
-        let pool = SqlitePool::connect(&format!("sqlite:{database_path}")).await?;
+        let connection_string = if database_path.starts_with("sqlite:") {
+            // 用户已经提供完整的 SQLite URL，直接使用
+            database_path.to_string()
+        } else {
+            // 用户提供的是文件路径，需要添加协议和参数
+            // mode=rwc: r(read) + w(write) + c(create if not exists)
+            format!("sqlite:{}?mode=rwc", database_path)
+        };
+
+        let pool = SqlitePool::connect(&connection_string).await?;
 
         let store = Self { pool };
         store.initialize_schema().await?;

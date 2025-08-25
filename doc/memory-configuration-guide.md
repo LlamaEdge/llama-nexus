@@ -11,6 +11,9 @@ This document provides detailed information about Memory feature configuration p
   - [Detailed Configuration](#detailed-configuration)
     - [1. enable](#1-enable)
     - [2. database\_path](#2-database_path)
+      - [2.1 Simple File Path (Automatic Mode)](#21-simple-file-path-automatic-mode)
+      - [2.2 Full SQLite URL (Advanced Mode)](#22-full-sqlite-url-advanced-mode)
+      - [2.3 In-Memory Database (Development/Testing)](#23-in-memory-database-developmenttesting)
     - [3. context\_window](#3-context_window)
     - [4. auto\_summarize](#4-auto_summarize)
     - [5. summarization\_strategy](#5-summarization_strategy)
@@ -32,7 +35,9 @@ The Memory feature helps maintain context coherence in long conversations throug
 ```toml
 [memory]
 enable = true
-database_path = "data/memory.db"
+database_path = "data/memory.db"                 # Simple file path (recommended)
+# database_path = "sqlite:data/memory.db?mode=rwc&cache=shared"  # Full URL format
+# database_path = "sqlite::memory:"              # In-memory database (dev/test)
 context_window = 8192
 auto_summarize = true
 summarization_strategy = "Incremental"
@@ -70,35 +75,124 @@ enable = false # Disable Memory functionality
 
 ### 2. database_path
 
-**Function**: Specify the storage path for the SQLite database file.
+**Function**: Specify the storage path or connection URL for the SQLite database file.
 
-**Configuration**:
+**Configuration Formats**:
 
 ```toml
+# Method 1: Simple file path (recommended)
 database_path = "data/memory.db"
+
+# Method 2: Full SQLite URL
+database_path = "sqlite:data/memory.db?mode=rwc"
+
+# Method 3: In-memory database (temporary use)
+database_path = "sqlite::memory:"
 ```
 
-**Usage**:
+**Supported Format Details**:
 
-- Supports both relative and absolute paths
-- Relative paths are relative to the application's working directory
-- File extension typically uses `.db`
+#### 2.1 Simple File Path (Automatic Mode)
+
+```toml
+# Relative paths
+database_path = "data/memory.db"
+database_path = "storage/conversations.db"
+
+# Absolute paths
+database_path = "/var/lib/llama-nexus/memory.db"
+database_path = "/home/user/apps/memory.db"
+
+# Subdirectory paths (auto-create directories)
+database_path = "custom/path/database.db"
+```
+
+**Features**:
+
+- System automatically adds `sqlite:` protocol and `?mode=rwc` parameters
+- Automatically creates non-existent parent directories
+- Simplest configuration method, recommended for daily use
+
+#### 2.2 Full SQLite URL (Advanced Mode)
+
+```toml
+# Basic URL format
+database_path = "sqlite:data/memory.db?mode=rwc"
+
+# With cache parameters
+database_path = "sqlite:data/memory.db?mode=rwc&cache=shared"
+
+# Absolute path URL
+database_path = "sqlite:///var/lib/app/memory.db?mode=rwc"
+
+# With timeout parameters
+database_path = "sqlite:data/memory.db?mode=rwc&timeout=30"
+```
+
+**URL Parameter Descriptions**:
+
+- `mode=rwc`: r(read) + w(write) + c(create), required parameter
+- `cache=shared`: Enable shared cache for improved multi-connection performance
+- `timeout=30`: Set connection timeout (seconds)
+
+**Features**:
+
+- Full control over SQLite connection parameters
+- Suitable for advanced users and special requirements
+- Allows fine-tuning database performance
+
+#### 2.3 In-Memory Database (Development/Testing)
+
+```toml
+database_path = "sqlite::memory:"
+```
+
+**Features**:
+
+- Data stored in memory with extreme performance
+- Data lost after service restart
+- Suitable for development, testing, and temporary use
+- No file system permissions required
+
+**Use Case Comparison**:
+
+| Configuration Method | Use Case | Advantages | Disadvantages |
+|---------------------|----------|------------|---------------|
+| Simple Path | Daily production use | Simple config, auto-managed | Limited parameter control |
+| Full URL | Advanced configuration needs | Full control, performance tuning | Complex configuration |
+| In-Memory Database | Development/testing | Highest performance, no file dependencies | Data not persistent |
 
 **Considerations**:
 
-- Ensure the specified directory exists and has write permissions
-- Recommend regular database file backups
-- Database file contains sensitive conversation history, pay attention to file security
-- Path should not contain special characters or spaces
+- **Permission Management**: Ensure specified directory exists and has write permissions
+- **Security**: Database file contains sensitive conversation history, pay attention to file security
+- **Backup Strategy**: Recommend regular database file backups
+- **Path Format**: Avoid special characters in paths, recommend using English and numbers
+- **Auto-Creation**: System automatically creates non-existent parent directories and database files
 
 **Directory Structure Example**:
 
 ```bash
 project/
-├── data/
-│   └── memory.db
-├── config.toml
-└── ...
+├── data/                    # Default data directory
+│   └── memory.db           # Main database file
+├── custom/                 # Custom directory
+│   └── path/
+│       └── database.db     # Custom path database
+├── config.toml             # Configuration file
+└── logs/                   # Log directory
+```
+
+**Configuration Migration Guide**:
+
+If you're already using the old simple path configuration, no changes are needed. The new version is fully backward compatible:
+
+```toml
+# Old configuration (still valid)
+database_path = "data/memory.db"
+
+# Equivalent new URL format
+database_path = "sqlite:data/memory.db?mode=rwc"
 ```
 
 ---
@@ -376,6 +470,7 @@ max_stored_messages (20) > summarize_threshold (12)
 # Balanced configuration (recommended)
 [memory]
 enable = true
+database_path = "data/memory.db"                # Simple path, auto-managed
 context_window = 8192
 max_stored_messages = 20
 summarize_threshold = 12
@@ -385,6 +480,7 @@ summarization_strategy = "Incremental"
 # High-frequency conversation configuration
 [memory]
 enable = true
+database_path = "sqlite:data/memory.db?mode=rwc&cache=shared"  # Enable cache optimization
 context_window = 4096
 max_stored_messages = 15
 summarize_threshold = 10
@@ -394,11 +490,22 @@ summarization_strategy = "Incremental"
 # High-quality long conversation configuration
 [memory]
 enable = true
+database_path = "storage/conversations.db"      # Dedicated storage directory
 context_window = 16384
 max_stored_messages = 25
 summarize_threshold = 15
 auto_summarize = true
 summarization_strategy = "FullHistory"
+
+# Development/testing configuration
+[memory]
+enable = true
+database_path = "sqlite::memory:"               # In-memory database, lost on restart
+context_window = 4096
+max_stored_messages = 10
+summarize_threshold = 6
+auto_summarize = true
+summarization_strategy = "Incremental"
 ```
 
 **Summarization Strategy Selection Guide**:
@@ -457,11 +564,21 @@ summarization_strategy = "FullHistory"
    - Consider adjusting summarization prompts
 
 4. **Database Related Issues**
-   - Verify `database_path` permissions
+   - Verify `database_path` permissions and format
    - Check disk space
+   - Confirm directories are auto-created successfully
+   - Test SQLite URL format correctness
+   - Verify SQLite connection parameters
    - Regularly backup database files
 
-5. **Summarization Strategy Related Issues**
+5. **database_path Configuration Issues**
+   - **Simple path cannot be created**: Check parent directory permissions, ensure application has write access
+   - **URL format connection failure**: Verify URL syntax, ensure `mode=rwc` parameter is included
+   - **In-memory database data loss**: Confirm using `sqlite::memory:` is expected behavior
+   - **Path contains special characters**: Use URL encoding or avoid special characters
+   - **Relative path issues**: Confirm working directory, recommend using absolute paths
+
+6. **Summarization Strategy Related Issues**
    - **Full history summarization responds slowly**: Consider switching to incremental summarization strategy
    - **Incremental summarization quality degradation**: Periodically use full history summarization to regenerate baseline summaries
    - **Incoherent summary content**: Check summarization service configuration and prompt settings
@@ -472,8 +589,15 @@ summarization_strategy = "FullHistory"
 Proper Memory configuration can significantly improve user experience in long conversations while controlling system resource consumption. Recommendations:
 
 1. **Start with recommended configurations**, adjust based on actual usage
-2. **Monitor key metrics**, continuously optimize configuration parameters
-3. **Ensure service stability**, especially summarization service availability
+2. **Choose appropriate database configuration**:
+   - Use simple file path configuration for production environments
+   - Use URL format configuration for high-performance requirements
+   - Use in-memory database for development and testing
+3. **Monitor key metrics**, continuously optimize configuration parameters
+4. **Ensure service stability**, especially summarization service availability
+5. **Pay attention to security**, protect sensitive configuration information and database files
+
+Through proper configuration and continuous monitoring, the Memory feature will provide excellent conversation experience for your application. The new database_path configuration options provide greater flexibility for different use cases.
 4. **Pay attention to security**, protect sensitive configuration information
 
 Through proper configuration and continuous monitoring, the Memory feature will provide excellent conversation experience for your application.

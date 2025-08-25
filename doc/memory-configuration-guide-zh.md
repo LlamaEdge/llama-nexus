@@ -7,6 +7,9 @@
   - [详细配置说明](#详细配置说明)
     - [1. enable](#1-enable)
     - [2. database\_path](#2-database_path)
+      - [2.1 简单文件路径（自动模式）](#21-简单文件路径自动模式)
+      - [2.2 完整 SQLite URL（高级模式）](#22-完整-sqlite-url高级模式)
+      - [2.3 内存数据库（开发测试）](#23-内存数据库开发测试)
     - [3. context\_window](#3-context_window)
     - [4. auto\_summarize](#4-auto_summarize)
     - [5. summarization\_strategy](#5-summarization_strategy)
@@ -28,7 +31,9 @@ Memory 功能通过智能的消息管理和自动总结机制，帮助系统在�
 ```toml
 [memory]
 enable = true
-database_path = "data/memory.db"
+database_path = "data/memory.db"                 # 简单文件路径（推荐）
+# database_path = "sqlite:data/memory.db?mode=rwc&cache=shared"  # 完整 URL 格式
+# database_path = "sqlite::memory:"              # 内存数据库（开发测试）
 context_window = 8192
 auto_summarize = true
 summarization_strategy = "Incremental"
@@ -66,35 +71,124 @@ enable = false # 禁用 Memory 功能
 
 ### 2. database_path
 
-**功能**：指定 SQLite 数据库文件的存储路径。
+**功能**：指定 SQLite 数据库文件的存储路径或连接 URL。
 
-**配置**：
+**配置格式**：
 
 ```toml
+# 方式 1：简单文件路径（推荐）
 database_path = "data/memory.db"
+
+# 方式 2：完整 SQLite URL
+database_path = "sqlite:data/memory.db?mode=rwc"
+
+# 方式 3：内存数据库（临时使用）
+database_path = "sqlite::memory:"
 ```
 
-**使用方法**：
+**支持的格式详解**：
 
-- 支持相对路径和绝对路径
-- 相对路径是相对于应用程序的工作目录
-- 文件扩展名通常使用 `.db`
+#### 2.1 简单文件路径（自动模式）
+
+```toml
+# 相对路径
+database_path = "data/memory.db"
+database_path = "storage/conversations.db"
+
+# 绝对路径
+database_path = "/var/lib/llama-nexus/memory.db"
+database_path = "/home/user/apps/memory.db"
+
+# 子目录路径（自动创建目录）
+database_path = "custom/path/database.db"
+```
+
+**特点**：
+
+- 系统会自动添加 `sqlite:` 协议和 `?mode=rwc` 参数
+- 自动创建不存在的父目录
+- 最简单的配置方式，推荐日常使用
+
+#### 2.2 完整 SQLite URL（高级模式）
+
+```toml
+# 基本 URL 格式
+database_path = "sqlite:data/memory.db?mode=rwc"
+
+# 带缓存参数
+database_path = "sqlite:data/memory.db?mode=rwc&cache=shared"
+
+# 绝对路径 URL
+database_path = "sqlite:///var/lib/app/memory.db?mode=rwc"
+
+# 带超时参数
+database_path = "sqlite:data/memory.db?mode=rwc&timeout=30"
+```
+
+**URL 参数说明**：
+
+- `mode=rwc`：r(读取) + w(写入) + c(创建)，必需参数
+- `cache=shared`：启用共享缓存，提高多连接性能
+- `timeout=30`：设置连接超时时间（秒）
+
+**特点**：
+
+- 完全控制 SQLite 连接参数
+- 适合高级用户和特殊需求
+- 可以精细调优数据库性能
+
+#### 2.3 内存数据库（开发测试）
+
+```toml
+database_path = "sqlite::memory:"
+```
+
+**特点**：
+
+- 数据存储在内存中，性能极高
+- 服务重启后数据丢失
+- 适合开发、测试和临时使用
+- 不需要文件系统权限
+
+**使用场景**：
+
+| 配置方式 | 使用场景 | 优点 | 缺点 |
+|---------|---------|------|------|
+| 简单路径 | 日常生产使用 | 配置简单，自动管理 | 参数控制有限 |
+| 完整 URL | 高级配置需求 | 完全控制，性能调优 | 配置复杂 |
+| 内存数据库 | 开发测试 | 性能最高，无文件依赖 | 数据不持久 |
 
 **注意事项**：
 
-- 确保指定的目录存在且具有写权限
-- 建议定期备份数据库文件
-- 数据库文件包含敏感的对话历史，注意文件安全
-- 路径中不应包含特殊字符或空格
+- **权限管理**：确保指定的目录存在且具有写权限
+- **安全性**：数据库文件包含敏感的对话历史，注意文件安全
+- **备份策略**：建议定期备份数据库文件
+- **路径格式**：路径中避免特殊字符，推荐使用英文和数字
+- **自动创建**：系统会自动创建不存在的父目录和数据库文件
 
 **目录结构示例**：
 
 ```bash
 project/
-├── data/
-│   └── memory.db
-├── config.toml
-└── ...
+├── data/                    # 默认数据目录
+│   └── memory.db           # 主数据库文件
+├── custom/                 # 自定义目录
+│   └── path/
+│       └── database.db     # 自定义路径数据库
+├── config.toml             # 配置文件
+└── logs/                   # 日志目录
+```
+
+**配置迁移指南**：
+
+如果您已经在使用旧版本的简单路径配置，无需修改任何设置。新版本完全向后兼容：
+
+```toml
+# 旧配置（仍然有效）
+database_path = "data/memory.db"
+
+# 等效的新 URL 格式
+database_path = "sqlite:data/memory.db?mode=rwc"
 ```
 
 ---
@@ -372,6 +466,7 @@ max_stored_messages (20) > summarize_threshold (12)
 # 平衡配置（推荐）
 [memory]
 enable = true
+database_path = "data/memory.db"                # 简单路径，自动管理
 context_window = 8192
 max_stored_messages = 20
 summarize_threshold = 12
@@ -381,6 +476,7 @@ summarization_strategy = "Incremental"
 # 高频对话配置
 [memory]
 enable = true
+database_path = "sqlite:data/memory.db?mode=rwc&cache=shared"  # 启用缓存优化
 context_window = 4096
 max_stored_messages = 15
 summarize_threshold = 10
@@ -390,11 +486,22 @@ summarization_strategy = "Incremental"
 # 高质量长对话配置
 [memory]
 enable = true
+database_path = "storage/conversations.db"      # 专用存储目录
 context_window = 16384
 max_stored_messages = 25
 summarize_threshold = 15
 auto_summarize = true
 summarization_strategy = "FullHistory"
+
+# 开发测试配置
+[memory]
+enable = true
+database_path = "sqlite::memory:"               # 内存数据库，重启丢失
+context_window = 4096
+max_stored_messages = 10
+summarize_threshold = 6
+auto_summarize = true
+summarization_strategy = "Incremental"
 ```
 
 **摘要策略选择指南**：
@@ -455,11 +562,21 @@ auto_summarize = true
    - 考虑调整总结提示词
 
 4. **数据库相关问题**
-   - 验证 `database_path` 的权限
+   - 验证 `database_path` 的权限和格式
    - 检查磁盘空间
+   - 确认目录是否自动创建成功
+   - 测试 SQLite URL 格式的正确性
+   - 验证 SQLite 连接参数
    - 定期备份数据库文件
 
-5. **摘要策略相关问题**
+5. **database_path 配置问题**
+   - **简单路径无法创建**：检查父目录权限，确保应用有写入权限
+   - **URL 格式连接失败**：验证 URL 语法，确保包含 `mode=rwc` 参数
+   - **内存数据库数据丢失**：确认使用 `sqlite::memory:` 是预期行为
+   - **路径包含特殊字符**：使用 URL 编码或避免特殊字符
+   - **相对路径问题**：确认工作目录，建议使用绝对路径
+
+6. **摘要策略相关问题**
    - **完整历史摘要响应慢**：考虑切换到增量摘要策略
    - **增量摘要质量下降**：定期使用完整历史摘要重新生成基准摘要
    - **摘要内容不连贯**：检查摘要服务的配置和提示词设置
@@ -471,8 +588,12 @@ auto_summarize = true
 合理的 Memory 配置能够显著提升长对话的用户体验，同时控制系统资源消耗。建议：
 
 1. **从推荐配置开始**，根据实际使用情况调整
-2. **监控关键指标**，持续优化配置参数
-3. **确保服务稳定**，特别是总结服务的可用性
-4. **注意安全性**，保护敏感配置信息
+2. **选择合适的数据库配置**：
+   - 生产环境使用简单文件路径配置
+   - 高性能需求使用 URL 格式配置
+   - 开发测试使用内存数据库
+3. **监控关键指标**，持续优化配置参数
+4. **确保服务稳定**，特别是总结服务的可用性
+5. **注意安全性**，保护敏感配置信息和数据库文件
 
-通过合理配置和持续监控，Memory 功能将为您的应用提供出色的对话体验。
+通过合理配置和持续监控，Memory 功能将为您的应用提供出色的对话体验。新的 database_path 配置选项为不同使用场景提供了更大的灵活性。

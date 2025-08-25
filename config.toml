@@ -5,7 +5,11 @@ port = 3389        # The port to listen on.
 # Memory configuration
 [memory]
 enable = false                                    # Enable/disable memory functionality
-database_path = "data/memory.db"                 # Path to SQLite database file
+database_path = "data/memory.db"                 # Path to SQLite database file or URL
+                                                 # Examples:
+                                                 #   - Simple path: "data/memory.db", "/tmp/app.db"
+                                                 #   - SQLite URL: "sqlite:data/memory.db?mode=rwc"
+                                                 #   - Memory DB: "sqlite::memory:" (temporary, lost on restart)
 context_window = 8192                            # Maximum context window for conversations
 auto_summarize = true                            # Enable automatic message summarization
 summary_service_base_url = "http://localhost:10086/v1"  # Base URL for summary service
