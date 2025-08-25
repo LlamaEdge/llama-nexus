@@ -38,6 +38,9 @@ pub(crate) async fn chat(
     // Extract user message for memory storage
     let user_message = extract_user_message(&request);
 
+    // Extract system message for memory storage
+    let system_message = extract_system_message(&request);
+
     // Create or get conversation ID for memory
     let conv_id = if let Some(memory) = &state.memory {
         if let Some(user) = &request.user {
@@ -79,17 +82,70 @@ pub(crate) async fn chat(
     // Get target server
     let chat_server = get_chat_server(&state, request_id).await?;
 
-    // 存储用户消息到记忆中
+    // Store the latest user message to memory
     if let Some(memory) = &state.memory
         && let Some(conv_id) = &conv_id
         && let Some(user_msg) = &user_message
-        && let Err(e) = memory.add_user_message(conv_id, user_msg.clone()).await
     {
-        dual_error!(
-            "Failed to add user message to memory: {} - request_id: {}",
-            e,
-            request_id
-        );
+        // 首先处理系统消息存储（如果存在）
+        if let Some(sys_msg) = &system_message {
+            match memory.set_system_message(conv_id, sys_msg).await {
+                Ok(updated) => {
+                    if updated {
+                        dual_debug!(
+                            "System message updated for conversation {} - request_id: {}",
+                            conv_id,
+                            request_id
+                        );
+                    }
+                }
+                Err(e) => {
+                    dual_error!(
+                        "Failed to store system message in memory: {} - request_id: {}",
+                        e,
+                        request_id
+                    );
+                }
+            }
+        }
+
+        // 存储用户消息到记忆中
+        match memory.add_user_message(conv_id, user_msg.clone()).await {
+            Ok(_) => {
+                dual_debug!(
+                    "🔍 User message added to memory for conversation {} - request_id: {}",
+                    conv_id,
+                    request_id
+                );
+
+                // get model context
+                let context = memory.get_model_context(conv_id).await.map_err(|e| {
+                    let err_msg = format!("Failed to get model context: {e}");
+                    dual_error!("{} - request_id: {}", err_msg, request_id);
+                    ServerError::Operation(err_msg)
+                })?;
+                let context: Vec<ChatCompletionRequestMessage> = context
+                    .into_iter()
+                    .map(|model_msg| model_msg.into())
+                    .collect();
+
+                // update request.messages with model context
+                request.messages = context;
+
+                dual_debug!(
+                    "🔍 Request messages updated with model context - request_id: {}\n{}",
+                    request_id,
+                    serde_json::to_string_pretty(&request.messages).unwrap()
+                );
+            }
+            Err(e) => {
+                dual_error!(
+                    "Failed to add user message to memory: {} - request_id: {}",
+                    e,
+                    request_id
+                );
+            }
+        }
     }
 
     // Build and send request
@@ -186,6 +242,7 @@ pub(crate) async fn chat(
 
                         // Extract assistant message for memory storage in streaming response
                         if let (Some(conv_id), Some(memory)) = (&conv_id, &state.memory) {
+                            // parse response bytes, and extract and store assistant message
                             match std::str::from_utf8(&bytes) {
                                 Ok(response_text) => {
                                     match extract_assistant_message_from_stream(response_text) {
@@ -344,17 +401,17 @@ pub(crate) async fn chat(
         }
     };
 
-    // ! print full chat history
+    // Print chat history
     if let Some(memory) = &state.memory
         && let Some(conv_id) = &conv_id
     {
-        let chat_history = memory.get_full_history(conv_id).await.map_err(|e| {
+        let chat_history = memory.get_full_history(conv_id, true).await.map_err(|e| {
             let err_msg = format!("Failed to get chat history: {e}");
             dual_error!("{} - request_id: {}", err_msg, request_id);
             ServerError::Operation(err_msg)
         })?;
         dual_debug!(
-            "Full history - request_id: {}\n{}",
+            "🔍 Full history - request_id: {}\n{}",
             request_id,
             serde_json::to_string_pretty(&chat_history).unwrap()
         );
@@ -365,7 +422,7 @@ pub(crate) async fn chat(
             ServerError::Operation(err_msg)
         })?;
         dual_debug!(
-            "Working messages - request_id: {}\n{}",
+            "🔍 Working messages - request_id: {}\n{}",
             request_id,
             serde_json::to_string_pretty(&working_messages).unwrap()
         );
@@ -380,7 +437,7 @@ pub(crate) async fn chat(
             .map(|model_msg| model_msg.into())
             .collect();
         dual_debug!(
-            "Model context - request_id: {}\n{}",
+            "🔍 Model context - request_id: {}\n{}",
             request_id,
             serde_json::to_string_pretty(&context).unwrap()
         );
@@ -440,6 +497,16 @@ fn extract_user_message(request: &ChatCompletionRequest) -> Option<String> {
             }
             _ => None,
         }
+    })
+}
+
+/// Extract system message from the chat request
+fn extract_system_message(request: &ChatCompletionRequest) -> Option<String> {
+    request.messages.iter().find_map(|msg| match msg {
+        endpoints::chat::ChatCompletionRequestMessage::System(system_msg) => {
+            Some(system_msg.content().to_string())
+        }
+        _ => None,
     })
 }
 
@@ -717,12 +784,8 @@ async fn call_mcp_server(
     let chat_service_url = format!("{}/chat/completions", chat_server.url.trim_end_matches('/'));
 
     dual_debug!(
-        "tool calls:\n{}",
+        "Tool calls:\n{}",
         serde_json::to_string_pretty(tool_calls).unwrap()
-    );
-    dual_debug!(
-        "first tool call:\n{}",
-        serde_json::to_string_pretty(&tool_calls[0]).unwrap()
     );
 
     let tool_call = &tool_calls[0];
@@ -731,7 +794,7 @@ async fn call_mcp_server(
     let tool_args = &tool_call.function.arguments;
 
     dual_debug!(
-        "tool name: {}, tool args: {} - request_id: {}",
+        "Tool name: {}, Tool args: {} - request_id: {}",
         tool_name,
         tool_args,
         request_id
@@ -744,7 +807,7 @@ async fn call_mcp_server(
     // find mcp client by tool name
     if let Some(mcp_tools) = MCP_TOOLS.get() {
         let tools = mcp_tools.read().await;
-        dual_debug!("mcp_tools: {:?}", mcp_tools);
+        dual_debug!("Mcp tools: {:?}", mcp_tools);
 
         // look up the tool name in MCP_TOOLS
         if let Some(mcp_client_name) = tools.get(tool_name) {
@@ -792,7 +855,7 @@ async fn call_mcp_server(
                     name: tool_name.to_string().into(),
                     arguments,
                 };
-                let res = service
+                let tool_result = service
                     .read()
                     .await
                     .raw
@@ -802,11 +865,11 @@ async fn call_mcp_server(
                         dual_error!("Failed to call the tool: {}", e);
                         ServerError::Operation(e.to_string())
                     })?;
-                dual_debug!("{}", serde_json::to_string_pretty(&res).unwrap());
+                dual_debug!("{}", serde_json::to_string_pretty(&tool_result).unwrap());
 
-                match res.is_error {
+                match tool_result.is_error {
                     Some(false) => {
-                        match &res.content {
+                        match &tool_result.content {
                             None => {
                                 let err_msg = "The mcp tool result is empty";
                                 dual_error!("{} - request_id: {}", err_msg, request_id);
@@ -817,32 +880,6 @@ async fn call_mcp_server(
                                 match &content.raw {
                                     RawContent::Text(text) => {
                                         dual_info!("The mcp tool call result: {:#?}", text.text);
-
-                                        // 存储工具调用及结果到记忆中
-                                        if let (Some(conv_id), Some(stored_tcs), Some(memory)) =
-                                            (conv_id, stored_tool_calls.as_mut(), &state.memory)
-                                        {
-                                            // Add tool results to stored tool calls
-                                            add_tool_results_to_stored(
-                                                stored_tcs,
-                                                std::slice::from_ref(&text.text),
-                                            );
-
-                                            if let Err(e) = memory
-                                                .add_assistant_message(
-                                                    conv_id,
-                                                    "",
-                                                    stored_tcs.clone(),
-                                                )
-                                                .await
-                                            {
-                                                dual_error!(
-                                                    "Failed to store tool calls to memory: {} - request_id: {}",
-                                                    e,
-                                                    request_id
-                                                );
-                                            }
-                                        }
 
                                         match SEARCH_MCP_SERVER_NAMES
                                             .contains(&raw_server_name.as_str())
@@ -870,33 +907,94 @@ async fn call_mcp_server(
                                                     request_id
                                                 );
 
-                                                // format the content
+                                                // add tool results as context
                                                 let content = format!(
                                                     "Please answer the question based on the information between **---BEGIN CONTEXT---** and **---END CONTEXT---**. Do not use any external knowledge. If the information between **---BEGIN CONTEXT---** and **---END CONTEXT---** is empty, please respond with `{fallback}`. Note that DO NOT use any tools if provided.\n\n---BEGIN CONTEXT---\n\n{context}\n\n---END CONTEXT---",
                                                     fallback = fallback,
                                                     context = &text.text,
                                                 );
 
-                                                // append assistant message with tool call to request messages
-                                                let assistant_completion_message =
-                                                    ChatCompletionRequestMessage::Assistant(
-                                                        ChatCompletionAssistantMessage::new(
-                                                            None,
-                                                            None,
-                                                            Some(tool_calls.to_vec()),
-                                                        ),
+                                                // 存储工具调用及结果到记忆中
+                                                if let (
+                                                    Some(conv_id),
+                                                    Some(stored_tcs),
+                                                    Some(memory),
+                                                ) = (
+                                                    conv_id,
+                                                    stored_tool_calls.as_mut(),
+                                                    &state.memory,
+                                                ) {
+                                                    // Add tool results to stored tool calls
+                                                    add_tool_results_to_stored(
+                                                        stored_tcs,
+                                                        std::slice::from_ref(&content),
                                                     );
-                                                request.messages.push(assistant_completion_message);
 
-                                                // append tool message with tool result to request messages
-                                                let tool_completion_message =
-                                                    ChatCompletionRequestMessage::Tool(
-                                                        ChatCompletionToolMessage::new(
-                                                            &content,
-                                                            tool_call_id,
-                                                        ),
-                                                    );
-                                                request.messages.push(tool_completion_message);
+                                                    if let Err(e) = memory
+                                                        .add_assistant_message(
+                                                            conv_id,
+                                                            "",
+                                                            stored_tcs.clone(),
+                                                        )
+                                                        .await
+                                                    {
+                                                        dual_error!(
+                                                            "Failed to store tool calls to memory: {} - request_id: {}",
+                                                            e,
+                                                            request_id
+                                                        );
+                                                    }
+                                                }
+
+                                                if let (Some(conv_id), Some(memory)) =
+                                                    (conv_id, &state.memory)
+                                                {
+                                                    let context = memory
+                                                        .get_model_context(conv_id)
+                                                        .await
+                                                        .map_err(|e| {
+                                                            let err_msg = format!(
+                                                                "Failed to get model context: {e}"
+                                                            );
+                                                            dual_error!(
+                                                                "{} - request_id: {}",
+                                                                err_msg,
+                                                                request_id
+                                                            );
+                                                            ServerError::Operation(err_msg)
+                                                        })?;
+                                                    let context: Vec<ChatCompletionRequestMessage> =
+                                                        context
+                                                            .into_iter()
+                                                            .map(|model_msg| model_msg.into())
+                                                            .collect();
+
+                                                    // Update request messages with context
+                                                    request.messages = context;
+                                                } else {
+                                                    // append assistant message with tool call to request messages
+                                                    let assistant_completion_message =
+                                                        ChatCompletionRequestMessage::Assistant(
+                                                            ChatCompletionAssistantMessage::new(
+                                                                None,
+                                                                None,
+                                                                Some(tool_calls.to_vec()),
+                                                            ),
+                                                        );
+                                                    request
+                                                        .messages
+                                                        .push(assistant_completion_message);
+
+                                                    // append tool message with tool result to request messages
+                                                    let tool_completion_message =
+                                                        ChatCompletionRequestMessage::Tool(
+                                                            ChatCompletionToolMessage::new(
+                                                                &content,
+                                                                tool_call_id,
+                                                            ),
+                                                        );
+                                                    request.messages.push(tool_completion_message);
+                                                }
 
                                                 // disable tool choice
                                                 if request.tool_choice.is_some() {
@@ -1114,27 +1212,87 @@ async fn call_mcp_server(
                                                 }
                                             }
                                             false => {
-                                                // create an assistant message
-                                                let tool_completion_message =
-                                                    ChatCompletionRequestMessage::Tool(
-                                                        ChatCompletionToolMessage::new(
-                                                            &text.text,
-                                                            tool_call_id,
-                                                        ),
+                                                // 存储工具调用及结果到记忆中
+                                                if let (
+                                                    Some(conv_id),
+                                                    Some(stored_tcs),
+                                                    Some(memory),
+                                                ) = (
+                                                    conv_id,
+                                                    stored_tool_calls.as_mut(),
+                                                    &state.memory,
+                                                ) {
+                                                    // Add tool results to stored tool calls
+                                                    add_tool_results_to_stored(
+                                                        stored_tcs,
+                                                        std::slice::from_ref(&text.text),
                                                     );
 
-                                                // append assistant message with tool call to request messages
-                                                let assistant_completion_message =
-                                                    ChatCompletionRequestMessage::Assistant(
-                                                        ChatCompletionAssistantMessage::new(
-                                                            None,
-                                                            None,
-                                                            Some(tool_calls.to_vec()),
-                                                        ),
-                                                    );
-                                                request.messages.push(assistant_completion_message);
-                                                // append tool message with tool result to request messages
-                                                request.messages.push(tool_completion_message);
+                                                    if let Err(e) = memory
+                                                        .add_assistant_message(
+                                                            conv_id,
+                                                            "",
+                                                            stored_tcs.clone(),
+                                                        )
+                                                        .await
+                                                    {
+                                                        dual_error!(
+                                                            "Failed to store tool calls to memory: {} - request_id: {}",
+                                                            e,
+                                                            request_id
+                                                        );
+                                                    }
+                                                }
+
+                                                if let (Some(memory), Some(conv_id)) =
+                                                    (&state.memory, &conv_id)
+                                                {
+                                                    let context = memory
+                                                        .get_model_context(conv_id)
+                                                        .await
+                                                        .map_err(|e| {
+                                                            let err_msg = format!(
+                                                                "Failed to get model context: {e}"
+                                                            );
+                                                            dual_error!(
+                                                                "{} - request_id: {}",
+                                                                err_msg,
+                                                                request_id
+                                                            );
+                                                            ServerError::Operation(err_msg)
+                                                        })?;
+                                                    let context: Vec<ChatCompletionRequestMessage> =
+                                                        context
+                                                            .into_iter()
+                                                            .map(|model_msg| model_msg.into())
+                                                            .collect();
+
+                                                    // Update request messages with context
+                                                    request.messages = context;
+                                                } else {
+                                                    // append assistant message with tool call to request messages
+                                                    let assistant_completion_message =
+                                                        ChatCompletionRequestMessage::Assistant(
+                                                            ChatCompletionAssistantMessage::new(
+                                                                None,
+                                                                None,
+                                                                Some(tool_calls.to_vec()),
+                                                            ),
+                                                        );
+                                                    request
+                                                        .messages
+                                                        .push(assistant_completion_message);
+
+                                                    // append tool message with tool result to request messages
+                                                    let tool_completion_message =
+                                                        ChatCompletionRequestMessage::Tool(
+                                                            ChatCompletionToolMessage::new(
+                                                                &text.text,
+                                                                tool_call_id,
+                                                            ),
+                                                        );
+                                                    request.messages.push(tool_completion_message);
+                                                }
 
                                                 // disable tool choice
                                                 if request.tool_choice.is_some() {

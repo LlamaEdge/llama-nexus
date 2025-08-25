@@ -47,10 +47,11 @@ pub(crate) async fn chat_handler(
     );
 
     // update the request with MCP tools
-    dual_info!("Updating the request with MCP tools");
     if let Some(mcp_config) = state.config.read().await.mcp.as_ref()
         && !mcp_config.server.tool_servers.is_empty()
     {
+        dual_info!("Updating the request with MCP tools");
+
         let mut more_tools = Vec::new();
         for server_config in mcp_config.server.tool_servers.iter() {
             if server_config.enable {
@@ -854,7 +855,7 @@ pub(crate) async fn get_conversation_history_handler(
     );
 
     if let Some(memory) = &state.memory {
-        match memory.get_full_history(&conv_id).await {
+        match memory.get_full_history(&conv_id, true).await {
             Ok(messages) => {
                 dual_info!(
                     "Retrieved {} messages for conversation {} - request_id: {}",
@@ -939,7 +940,7 @@ pub(crate) async fn get_user_history_handler(
     );
 
     if let Some(memory) = &state.memory {
-        match memory.get_user_full_history(&user_id).await {
+        match memory.get_user_full_history(&user_id, true).await {
             Ok(messages) => {
                 dual_info!(
                     "Retrieved {} messages for user {} - request_id: {}",

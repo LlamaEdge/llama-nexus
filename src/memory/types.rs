@@ -91,6 +91,9 @@ pub struct StoredConversation {
     pub total_tokens: i64,
     pub summary: Option<String>,
     pub last_summary_sequence: Option<i64>,
+    pub system_message: Option<String>,
+    pub system_message_hash: Option<String>,
+    pub system_message_updated_at: Option<DateTime<Utc>>,
 }
 
 // 运行时的上下文管理
@@ -232,6 +235,86 @@ pub enum MemoryError {
 
     #[error("Invalid data: {0}")]
     InvalidData(String),
+}
+
+/// Summarization status information
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SummarizationStatus {
+    /// Whether summarization was triggered
+    pub triggered: bool,
+    /// Number of messages that were summarized (removed from working context)
+    pub messages_summarized: Option<usize>,
+    /// Number of messages kept in working context
+    pub messages_kept: Option<usize>,
+    /// Length of the new summary (in characters)
+    pub summary_length: Option<usize>,
+    /// Reason for triggering summarization
+    pub trigger_reason: Option<String>,
+}
+
+impl SummarizationStatus {
+    pub fn not_triggered() -> Self {
+        Self::default()
+    }
+
+    pub fn triggered(
+        messages_summarized: usize,
+        messages_kept: usize,
+        summary_length: usize,
+        trigger_reason: String,
+    ) -> Self {
+        Self {
+            triggered: true,
+            messages_summarized: Some(messages_summarized),
+            messages_kept: Some(messages_kept),
+            summary_length: Some(summary_length),
+            trigger_reason: Some(trigger_reason),
+        }
+    }
+}
+
+/// Result of adding a message to memory, including summarization information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageResult {
+    /// The stored message
+    pub message: StoredMessage,
+    /// Summarization status information
+    pub summarization: SummarizationStatus,
+}
+
+#[allow(dead_code)]
+impl MessageResult {
+    pub fn new(message: StoredMessage, summarization: SummarizationStatus) -> Self {
+        Self {
+            message,
+            summarization,
+        }
+    }
+
+    /// Get the stored message
+    pub fn message(&self) -> &StoredMessage {
+        &self.message
+    }
+
+    /// Get the summarization status
+    pub fn summarization(&self) -> &SummarizationStatus {
+        &self.summarization
+    }
+
+    /// Check if summarization was triggered
+    pub fn was_summarized(&self) -> bool {
+        self.summarization.triggered
+    }
+
+    /// Get the reason for summarization if it was triggered
+    pub fn summarization_reason(&self) -> Option<&str> {
+        self.summarization.trigger_reason.as_deref()
+    }
+
+    /// Consume the result and return just the message (for backward compatibility)
+    pub fn into_message(self) -> StoredMessage {
+        self.message
+    }
 }
 
 pub type MemoryResult<T> = Result<T, MemoryError>;

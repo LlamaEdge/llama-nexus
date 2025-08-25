@@ -43,7 +43,10 @@ impl MessageStore {
                 message_count INTEGER DEFAULT 0,
                 total_tokens INTEGER DEFAULT 0,
                 summary TEXT,
-                last_summary_sequence INTEGER
+                last_summary_sequence INTEGER,
+                system_message TEXT,
+                system_message_hash TEXT,
+                system_message_updated_at DATETIME
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -66,6 +69,18 @@ impl MessageStore {
         let _ = sqlx::query("ALTER TABLE conversations ADD COLUMN user_id TEXT")
             .execute(&self.pool)
             .await;
+
+        // 添加system message相关列（如果不存在）
+        let _ = sqlx::query("ALTER TABLE conversations ADD COLUMN system_message TEXT")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE conversations ADD COLUMN system_message_hash TEXT")
+            .execute(&self.pool)
+            .await;
+        let _ =
+            sqlx::query("ALTER TABLE conversations ADD COLUMN system_message_updated_at DATETIME")
+                .execute(&self.pool)
+                .await;
 
         // 创建索引
         sqlx::query(
@@ -91,7 +106,7 @@ impl MessageStore {
     /// # 说明
     /// 在数据库中插入一条新的对话记录。对话 ID 必须是唯一的。
     pub async fn create_conversation(&self, conv: &StoredConversation) -> MemoryResult<()> {
-        let query = "INSERT INTO conversations (id, user_id, title, model_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)";
+        let query = "INSERT INTO conversations (id, user_id, title, model_name, created_at, updated_at, system_message, system_message_hash, system_message_updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
         sqlx::query(query)
             .bind(&conv.id)
             .bind(&conv.user_id)
@@ -99,6 +114,9 @@ impl MessageStore {
             .bind(&conv.model_name)
             .bind(conv.created_at.naive_utc())
             .bind(conv.updated_at.naive_utc())
+            .bind(&conv.system_message)
+            .bind(&conv.system_message_hash)
+            .bind(conv.system_message_updated_at.map(|dt| dt.naive_utc()))
             .execute(&self.pool)
             .await?;
 
@@ -185,6 +203,10 @@ impl MessageStore {
                 let total_tokens: i64 = row.try_get("total_tokens")?;
                 let summary: Option<String> = row.try_get("summary").ok();
                 let last_summary_sequence: Option<i64> = row.try_get("last_summary_sequence").ok();
+                let system_message: Option<String> = row.try_get("system_message").ok();
+                let system_message_hash: Option<String> = row.try_get("system_message_hash").ok();
+                let system_message_updated_at: Option<chrono::NaiveDateTime> =
+                    row.try_get("system_message_updated_at").ok();
 
                 Ok(StoredConversation {
                     id,
@@ -197,6 +219,10 @@ impl MessageStore {
                     total_tokens,
                     summary,
                     last_summary_sequence,
+                    system_message,
+                    system_message_hash,
+                    system_message_updated_at: system_message_updated_at
+                        .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc)),
                 })
             }
             None => Err(MemoryError::ConversationNotFound(conv_id.to_string())),
@@ -267,6 +293,10 @@ impl MessageStore {
                 let total_tokens: i64 = row.try_get("total_tokens")?;
                 let summary: Option<String> = row.try_get("summary").ok();
                 let last_summary_sequence: Option<i64> = row.try_get("last_summary_sequence").ok();
+                let system_message: Option<String> = row.try_get("system_message").ok();
+                let system_message_hash: Option<String> = row.try_get("system_message_hash").ok();
+                let system_message_updated_at: Option<chrono::NaiveDateTime> =
+                    row.try_get("system_message_updated_at").ok();
 
                 Ok(Some(StoredConversation {
                     id,
@@ -279,6 +309,10 @@ impl MessageStore {
                     total_tokens,
                     summary,
                     last_summary_sequence,
+                    system_message,
+                    system_message_hash,
+                    system_message_updated_at: system_message_updated_at
+                        .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc)),
                 }))
             }
             None => Ok(None),
@@ -502,6 +536,41 @@ impl MessageStore {
             last_sequence,
             conv_id
         ).execute(&self.pool).await?;
+
+        Ok(())
+    }
+
+    /// 更新对话的系统消息
+    ///
+    /// # 参数
+    /// * `conv_id` - 目标对话的 ID
+    /// * `system_message` - 新的系统消息内容，如果为 None 表示清除系统消息
+    ///
+    /// # 返回值
+    /// * `MemoryResult<()>` - 成功时返回 ()，失败时返回 MemoryError
+    ///
+    /// # 说明
+    /// 更新对话的系统消息并计算内容哈希以便检测变化。
+    /// 如果系统消息内容发生变化，会更新哈希值和更新时间。
+    pub async fn update_system_message(
+        &self,
+        conv_id: &str,
+        system_message: Option<&str>,
+    ) -> MemoryResult<()> {
+        let (system_msg, system_hash) = if let Some(msg) = system_message {
+            let hash = format!("{:x}", md5::compute(msg.as_bytes()));
+            (Some(msg), Some(hash))
+        } else {
+            (None, None)
+        };
+
+        sqlx::query(
+            "UPDATE conversations SET system_message = ?, system_message_hash = ?, system_message_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+        .bind(system_msg)
+        .bind(system_hash)
+        .bind(conv_id)
+        .execute(&self.pool).await?;
 
         Ok(())
     }
