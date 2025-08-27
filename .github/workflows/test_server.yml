@@ -43,7 +43,7 @@ jobs:
     steps:
       - name: Clone project
         id: checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v5
 
       - name: Install Rust-nightly
         uses: actions-rust-lang/setup-rust-toolchain@v1

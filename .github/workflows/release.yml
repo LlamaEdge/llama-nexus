@@ -37,7 +37,7 @@ jobs:
     steps:
       - name: Checkout repository
         id: checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v5
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -111,7 +111,7 @@ jobs:
     steps:
       - name: Checkout repository
         id: checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v5
 
       - name: Install dependencies silently
         run: |
