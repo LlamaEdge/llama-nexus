@@ -1,6 +1,7 @@
 [server]
-host = "127.0.0.1" # The host to listen on.
-port = 3389        # The port to listen on.
+host = "127.0.0.1"   # The host to listen on.
+port = 3389          # The port to listen on.
+chat_mode = "normal" # Chat mode: "normal" or "react" (default: "normal")
 
 # Memory configuration
 [memory]

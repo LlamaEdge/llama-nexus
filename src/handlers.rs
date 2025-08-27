@@ -7,7 +7,7 @@ use axum::{
     http::{HeaderMap, Response, StatusCode},
 };
 use endpoints::{
-    chat::{ChatCompletionRequest, Tool, ToolChoice, ToolFunction},
+    chat::{ChatCompletionRequest, ChatCompletionRequestMessage, Tool, ToolChoice, ToolFunction},
     embeddings::EmbeddingRequest,
     models::{ListModelsResponse, Model},
 };
@@ -17,7 +17,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     AppState,
-    chat::{chat, gen_chat_id},
+    chat::gen_chat_id,
+    config::ChatMode,
     dual_debug, dual_error, dual_info, dual_warn,
     error::{ServerError, ServerResult},
     info::ApiServer,
@@ -86,14 +87,124 @@ pub(crate) async fn chat_handler(
         }
     }
 
-    chat(
-        State(state),
-        Extension(cancel_token),
-        headers,
-        Json(request),
-        &request_id,
-    )
-    .await
+    // Create or get conversation ID for memory
+    let conv_id = if let Some(memory) = &state.memory {
+        if let Some(user) = &request.user {
+            // 使用全局持久化的对话管理：同一用户无论使用什么模型都复用同一个对话
+            let model_name = request
+                .model
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            match memory
+                .get_or_create_user_conversation(user, &model_name)
+                .await
+            {
+                Ok(id) => {
+                    dual_debug!(
+                        "Using conversation {} for user {} - request_id: {}",
+                        id,
+                        user,
+                        request_id
+                    );
+                    Some(id)
+                }
+                Err(e) => {
+                    dual_warn!(
+                        "Failed to get or create conversation for user {}: {} - request_id: {}",
+                        user,
+                        e,
+                        request_id
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Get chat mode from configuration
+    let chat_mode = {
+        let config = state.config.read().await;
+        config.server.chat_mode
+    };
+    dual_debug!(
+        "Using chat mode: {:?} - request_id: {}",
+        chat_mode,
+        request_id
+    );
+
+    // Route to appropriate chat handler based on configuration
+    let res = match chat_mode {
+        ChatMode::Normal => {
+            crate::chat::normal::chat(
+                State(state.clone()),
+                Extension(cancel_token),
+                headers,
+                Json(request),
+                conv_id.clone(),
+                &request_id,
+            )
+            .await
+        }
+        ChatMode::React => {
+            crate::chat::react::chat(
+                State(state.clone()),
+                Extension(cancel_token),
+                headers,
+                Json(request),
+                conv_id.clone(),
+                &request_id,
+            )
+            .await
+        }
+    };
+
+    // Print chat history
+    if let Some(memory) = &state.memory
+        && let Some(conv_id) = &conv_id
+    {
+        let chat_history = memory.get_full_history(conv_id, true).await.map_err(|e| {
+            let err_msg = format!("Failed to get chat history: {e}");
+            dual_error!("{} - request_id: {}", err_msg, request_id);
+            ServerError::Operation(err_msg)
+        })?;
+        dual_debug!(
+            "🔍 Full history - request_id: {}\n{}",
+            request_id,
+            serde_json::to_string_pretty(&chat_history).unwrap()
+        );
+
+        let working_messages = memory.get_working_messages(conv_id).await.map_err(|e| {
+            let err_msg = format!("Failed to get working messages: {e}");
+            dual_error!("{} - request_id: {}", err_msg, request_id);
+            ServerError::Operation(err_msg)
+        })?;
+        dual_debug!(
+            "🔍 Working messages - request_id: {}\n{}",
+            request_id,
+            serde_json::to_string_pretty(&working_messages).unwrap()
+        );
+
+        let context = memory.get_model_context(conv_id).await.map_err(|e| {
+            let err_msg = format!("Failed to get model context: {e}");
+            dual_error!("{} - request_id: {}", err_msg, request_id);
+            ServerError::Operation(err_msg)
+        })?;
+        let context: Vec<ChatCompletionRequestMessage> = context
+            .into_iter()
+            .map(|model_msg| model_msg.into())
+            .collect();
+        dual_debug!(
+            "🔍 Model context - request_id: {}\n{}",
+            request_id,
+            serde_json::to_string_pretty(&context).unwrap()
+        );
+    }
+
+    res
 }
 
 pub(crate) async fn embeddings_handler(

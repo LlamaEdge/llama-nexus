@@ -86,7 +86,8 @@ impl Default for Config {
         Self {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
-                port: 8080,
+                port: 3389,
+                chat_mode: ChatMode::default(),
             },
             memory: None,
             rag: None,
@@ -97,10 +98,21 @@ impl Default for Config {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default)]
+pub enum ChatMode {
+    #[default]
+    #[serde(rename = "normal")]
+    Normal,
+    #[serde(rename = "react")]
+    React,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub chat_mode: ChatMode,
 }
 
 /// Summarization strategy for handling conversation history

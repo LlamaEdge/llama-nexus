@@ -36,6 +36,7 @@ pub(crate) async fn chat(
     Extension(cancel_token): Extension<CancellationToken>,
     headers: HeaderMap,
     Json(mut request): Json<ChatCompletionRequest>,
+    conv_id: Option<String>,
     request_id: impl AsRef<str>,
 ) -> ServerResult<axum::response::Response> {
     let request_id = request_id.as_ref();
@@ -45,44 +46,6 @@ pub(crate) async fn chat(
 
     // Extract system message for memory storage
     let system_message = extract_system_message(&request);
-
-    // Create or get conversation ID for memory
-    let conv_id = if let Some(memory) = &state.memory {
-        if let Some(user) = &request.user {
-            // 使用全局持久化的对话管理：同一用户无论使用什么模型都复用同一个对话
-            let model_name = request
-                .model
-                .clone()
-                .unwrap_or_else(|| "default".to_string());
-            match memory
-                .get_or_create_user_conversation(user, &model_name)
-                .await
-            {
-                Ok(id) => {
-                    dual_debug!(
-                        "Using conversation {} for user {} - request_id: {}",
-                        id,
-                        user,
-                        request_id
-                    );
-                    Some(id)
-                }
-                Err(e) => {
-                    dual_warn!(
-                        "Failed to get or create conversation for user {}: {} - request_id: {}",
-                        user,
-                        e,
-                        request_id
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
 
     // Get target server
     let chat_server = get_chat_server(&state, request_id).await?;

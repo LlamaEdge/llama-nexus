@@ -26,13 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     AppState,
-    chat::{
-        gen_chat_id,
-        utils::{
-            add_tool_results_to_stored, convert_tool_calls_to_stored, extract_system_message,
-            extract_user_message,
-        },
-    },
+    chat::{gen_chat_id, utils::*},
     dual_debug, dual_error, dual_info, dual_warn,
     error::{ServerError, ServerResult},
     mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SERVICES, MCP_TOOLS, SEARCH_MCP_SERVER_NAMES},
@@ -45,6 +39,7 @@ pub(crate) async fn chat(
     Extension(cancel_token): Extension<CancellationToken>,
     headers: HeaderMap,
     Json(mut request): Json<ChatCompletionRequest>,
+    conv_id: Option<String>,
     request_id: impl AsRef<str>,
 ) -> ServerResult<axum::response::Response> {
     let request_id = request_id.as_ref();
@@ -52,53 +47,15 @@ pub(crate) async fn chat(
     // Get target server
     let chat_server = get_chat_server(&state, request_id).await?;
 
-    let action_pattern = Regex::new(r"<action>(.*?)</action>").unwrap();
-    let thought_pattern = Regex::new(r"<thought>(.*?)</thought>").unwrap();
-    let final_answer_pattern = Regex::new(r"<final_answer>(.*?)</final_answer>").unwrap();
+    let action_pattern = Regex::new(r"(?s)<action>(.*?)</action>").unwrap();
+    let thought_pattern = Regex::new(r"(?s)<thought>(.*?)</thought>").unwrap();
+    let final_answer_pattern = Regex::new(r"(?s).*<final_answer>(.*?)</final_answer>").unwrap();
 
     // Extract user message for memory storage
     let user_message = extract_user_message(&request);
 
     // Extract system message for memory storage
     let system_message = extract_system_message(&request);
-
-    // Create or get conversation ID for memory
-    let conv_id = if let Some(memory) = &state.memory {
-        if let Some(user) = &request.user {
-            // 使用全局持久化的对话管理：同一用户无论使用什么模型都复用同一个对话
-            let model_name = request
-                .model
-                .clone()
-                .unwrap_or_else(|| "default".to_string());
-            match memory
-                .get_or_create_user_conversation(user, &model_name)
-                .await
-            {
-                Ok(id) => {
-                    dual_debug!(
-                        "Using conversation {} for user {} - request_id: {}",
-                        id,
-                        user,
-                        request_id
-                    );
-                    Some(id)
-                }
-                Err(e) => {
-                    dual_warn!(
-                        "Failed to get or create conversation for user {}: {} - request_id: {}",
-                        user,
-                        e,
-                        request_id
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
 
     // Store the latest user message to memory
     if let Some(memory) = &state.memory
@@ -164,6 +121,12 @@ pub(crate) async fn chat(
                 );
             }
         }
+    }
+
+    // set non-stream mode
+    let stream = request.stream.unwrap_or(false);
+    if stream {
+        request.stream = Some(false);
     }
 
     loop {
@@ -499,35 +462,6 @@ pub(crate) async fn chat(
                                                                 .messages
                                                                 .push(tool_completion_message);
                                                         }
-
-                                                        // // append assistant message with tool call to request messages
-                                                        // let assistant_completion_message =
-                                                        //     ChatCompletionRequestMessage::Assistant(
-                                                        //         ChatCompletionAssistantMessage::new(
-                                                        //             None,
-                                                        //             None,
-                                                        //             Some(tool_calls.to_vec()),
-                                                        //         ),
-                                                        //     );
-                                                        // request
-                                                        //     .messages
-                                                        //     .push(assistant_completion_message);
-
-                                                        // // append tool message with tool result to request messages
-                                                        // let content = format!(
-                                                        //     "<observation>{}</observation>",
-                                                        //     &content
-                                                        // );
-                                                        // let tool_completion_message =
-                                                        //     ChatCompletionRequestMessage::Tool(
-                                                        //         ChatCompletionToolMessage::new(
-                                                        //             &content,
-                                                        //             tool_call_id,
-                                                        //         ),
-                                                        //     );
-                                                        // request
-                                                        //     .messages
-                                                        //     .push(tool_completion_message);
                                                     }
                                                     false => {
                                                         dual_info!(
@@ -625,35 +559,6 @@ pub(crate) async fn chat(
                                                                 .messages
                                                                 .push(tool_completion_message);
                                                         }
-
-                                                        // // append assistant message with tool call to request messages
-                                                        // let assistant_completion_message =
-                                                        //     ChatCompletionRequestMessage::Assistant(
-                                                        //         ChatCompletionAssistantMessage::new(
-                                                        //             None,
-                                                        //             None,
-                                                        //             Some(tool_calls.to_vec()),
-                                                        //         ),
-                                                        //     );
-                                                        // request
-                                                        //     .messages
-                                                        //     .push(assistant_completion_message);
-
-                                                        // // append tool message with tool result to request messages
-                                                        // let content = format!(
-                                                        //     "<observation>{}</observation>",
-                                                        //     &text.text
-                                                        // );
-                                                        // let tool_completion_message =
-                                                        //     ChatCompletionRequestMessage::Tool(
-                                                        //         ChatCompletionToolMessage::new(
-                                                        //             &content,
-                                                        //             tool_call_id,
-                                                        //         ),
-                                                        //     );
-                                                        // request
-                                                        //     .messages
-                                                        //     .push(tool_completion_message);
                                                     }
                                                 }
                                             }
@@ -719,7 +624,7 @@ pub(crate) async fn chat(
                             .unwrap()
                             .as_str()
                             .to_string(); // 转换为String避免借用问题
-                        dual_info!("Final answer: {}", final_answer);
+                        dual_info!("✅ Final answer: {}", final_answer);
 
                         // 存储助手消息到记忆中
                         if let (Some(memory), Some(conv_id)) = (&state.memory, &conv_id)
@@ -734,12 +639,10 @@ pub(crate) async fn chat(
                             );
                         }
 
-                        match request.stream {
-                            Some(true) => {
-                                let chunks: Vec<String> = final_answer
-                                    .split_whitespace()
-                                    .map(|s| s.to_string())
-                                    .collect();
+                        // Return chat completion
+                        match stream {
+                            true => {
+                                let chunks = gen_chunks_with_formatting(content, 10);
                                 let id = match &request.user {
                                     Some(id) => id.clone(),
                                     None => gen_chat_id(),
@@ -829,7 +732,7 @@ pub(crate) async fn chat(
                                     }
                                 }
                             }
-                            _ => {
+                            false => {
                                 chat_completion.choices[0].message.content =
                                     Some(final_answer.to_string());
                                 let response_body =
@@ -861,9 +764,142 @@ pub(crate) async fn chat(
                             dual_info!("🔧 Action: {}", action);
                         }
                         None => {
-                            let err_msg = "No <action> tags found in the response";
-                            dual_error!("{} - request_id: {}", err_msg, request_id);
-                            return Err(ServerError::Operation(err_msg.to_string()));
+                            let warn_msg = format!(
+                                "No <action> or <final_answer> tags found in the response: {content}"
+                            );
+                            dual_warn!("{} - request_id: {}", warn_msg, request_id);
+
+                            dual_info!("✅ Final answer: {}", content);
+
+                            // 存储助手消息到记忆中
+                            if let (Some(memory), Some(conv_id)) = (&state.memory, &conv_id)
+                                && let Err(e) =
+                                    memory.add_assistant_message(conv_id, content, vec![]).await
+                            {
+                                dual_error!(
+                                    "Failed to add assistant message to memory: {} - request_id: {}",
+                                    e,
+                                    request_id
+                                );
+                            }
+
+                            // Return chat completion
+                            match stream {
+                                true => {
+                                    let chunks = gen_chunks_with_formatting(content, 10);
+                                    let id = match &request.user {
+                                        Some(id) => id.clone(),
+                                        None => gen_chat_id(),
+                                    };
+                                    let model = chat_completion.model.clone();
+                                    let usage = chat_completion.usage;
+                                    let chunks_len = chunks.len();
+
+                                    // 创建SSE流
+                                    let request_id_owned = request_id.to_string();
+                                    let stream = stream::iter(chunks.into_iter().enumerate().map(
+                                        move |(i, chunk)| {
+                                            let created = SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map_err(|e| {
+                                                    let err_msg = format!(
+                                                        "Failed to get the current time. Reason: {e}"
+                                                    );
+
+                                                    dual_error!(
+                                                        "{} - request_id: {}",
+                                                        err_msg,
+                                                        request_id_owned
+                                                    );
+
+                                                    ServerError::Operation(err_msg)
+                                                })
+                                                .unwrap();
+
+                                            let mut chat_completion_chunk = ChatCompletionChunk {
+                                                id: id.clone(),
+                                                object: "chat.completion.chunk".to_string(),
+                                                created: created.as_secs(),
+                                                model: model.clone(),
+                                                system_fingerprint: "fp_44709d6fcb".to_string(),
+                                                choices: vec![ChatCompletionChunkChoice {
+                                                    index: i as u32,
+                                                    delta: ChatCompletionChunkChoiceDelta {
+                                                        role: ChatCompletionRole::Assistant,
+                                                        content: Some(chunk),
+                                                        tool_calls: vec![],
+                                                    },
+                                                    logprobs: None,
+                                                    finish_reason: None,
+                                                }],
+                                                usage: None,
+                                            };
+
+                                            if i == chunks_len - 1 {
+                                                // update finish_reason
+                                                chat_completion_chunk.choices[0].finish_reason =
+                                                    Some(FinishReason::stop);
+
+                                                // update usage
+                                                chat_completion_chunk.usage = Some(usage);
+                                            }
+
+                                            let json_str =
+                                                serde_json::to_string(&chat_completion_chunk).unwrap();
+                                            format!("data: {json_str}\n\n")
+                                        },
+                                    ))
+                                    .chain(stream::once(async { "data: [DONE]\n\n".to_string() }))
+                                    .map(|s| Ok::<_, std::convert::Infallible>(s.into_bytes()));
+
+                                    // 构建流式响应
+                                    let response = Response::builder()
+                                        .header(CONTENT_TYPE, "text/event-stream")
+                                        .header("Cache-Control", "no-cache")
+                                        .header("Connection", "keep-alive")
+                                        .status(StatusCode::OK)
+                                        .body(Body::from_stream(stream));
+
+                                    match response {
+                                        Ok(response) => {
+                                            dual_info!(
+                                                "Streaming response sent successfully - request_id: {}",
+                                                request_id
+                                            );
+                                            return Ok(response);
+                                        }
+                                        Err(e) => {
+                                            let err_msg =
+                                                format!("Failed to create streaming response: {e}");
+                                            dual_error!("{} - request_id: {}", err_msg, request_id);
+                                            return Err(ServerError::Operation(err_msg));
+                                        }
+                                    }
+                                }
+                                false => {
+                                    chat_completion.choices[0].message.content =
+                                        Some(content.to_string());
+                                    let response_body =
+                                        serde_json::to_string(&chat_completion).unwrap();
+
+                                    // build the response builder
+                                    let response_builder = Response::builder()
+                                        .header(CONTENT_TYPE, "application/json")
+                                        .status(StatusCode::OK);
+
+                                    match response_builder.body(Body::from(response_body)) {
+                                        Ok(response) => {
+                                            return Ok(response);
+                                        }
+                                        Err(e) => {
+                                            let err_msg =
+                                                format!("Failed to create the response: {e}");
+                                            dual_error!("{} - request_id: {}", err_msg, request_id);
+                                            return Err(ServerError::Operation(err_msg));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -873,15 +909,29 @@ pub(crate) async fn chat(
             }
         }
     }
+}
 
-    // run_in_react_mode(
-    //     &chat_server,
-    //     &mut request,
-    //     &headers,
-    //     request_id,
-    //     cancel_token.clone(),
-    // )
-    // .await
+#[allow(dead_code)]
+pub(crate) async fn chat_origin(
+    State(state): State<Arc<AppState>>,
+    Extension(cancel_token): Extension<CancellationToken>,
+    headers: HeaderMap,
+    Json(mut request): Json<ChatCompletionRequest>,
+    request_id: impl AsRef<str>,
+) -> ServerResult<axum::response::Response> {
+    let request_id = request_id.as_ref();
+
+    // Get target server
+    let chat_server = get_chat_server(&state, request_id).await?;
+
+    run_in_react_mode(
+        &chat_server,
+        &mut request,
+        &headers,
+        request_id,
+        cancel_token.clone(),
+    )
+    .await
 }
 
 #[allow(dead_code)]
@@ -892,9 +942,9 @@ async fn run_in_react_mode(
     request_id: &str,
     cancel_token: CancellationToken,
 ) -> ServerResult<axum::response::Response> {
-    let action_pattern = Regex::new(r"<action>(.*?)</action>").unwrap();
-    let thought_pattern = Regex::new(r"<thought>(.*?)</thought>").unwrap();
-    let final_answer_pattern = Regex::new(r"<final_answer>(.*?)</final_answer>").unwrap();
+    let action_pattern = Regex::new(r"(?s)<action>(.*?)</action>").unwrap();
+    let thought_pattern = Regex::new(r"(?s)<thought>(.*?)</thought>").unwrap();
+    let final_answer_pattern = Regex::new(r"(?s).*<final_answer>(.*?)</final_answer>").unwrap();
 
     loop {
         // * build request
@@ -1256,7 +1306,7 @@ async fn run_in_react_mode(
                             .unwrap()
                             .as_str()
                             .to_string(); // 转换为String避免借用问题
-                        dual_info!("Final answer: {}", final_answer);
+                        dual_info!("✅ Final answer: {}", final_answer);
 
                         match request.stream {
                             Some(true) => {
@@ -1385,9 +1435,172 @@ async fn run_in_react_mode(
                             dual_info!("🔧 Action: {}", action);
                         }
                         None => {
-                            let err_msg = "No <action> tags found in the response";
-                            dual_error!("{} - request_id: {}", err_msg, request_id);
-                            return Err(ServerError::Operation(err_msg.to_string()));
+                            let warn_msg = format!(
+                                "No <action> or <final_answer> tags found in the response: {content}"
+                            );
+                            dual_warn!("{} - request_id: {}", warn_msg, request_id);
+
+                            match request.stream {
+                                Some(true) => {
+                                    // 改进的分块策略：按字符分割但保持完整的单词和格式
+                                    let mut chunks: Vec<String> = Vec::new();
+                                    let chunk_size = 10; // 每个chunk大约包含的字符数
+
+                                    let chars: Vec<char> = content.chars().collect();
+                                    let mut i = 0;
+
+                                    while i < chars.len() {
+                                        // 累积字符直到达到chunk_size或遇到自然的分割点
+                                        let mut temp_chunk = String::new();
+
+                                        // 累积字符直到达到chunk_size
+                                        while i < chars.len() && temp_chunk.len() < chunk_size {
+                                            temp_chunk.push(chars[i]);
+                                            i += 1;
+                                        }
+
+                                        // 如果不是在文本末尾，尝试在单词边界处分割
+                                        if i < chars.len() {
+                                            // 向前查找，直到找到空格、换行符或其他合适的分割点
+                                            while i < chars.len() && !chars[i].is_whitespace() {
+                                                temp_chunk.push(chars[i]);
+                                                i += 1;
+                                            }
+
+                                            // 包含紧跟的空白字符（但不包含换行符）
+                                            while i < chars.len()
+                                                && chars[i].is_whitespace()
+                                                && chars[i] != '\n'
+                                            {
+                                                temp_chunk.push(chars[i]);
+                                                i += 1;
+                                            }
+
+                                            // 如果下一个字符是换行符，包含它
+                                            if i < chars.len() && chars[i] == '\n' {
+                                                temp_chunk.push(chars[i]);
+                                                i += 1;
+                                            }
+                                        }
+
+                                        if !temp_chunk.is_empty() {
+                                            chunks.push(temp_chunk);
+                                        }
+                                    }
+
+                                    let id = match &request.user {
+                                        Some(id) => id.clone(),
+                                        None => gen_chat_id(),
+                                    };
+                                    let model = chat_completion.model.clone();
+                                    let usage = chat_completion.usage;
+                                    let chunks_len = chunks.len();
+
+                                    // 创建SSE流
+                                    let request_id_owned = request_id.to_string();
+                                    let stream = stream::iter(chunks.into_iter().enumerate().map(
+                                        move |(i, chunk)| {
+                                            let created = SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map_err(|e| {
+                                                    let err_msg = format!(
+                                                        "Failed to get the current time. Reason: {e}"
+                                                    );
+
+                                                    dual_error!(
+                                                        "{} - request_id: {}",
+                                                        err_msg,
+                                                        request_id_owned
+                                                    );
+
+                                                    ServerError::Operation(err_msg)
+                                                })
+                                                .unwrap();
+
+                                            let mut chat_completion_chunk = ChatCompletionChunk {
+                                                id: id.clone(),
+                                                object: "chat.completion.chunk".to_string(),
+                                                created: created.as_secs(),
+                                                model: model.clone(),
+                                                system_fingerprint: "fp_44709d6fcb".to_string(),
+                                                choices: vec![ChatCompletionChunkChoice {
+                                                    index: i as u32,
+                                                    delta: ChatCompletionChunkChoiceDelta {
+                                                        role: ChatCompletionRole::Assistant,
+                                                        content: Some(chunk),
+                                                        tool_calls: vec![],
+                                                    },
+                                                    logprobs: None,
+                                                    finish_reason: None,
+                                                }],
+                                                usage: None,
+                                            };
+
+                                            if i == chunks_len - 1 {
+                                                // update finish_reason
+                                                chat_completion_chunk.choices[0].finish_reason =
+                                                    Some(FinishReason::stop);
+
+                                                // update usage
+                                                chat_completion_chunk.usage = Some(usage);
+                                            }
+
+                                            let json_str =
+                                                serde_json::to_string(&chat_completion_chunk).unwrap();
+                                            format!("data: {json_str}\n\n")
+                                        },
+                                    ))
+                                    .chain(stream::once(async { "data: [DONE]\n\n".to_string() }))
+                                    .map(|s| Ok::<_, std::convert::Infallible>(s.into_bytes()));
+
+                                    // 构建流式响应
+                                    let response = Response::builder()
+                                        .header(CONTENT_TYPE, "text/event-stream")
+                                        .header("Cache-Control", "no-cache")
+                                        .header("Connection", "keep-alive")
+                                        .status(StatusCode::OK)
+                                        .body(Body::from_stream(stream));
+
+                                    match response {
+                                        Ok(response) => {
+                                            dual_info!(
+                                                "Streaming response sent successfully - request_id: {}",
+                                                request_id
+                                            );
+                                            return Ok(response);
+                                        }
+                                        Err(e) => {
+                                            let err_msg =
+                                                format!("Failed to create streaming response: {e}");
+                                            dual_error!("{} - request_id: {}", err_msg, request_id);
+                                            return Err(ServerError::Operation(err_msg));
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    chat_completion.choices[0].message.content =
+                                        Some(content.to_string());
+                                    let response_body =
+                                        serde_json::to_string(&chat_completion).unwrap();
+
+                                    // build the response builder
+                                    let response_builder = Response::builder()
+                                        .header(CONTENT_TYPE, "application/json")
+                                        .status(StatusCode::OK);
+
+                                    match response_builder.body(Body::from(response_body)) {
+                                        Ok(response) => {
+                                            return Ok(response);
+                                        }
+                                        Err(e) => {
+                                            let err_msg =
+                                                format!("Failed to create the response: {e}");
+                                            dual_error!("{} - request_id: {}", err_msg, request_id);
+                                            return Err(ServerError::Operation(err_msg));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1422,4 +1635,57 @@ async fn get_chat_server(
             Err(ServerError::Operation(err_msg))
         }
     }
+}
+
+/// 将文本智能分块，保持单词完整性和格式
+///
+/// # 参数
+/// * `text` - 要分块的文本
+/// * `chunk_size` - 每个块的目标字符数
+///
+/// # 返回
+/// 分块后的字符串向量，保留原始格式和空白字符
+fn gen_chunks_with_formatting(text: impl AsRef<str>, chunk_size: usize) -> Vec<String> {
+    let content = text.as_ref();
+    let mut chunks: Vec<String> = Vec::new();
+
+    let chars: Vec<char> = content.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        // 累积字符直到达到chunk_size或遇到自然的分割点
+        let mut temp_chunk = String::new();
+
+        // 累积字符直到达到chunk_size
+        while i < chars.len() && temp_chunk.len() < chunk_size {
+            temp_chunk.push(chars[i]);
+            i += 1;
+        }
+
+        // 如果不是在文本末尾，尝试在单词边界处分割
+        if i < chars.len() {
+            // 向前查找，直到找到空格、换行符或其他合适的分割点
+            while i < chars.len() && !chars[i].is_whitespace() {
+                temp_chunk.push(chars[i]);
+                i += 1;
+            }
+
+            // 包含紧跟的空白字符（但不包含换行符）
+            while i < chars.len() && chars[i].is_whitespace() && chars[i] != '\n' {
+                temp_chunk.push(chars[i]);
+                i += 1;
+            }
+
+            // 如果下一个字符是换行符，包含它
+            if i < chars.len() && chars[i] == '\n' {
+                temp_chunk.push(chars[i]);
+                i += 1;
+            }
+        }
+
+        if !temp_chunk.is_empty() {
+            chunks.push(temp_chunk);
+        }
+    }
+
+    chunks
 }
