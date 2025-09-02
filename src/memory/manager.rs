@@ -10,74 +10,74 @@ use crate::{
     memory::{store::MessageStore, summarizer::MessageSummarizer, types::*},
 };
 
-/// 完整的聊天记忆管理器
+/// Complete chat memory manager
 ///
-/// 提供对话的完整生命周期管理，包括消息存储、上下文管理、自动摘要等功能。
-/// 该结构体是整个记忆系统的核心，负责协调存储层、摘要器和配置管理。
+/// Provides complete lifecycle management for conversations, including message storage, context management, automatic summarization and other features.
+/// This struct is the core of the entire memory system, responsible for coordinating the storage layer, summarizer, and configuration management.
 ///
-/// # 特性
-/// * 分层存储：完整的数据库存储 + 工作上下文缓存
-/// * 智能摘要：当上下文过长时自动生成摘要以节省空间
-/// * 配置驱动：支持通过配置文件自定义行为参数
-/// * 并发安全：使用异步锁保证多线程安全
+/// # Features
+/// * Hierarchical storage: Complete database storage + working context cache
+/// * Intelligent summarization: Automatically generates summaries when context becomes too long to save space
+/// * Configuration-driven: Supports customizing behavior parameters through configuration files
+/// * Concurrency-safe: Uses async locks to ensure thread safety
 pub struct CompleteChatMemory {
-    /// 底层消息存储，负责持久化数据到 SQLite 数据库
+    /// Underlying message storage, responsible for persisting data to SQLite database
     ///
-    /// 提供完整的 CRUD 操作，包括消息存储、对话管理、统计查询等。
-    /// 所有的对话和消息数据都通过此组件进行持久化存储。
+    /// Provides complete CRUD operations, including message storage, conversation management, statistical queries, etc.
+    /// All conversation and message data is persisted through this component.
     store: MessageStore,
 
-    /// 上下文缓存，存储每个对话的工作上下文
+    /// Context cache, stores working context for each conversation
     ///
-    /// Key: 对话 ID (String)
-    /// Value: 对话的上下文记忆 (ContextMemory)
+    /// Key: Conversation ID (String)
+    /// Value: Conversation's context memory (ContextMemory)
     ///
-    /// 使用异步互斥锁保证并发安全，缓存当前活跃对话的工作消息集合，
-    /// 避免每次都从数据库加载完整历史。当上下文过长时会触发自动摘要和截断。
+    /// Uses async mutex lock to ensure concurrency safety, caches working message sets for currently active conversations,
+    /// avoiding loading complete history from database every time. Auto-summary and truncation are triggered when context becomes too long.
     context_cache: Mutex<HashMap<String, ContextMemory>>,
 
-    /// 消息摘要生成器，用于压缩长对话历史
+    /// Message summarizer for compressing long conversation history
     ///
-    /// 当对话上下文超过配置的长度限制时，使用此组件将旧消息
-    /// 压缩成摘要文本，以节省上下文空间并保持重要信息。
-    /// 支持增量摘要，可以基于现有摘要和新消息生成更新的摘要。
+    /// When conversation context exceeds configured length limit, this component is used to
+    /// compress old messages into summary text to save context space while preserving important information.
+    /// Supports incremental summarization, can generate updated summaries based on existing summaries and new messages.
     summarizer: MessageSummarizer,
 
-    /// 记忆系统配置参数
+    /// Memory system configuration parameters
     ///
-    /// 包含各种可配置的行为参数，如：
-    /// - 数据库文件路径
-    /// - 上下文窗口大小限制
-    /// - 自动摘要触发条件
-    /// - 最大存储消息数量等
+    /// Contains various configurable behavior parameters, such as:
+    /// - Database file path
+    /// - Context window size limit
+    /// - Auto-summary trigger conditions
+    /// - Maximum stored message count, etc.
     ///
-    /// 通过配置文件加载，支持运行时自定义系统行为。
+    /// Loaded from configuration file, supports runtime customization of system behavior.
     config: MemoryConfig,
 }
 
 impl CompleteChatMemory {
-    /// 创建一个新的完整聊天记忆管理器实例
+    /// Create a new complete chat memory manager instance
     ///
-    /// # 参数
-    /// * `config` - 记忆系统配置，包含数据库路径、上下文窗口大小等设置
+    /// # Parameters
+    /// * `config` - Memory system configuration, including database path, context window size and other settings
     ///
-    /// # 返回值
-    /// * `MemoryResult<Self>` - 成功时返回管理器实例，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<Self>` - Returns manager instance on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 此方法会：
-    /// 1. 初始化底层的消息存储（MessageStore）
-    /// 2. 创建消息摘要器（MessageSummarizer）
-    /// 3. 初始化上下文缓存
-    /// 4. 应用配置参数
+    /// # Description
+    /// This method will:
+    /// 1. Initialize the underlying message storage (MessageStore)
+    /// 2. Create message summarizer (MessageSummarizer)
+    /// 3. Initialize context cache
+    /// 4. Apply configuration parameters
     ///
-    /// # 错误
-    /// * `MemoryError::DatabaseError` - 当数据库连接或初始化失败时
+    /// # Errors
+    /// * `MemoryError::DatabaseError` - When database connection or initialization fails
     pub async fn new(config: MemoryConfig) -> MemoryResult<Self> {
-        // 初始化消息存储
+        // Initialize message storage
         let store = MessageStore::new(&config.database_path).await?;
 
-        // 创建消息摘要器
+        // Create message summarizer
         let summarizer = MessageSummarizer::new(
             None,
             &config.summary_service_base_url,
@@ -93,7 +93,7 @@ impl CompleteChatMemory {
         })
     }
 
-    // 配置映射辅助方法
+    // Configuration mapping helper methods
     fn max_context_tokens(&self) -> usize {
         self.config.context_window as usize
     }
@@ -107,33 +107,33 @@ impl CompleteChatMemory {
     }
 
     fn summary_trigger_ratio(&self) -> f32 {
-        // 当消息数量超过threshold时触发摘要，设置为0.8的比例
+        // Trigger summarization when message count exceeds threshold, set to ratio of 0.8
         0.8
     }
 
     fn keep_recent_messages(&self) -> usize {
-        // 保留最近的消息数量，设置为threshold的一半
+        // Keep recent message count, set to half of threshold
         (self.config.summarize_threshold / 2) as usize
     }
 
-    /// 创建一个新的对话
+    /// Create a new conversation
     ///
-    /// # 参数
-    /// * `model_name` - 对话使用的模型名称
-    /// * `user_id` - 可选的用户ID
-    /// * `title` - 可选的对话标题
+    /// # Parameters
+    /// * `model_name` - Model name used for the conversation
+    /// * `user_id` - Optional user ID
+    /// * `title` - Optional conversation title
     ///
-    /// # 返回值
-    /// * `MemoryResult<String>` - 成功时返回新创建的对话 ID，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<String>` - Returns newly created conversation ID on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 此方法会：
-    /// 1. 生成唯一的对话 ID
-    /// 2. 在数据库中创建对话记录
-    /// 3. 初始化对话的上下文缓存
-    /// 4. 设置初始的上下文参数（如最大 token 数等）
+    /// # Description
+    /// This method will:
+    /// 1. Generate unique conversation ID
+    /// 2. Create conversation record in database
+    /// 3. Initialize conversation's context cache
+    /// 4. Set initial context parameters (such as max token count, etc.)
     ///
-    /// 创建的对话具有空的消息历史和上下文缓存。
+    /// The created conversation has empty message history and context cache.
     pub async fn create_conversation(
         &self,
         model_name: &str,
@@ -159,7 +159,7 @@ impl CompleteChatMemory {
 
         self.store.create_conversation(&conversation).await?;
 
-        // 初始化上下文缓存
+        // Initialize context cache
         let context = ContextMemory {
             conversation_id: conv_id.clone(),
             working_messages: Vec::new(),
@@ -176,60 +176,60 @@ impl CompleteChatMemory {
         Ok(conv_id)
     }
 
-    /// 获取或创建用户对话
+    /// Get or create user conversation
     ///
-    /// # 参数
-    /// * `user_id` - 用户的唯一标识符
-    /// * `model_name` - 模型名称（用于创建新对话时设置，但不影响查找逻辑）
+    /// # Parameters
+    /// * `user_id` - User's unique identifier
+    /// * `model_name` - Model name (used when creating new conversation, but doesn't affect lookup logic)
     ///
-    /// # 返回值
-    /// * `MemoryResult<String>` - 成功时返回对话ID（现有的或新创建的）
+    /// # Returns
+    /// * `MemoryResult<String>` - Returns conversation ID (existing or newly created) on success
     ///
-    /// # 说明
-    /// 此方法实现用户对话的全局持久化管理：
-    /// 1. 首先尝试找到用户的任何对话（不区分模型）
-    /// 2. 如果找到，直接复用该对话ID并确保其在缓存中
-    /// 3. 如果没有找到，为用户创建新对话
-    /// 4. 同一个用户无论使用什么模型都会复用同一个对话
+    /// # Description
+    /// This method implements global persistent management of user conversations:
+    /// 1. First try to find any conversation for the user (regardless of model)
+    /// 2. If found, directly reuse that conversation ID and ensure it's in cache
+    /// 3. If not found, create new conversation for the user
+    /// 4. Same user will reuse the same conversation regardless of which model is used
     pub async fn get_or_create_user_conversation(
         &self,
         user_id: &str,
         model_name: &str,
     ) -> MemoryResult<String> {
-        // 尝试获取用户的任何对话（不区分模型）
+        // Try to get any conversation for the user (regardless of model)
         if let Some(recent_conv) = self
             .store
             .get_recent_conversation_by_user(user_id, None)
             .await?
         {
-            // 对话存在，直接复用，确保其在缓存中
+            // Conversation exists, directly reuse, ensure it's in cache
             self.ensure_conversation_in_cache(&recent_conv.id).await?;
             return Ok(recent_conv.id);
         }
 
-        // 没有找到对话，创建新的
+        // No conversation found, create new one
         self.create_conversation(model_name, Some(user_id.to_string()), None)
             .await
     }
 
-    /// 确保对话在缓存中
+    /// Ensure conversation is in cache
     ///
-    /// # 参数
-    /// * `conv_id` - 对话ID
+    /// # Parameters
+    /// * `conv_id` - Conversation ID
     ///
-    /// # 返回值
-    /// * `MemoryResult<()>` - 成功时返回()
+    /// # Returns
+    /// * `MemoryResult<()>` - Returns () on success
     ///
-    /// # 说明
-    /// 如果对话不在缓存中，从数据库加载并初始化缓存
+    /// # Description
+    /// If conversation is not in cache, load from database and initialize cache
     async fn ensure_conversation_in_cache(&self, conv_id: &str) -> MemoryResult<()> {
         let mut cache = self.context_cache.lock().await;
 
         if !cache.contains_key(conv_id) {
-            // 对话不在缓存中，需要从数据库加载
+            // Conversation not in cache, need to load from database
             let conversation = self.store.get_conversation(conv_id).await?;
 
-            // 加载最近的消息到工作上下文
+            // Load recent messages to working context
             let recent_messages = self
                 .store
                 .get_recent_messages(conv_id, self.max_working_messages())
@@ -239,7 +239,7 @@ impl CompleteChatMemory {
                 conversation_id: conv_id.to_string(),
                 working_messages: recent_messages,
                 summary: conversation.summary,
-                total_tokens: 0, // 这里可以根据需要计算实际token数
+                total_tokens: 0, // Can calculate actual token count here if needed
                 max_context_tokens: self.max_context_tokens(),
             };
 
@@ -249,26 +249,26 @@ impl CompleteChatMemory {
         Ok(())
     }
 
-    /// 添加用户消息到对话中
+    /// Add user message to conversation
     ///
-    /// # 参数
-    /// * `conv_id` - 目标对话的 ID
-    /// * `content` - 用户消息的文本内容
+    /// # Parameters
+    /// * `conv_id` - Target conversation ID
+    /// * `content` - User message text content
     ///
-    /// # 返回值
-    /// * `MemoryResult<MessageResult>` - 成功时返回消息结果和 summarization 状态，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<MessageResult>` - Returns message result and summarization status on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 此方法会：
-    /// 1. 自动分配消息序列号
-    /// 2. 生成唯一的消息 ID
-    /// 3. 将消息完整存储到数据库
-    /// 4. 更新对话的工作上下文缓存
-    /// 5. 如果上下文过长，触发自动摘要和截断
-    /// 6. 返回存储的消息以及是否触发了 summarization 的信息
+    /// # Description
+    /// This method will:
+    /// 1. Automatically assign message sequence number
+    /// 2. Generate unique message ID
+    /// 3. Store message completely to database
+    /// 4. Update conversation's working context cache
+    /// 5. If context is too long, trigger automatic summarization and truncation
+    /// 6. Return stored message and whether summarization was triggered
     ///
-    /// # 错误
-    /// * `MemoryError::ConversationNotFound` - 当指定的对话不存在时
+    /// # Errors
+    /// * `MemoryError::ConversationNotFound` - When specified conversation doesn't exist
     pub async fn add_user_message(
         &self,
         conv_id: &str,
@@ -286,10 +286,10 @@ impl CompleteChatMemory {
             tool_calls: Vec::new(),
         };
 
-        // 第一层：完整存储
+        // First layer: complete storage
         self.store.store_message(&message).await?;
 
-        // 第二层：更新工作上下文
+        // Second layer: update working context
         let summarization_status = self
             .update_working_context(conv_id, message.clone())
             .await?;
@@ -308,24 +308,24 @@ impl CompleteChatMemory {
         Ok(MessageResult::new(message, summarization_status))
     }
 
-    /// 添加助手消息到对话中
+    /// Add assistant message to conversation
     ///
-    /// # 参数
-    /// * `conv_id` - 目标对话的 ID
-    /// * `content` - 助手回复的文本内容
-    /// * `tool_calls` - 助手在此回复中使用的工具调用列表
+    /// # Parameters
+    /// * `conv_id` - Target conversation ID
+    /// * `content` - Assistant reply text content
+    /// * `tool_calls` - List of tool calls used by assistant in this reply
     ///
-    /// # 返回值
-    /// * `MemoryResult<MessageResult>` - 成功时返回消息结果和 summarization 状态，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<MessageResult>` - Returns message result and summarization status on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 此方法处理 AI 助手的回复消息，包括可能的工具调用信息。
-    /// 工具调用会被完整保存，包括调用参数、执行结果和状态信息。
-    /// 与用户消息类似，会触发上下文管理和可能的摘要操作。
-    /// 返回的 `MessageResult` 包含存储的消息信息以及是否触发了 summarization。
+    /// # Description
+    /// This method handles AI assistant reply messages, including possible tool call information.
+    /// Tool calls will be completely saved, including call parameters, execution results and status information.
+    /// Similar to user messages, it will trigger context management and possible summarization operations.
+    /// The returned `MessageResult` contains stored message information and whether summarization was triggered.
     ///
-    /// # 错误
-    /// * `MemoryError::ConversationNotFound` - 当指定的对话不存在时
+    /// # Errors
+    /// * `MemoryError::ConversationNotFound` - When specified conversation doesn't exist
     pub async fn add_assistant_message(
         &self,
         conv_id: &str,
@@ -344,10 +344,10 @@ impl CompleteChatMemory {
             tool_calls,
         };
 
-        // 第一层：完整存储
+        // First layer: complete storage
         self.store.store_message(&message).await?;
 
-        // 第二层：更新工作上下文
+        // Second layer: update working context
         let summarization_status = self
             .update_working_context(conv_id, message.clone())
             .await?;
@@ -355,33 +355,33 @@ impl CompleteChatMemory {
         Ok(MessageResult::new(message, summarization_status))
     }
 
-    /// 添加或更新对话的系统消息
+    /// Add or update conversation's system message
     ///
-    /// # 参数
-    /// * `conv_id` - 目标对话的 ID
-    /// * `system_message` - 系统消息内容
+    /// # Parameters
+    /// * `conv_id` - Target conversation ID
+    /// * `system_message` - System message content
     ///
-    /// # 返回值
-    /// * `MemoryResult<bool>` - 成功时返回 true 表示系统消息被更新，false 表示内容未变化
+    /// # Returns
+    /// * `MemoryResult<bool>` - Returns true if system message was updated, false if content unchanged on success
     ///
-    /// # 说明
-    /// 此方法会检查系统消息是否发生变化（通过内容哈希比较），
-    /// 只有在内容确实发生变化时才会更新数据库，避免不必要的写操作。
+    /// # Description
+    /// This method will check if system message has changed (by content hash comparison),
+    /// only updating database when content actually changes, avoiding unnecessary write operations.
     pub async fn set_system_message(
         &self,
         conv_id: &str,
         system_message: &str,
     ) -> MemoryResult<bool> {
-        // 获取当前对话信息
+        // Get current conversation information
         let conversation = self.store.get_conversation(conv_id).await?;
 
-        // 计算新消息的哈希
+        // Calculate hash of new message
         let new_hash = format!("{:x}", md5::compute(system_message.as_bytes()));
 
-        // 检查是否需要更新
+        // Check if update is needed
         let needs_update = match &conversation.system_message_hash {
             Some(existing_hash) => existing_hash != &new_hash,
-            None => true, // 如果之前没有系统消息，需要更新
+            None => true, // If no previous system message, update is needed
         };
 
         if needs_update {
@@ -394,49 +394,49 @@ impl CompleteChatMemory {
         }
     }
 
-    /// 获取对话的系统消息
+    /// Get conversation's system message
     ///
-    /// # 参数
-    /// * `conv_id` - 目标对话的 ID
+    /// # Parameters
+    /// * `conv_id` - Target conversation ID
     ///
-    /// # 返回值
-    /// * `MemoryResult<Option<String>>` - 成功时返回系统消息内容，如果不存在则返回 None
+    /// # Returns
+    /// * `MemoryResult<Option<String>>` - Returns system message content on success, None if doesn't exist
     #[allow(dead_code)]
     pub async fn get_system_message(&self, conv_id: &str) -> MemoryResult<Option<String>> {
         let conversation = self.store.get_conversation(conv_id).await?;
         Ok(conversation.system_message)
     }
 
-    /// 清除对话的系统消息
+    /// Clear conversation's system message
     ///
-    /// # 参数
-    /// * `conv_id` - 目标对话的 ID
+    /// # Parameters
+    /// * `conv_id` - Target conversation ID
     ///
-    /// # 返回值
-    /// * `MemoryResult<()>` - 成功时返回 ()，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<()>` - Returns () on success, MemoryError on failure
     #[allow(dead_code)]
     pub async fn clear_system_message(&self, conv_id: &str) -> MemoryResult<()> {
         self.store.update_system_message(conv_id, None).await
     }
 
-    /// 获取用于模型推理的上下文消息
+    /// Get context messages for model inference
     ///
-    /// # 参数
-    /// * `conv_id` - 目标对话的 ID
+    /// # Parameters
+    /// * `conv_id` - Target conversation ID
     ///
-    /// # 返回值
-    /// * `MemoryResult<Vec<ModelMessage>>` - 成功时返回格式化的消息列表，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<Vec<ModelMessage>>` - Returns formatted message list on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 此方法返回适合直接传递给 LLM API 的消息格式。返回的消息包括：
-    /// 1. 系统消息（如果存在对话摘要）
-    /// 2. 工作上下文中的消息（已转换为模型格式）
-    /// 3. 工具调用信息（转换为标准格式）
+    /// # Description
+    /// This method returns message format suitable for direct passing to LLM API. Returned messages include:
+    /// 1. System message (if conversation summary exists)
+    /// 2. Messages in working context (converted to model format)
+    /// 3. Tool call information (converted to standard format)
     ///
-    /// 这是获取当前对话上下文的主要接口，会自动处理摘要和工具调用的格式转换。
+    /// This is the main interface for getting current conversation context, automatically handles summarization and tool call format conversion.
     ///
-    /// # 错误
-    /// * `MemoryError::ConversationNotFound` - 当指定的对话不存在时
+    /// # Errors
+    /// * `MemoryError::ConversationNotFound` - When specified conversation doesn't exist
     #[allow(dead_code)]
     pub async fn get_model_context(&self, conv_id: &str) -> MemoryResult<Vec<ModelMessage>> {
         let cache = self.context_cache.lock().await;
@@ -444,25 +444,25 @@ impl CompleteChatMemory {
             .get(conv_id)
             .ok_or_else(|| MemoryError::ConversationNotFound(conv_id.to_string()))?;
 
-        // 获取对话信息以检查是否有存储的系统消息
+        // Get conversation information to check if there's a stored system message
         let conversation = self.store.get_conversation(conv_id).await?;
 
         let mut model_messages = Vec::new();
 
-        // 合并系统消息和摘要到单个系统消息中
+        // Merge system message and summary into single system message
         let mut system_content_parts = Vec::new();
 
-        // 首先添加存储的系统消息（如果存在）
+        // First add stored system message (if exists)
         if let Some(system_message) = &conversation.system_message {
             system_content_parts.push(system_message.clone());
         }
 
-        // 然后添加对话摘要（如果存在）
+        // Then add conversation summary (if exists)
         if let Some(summary) = &context.summary {
             system_content_parts.push(format!("Previous conversation summary: {summary}"));
         }
 
-        // 如果有任何系统内容，创建单个系统消息
+        // If there's any system content, create single system message
         if !system_content_parts.is_empty() {
             model_messages.push(ModelMessage {
                 role: ModelRole::System,
@@ -472,16 +472,16 @@ impl CompleteChatMemory {
             });
         }
 
-        // 转换工作消息为模型格式
+        // Convert working messages to model format
         for stored_msg in &context.working_messages {
-            // 处理Assistant消息的工具调用
+            // Handle tool calls for Assistant messages
             let tool_calls = if !stored_msg.tool_calls.is_empty() {
                 Some(self.convert_to_model_tool_calls(&stored_msg.tool_calls))
             } else {
                 None
             };
 
-            // 添加Assistant消息（包含工具调用请求，但不含结果）
+            // Add Assistant message (contains tool call requests, but not results)
             model_messages.push(ModelMessage {
                 role: stored_msg.role.into(),
                 content: stored_msg.content.clone(),
@@ -489,17 +489,17 @@ impl CompleteChatMemory {
                 tool_call_id: None,
             });
 
-            // 为每个有执行结果的工具调用生成独立的tool消息
+            // Generate independent tool message for each tool call with execution result
             for tool_call in &stored_msg.tool_calls {
                 if let Some(result) = &tool_call.result {
                     let tool_result_content = if result.success {
-                        // 成功的工具调用：返回实际结果
+                        // Successful tool call: return actual result
                         match &result.content {
                             serde_json::Value::String(s) => s.clone(),
                             other => other.to_string(),
                         }
                     } else {
-                        // 失败的工具调用：返回错误信息
+                        // Failed tool call: return error information
                         format!(
                             "Tool execution failed: {}",
                             result.error.as_deref().unwrap_or("Unknown error")
@@ -519,18 +519,18 @@ impl CompleteChatMemory {
         Ok(model_messages)
     }
 
-    /// 判断指定消息是否应该触发 summarization 检查
+    /// Determine if specified message should trigger summarization check
     ///
-    /// # 参数
-    /// * `message` - 要检查的消息
+    /// # Parameters
+    /// * `message` - Message to check
     ///
-    /// # 返回值
-    /// * `bool` - 如果消息应该触发 summarization 检查则返回 true
+    /// # Returns
+    /// * `bool` - Returns true if message should trigger summarization check
     ///
-    /// # 触发条件
-    /// * 用户消息：总是可能触发
-    /// * 助手消息：只有当包含带有结果的工具调用时才触发
-    /// * 其他消息类型：不触发
+    /// # Trigger Conditions
+    /// * User messages: Always may trigger
+    /// * Assistant messages: Only trigger when containing tool calls with results
+    /// * Other message types: Do not trigger
     fn should_trigger_summarization(&self, message: &StoredMessage) -> bool {
         match message.role {
             MessageRole::User => {
@@ -566,13 +566,13 @@ impl CompleteChatMemory {
             .get_mut(conv_id)
             .ok_or_else(|| MemoryError::ConversationNotFound(conv_id.to_string()))?;
 
-        // 检查是否应该触发 summarization
+        // Check if should trigger summarization
         let should_trigger = self.should_trigger_summarization(&new_message);
 
         context.working_messages.push(new_message);
         context.total_tokens = self.calculate_total_tokens(&context.working_messages);
 
-        // 只有在特定消息类型且超过限制时才触发 summarization
+        // Only trigger summarization when specific message types exceed limits
         if should_trigger
             && (context.total_tokens > context.max_context_tokens
                 || context.working_messages.len() > self.max_working_messages())
@@ -595,7 +595,7 @@ impl CompleteChatMemory {
                 conv_id,
                 trigger_reason
             );
-            drop(cache); // 释放锁，避免在异步操作中持有
+            drop(cache); // Release lock to avoid holding during async operations
             self.truncate_and_summarize(conv_id, trigger_reason).await
         } else {
             if !should_trigger {
@@ -640,7 +640,7 @@ impl CompleteChatMemory {
             .get_mut(conv_id)
             .ok_or_else(|| MemoryError::ConversationNotFound(conv_id.to_string()))?;
 
-        // 计算要保留的消息数量
+        // Calculate number of messages to keep
         let keep_count = self.calculate_keep_count(&context.working_messages);
 
         if keep_count < context.working_messages.len() {
@@ -650,16 +650,16 @@ impl CompleteChatMemory {
                 .collect();
 
             if !to_summarize.is_empty() {
-                // 获取现有摘要用于增量摘要生成
+                // Get existing summary for incremental summary generation
                 let existing_summary = context.summary.clone();
                 let summarize_count = to_summarize.len();
 
-                // 对于完整历史摘要策略，需要获取所有需要摘要的历史消息
+                // For full history summary strategy, need to get all historical messages that need summarization
                 let full_history_messages = if matches!(
                     self.config.summarization_strategy,
                     crate::config::SummarizationStrategy::FullHistory
                 ) {
-                    // 从数据库获取所有历史消息用于完整历史摘要
+                    // Get all historical messages from database for full history summary
                     Some(
                         self.get_all_historical_messages_for_summary(conv_id, &to_summarize)
                             .await?,
@@ -668,9 +668,9 @@ impl CompleteChatMemory {
                     None
                 };
 
-                drop(cache); // 释放锁进行异步操作
+                drop(cache); // Release lock for async operation
 
-                // 生成摘要
+                // Generate summary
                 let new_summary = self
                     .summarizer
                     .summarize_stored_messages(
@@ -680,7 +680,7 @@ impl CompleteChatMemory {
                     )
                     .await?;
 
-                // 重新获取锁并更新上下文
+                // Re-acquire lock and update context
                 let mut cache = self.context_cache.lock().await;
                 let context = cache.get_mut(conv_id).unwrap();
                 let kept_count = context.working_messages.len();
@@ -696,7 +696,7 @@ impl CompleteChatMemory {
                 );
                 dual_debug!("Updated summary for conversation {conv_id}: {new_summary}");
 
-                // 更新数据库中的摘要
+                // Update summary in database
                 let last_sequence = to_summarize.last().map(|m| m.sequence);
                 drop(cache);
                 self.store
@@ -721,42 +721,42 @@ impl CompleteChatMemory {
         Ok(SummarizationStatus::not_triggered())
     }
 
-    /// 计算在摘要截断时应该保留的消息数量
+    /// Calculate the number of messages to keep during summary truncation
     ///
-    /// # 参数
-    /// * `messages` - 当前工作上下文中的消息列表
+    /// # Parameters
+    /// * `messages` - Message list in current working context
     ///
-    /// # 返回值
-    /// * `usize` - 应该保留的消息数量
+    /// # Returns
+    /// * `usize` - Number of messages that should be kept
     ///
-    /// # 算法说明
-    /// 此方法采用多层决策算法来确定最优的消息保留数量：
+    /// # Algorithm Description
+    /// This method uses a multi-layer decision algorithm to determine the optimal number of messages to keep:
     ///
-    /// ## 第一层：基于 Token 的动态计算
-    /// - 计算目标保留的 token 数量：`max_context_tokens * (1 - summary_trigger_ratio)`
-    /// - 默认保留20%的上下文空间给工作消息（80%触发摘要时）
-    /// - 从最新消息开始反向累计，直到达到 token 或数量限制
+    /// ## Layer 1: Token-based Dynamic Calculation
+    /// - Calculate target token count to keep: `max_context_tokens * (1 - summary_trigger_ratio)`
+    /// - By default keep 20% of context space for working messages (when 80% triggers summary)
+    /// - Accumulate backwards from newest messages until reaching token or count limit
     ///
-    /// ## 第二层：配置最小值保证
-    /// - 确保至少保留配置的最小消息数（`summarize_threshold/2`）
-    /// - 取较大值：max(token_based_count, config_min_count)
+    /// ## Layer 2: Configuration Minimum Guarantee
+    /// - Ensure at least the configured minimum message count is kept (`summarize_threshold/2`)
+    /// - Take the larger value: max(token_based_count, config_min_count)
     ///
-    /// ## 第三层：消息对完整性调整
-    /// - 调用 `adjust_for_message_pairs` 确保不会拆散 user-assistant 消息对
-    /// - 如果分割点会打断对话对，会适当调整保留数量
+    /// ## Layer 3: Message Pair Integrity Adjustment
+    /// - Call `adjust_for_message_pairs` to ensure user-assistant message pairs aren't split
+    /// - If split point would break conversation pairs, adjust keep count appropriately
     ///
-    /// # 设计目标
-    /// - **智能平衡**：在节省上下文空间和保持信息完整性之间找到平衡
-    /// - **配置驱动**：支持通过配置参数调整保留策略
-    /// - **对话连贯**：确保保留的消息在语义上完整
-    /// - **性能优化**：避免过度保留导致的上下文膨胀
+    /// # Design Goals
+    /// - **Intelligent Balance**: Find balance between saving context space and maintaining information integrity
+    /// - **Configuration-driven**: Support adjusting retention strategy through configuration parameters
+    /// - **Conversation Coherence**: Ensure kept messages are semantically complete
+    /// - **Performance Optimization**: Avoid context bloat from excessive retention
     fn calculate_keep_count(&self, messages: &[StoredMessage]) -> usize {
         let target_tokens =
             (self.max_context_tokens() as f32 * (1.0 - self.summary_trigger_ratio())) as usize;
         let mut current_tokens = 0;
         let mut keep_count = 0;
 
-        // 从后往前计算，保留最近的消息
+        // Calculate backwards from end, keeping most recent messages
         for message in messages.iter().rev() {
             let msg_tokens = self.estimate_message_tokens(message);
             if current_tokens + msg_tokens <= target_tokens
@@ -769,15 +769,15 @@ impl CompleteChatMemory {
             }
         }
 
-        // 至少保留配置的最小消息数
+        // Keep at least the configured minimum message count
         let min_keep = self.keep_recent_messages().min(messages.len());
         let ideal_keep = keep_count.max(min_keep);
 
-        // 确保消息对的完整性：调整保留数量以避免拆散 user-assistant 对
+        // Ensure message pair integrity: adjust keep count to avoid splitting user-assistant pairs
         self.adjust_for_message_pairs(messages, ideal_keep)
     }
 
-    /// 调整保留数量以确保 user-assistant 消息对的完整性
+    /// Adjust keep count to ensure user-assistant message pair integrity
     fn adjust_for_message_pairs(&self, messages: &[StoredMessage], mut keep_count: usize) -> usize {
         if keep_count >= messages.len() {
             return messages.len();
@@ -785,21 +785,21 @@ impl CompleteChatMemory {
 
         let split_index = messages.len() - keep_count;
 
-        // 检查分割点是否会拆散消息对
+        // Check if split point would break message pairs
         if split_index > 0 && split_index < messages.len() {
             let prev_msg = &messages[split_index - 1];
             let curr_msg = &messages[split_index];
 
-            // 如果前一条是 User 消息，当前是 Assistant 消息，说明会拆散一对
+            // If previous is User message and current is Assistant message, it would break a pair
             if matches!(prev_msg.role, MessageRole::User)
                 && matches!(curr_msg.role, MessageRole::Assistant)
             {
-                // 选择策略：优先完整保留消息对
-                // 选项1：多保留一条（包含完整的user-assistant对）
+                // Strategy choice: prioritize keeping complete message pairs
+                // Option 1: Keep one more (include complete user-assistant pair)
                 if keep_count < messages.len() {
                     keep_count += 1;
                 }
-                // 选项2：少保留一条（避免拆散，将user消息也放入摘要）
+                // Option 2: Keep one less (avoid breaking, put user message into summary too)
                 // keep_count = keep_count.saturating_sub(1);
             }
         }
@@ -815,9 +815,9 @@ impl CompleteChatMemory {
     }
 
     fn estimate_message_tokens(&self, message: &StoredMessage) -> usize {
-        // 简化的token估算
+        // Simplified token estimation
         let content_tokens = message.content.len() / 4;
-        let tool_tokens = message.tool_calls.len() * 100; // 每个工具调用约100 tokens
+        let tool_tokens = message.tool_calls.len() * 100; // About 100 tokens per tool call
         content_tokens + tool_tokens
     }
 
@@ -835,44 +835,44 @@ impl CompleteChatMemory {
             .collect()
     }
 
-    /// 获取指定对话的元数据（metadata）
+    /// Get metadata for specified conversation
     ///
-    /// # 参数
-    /// * `conv_id` - 对话的唯一标识符
+    /// # Parameters
+    /// * `conv_id` - Unique identifier of the conversation
     ///
-    /// # 返回值
-    /// * `MemoryResult<StoredConversation>` - 成功时返回对话的元数据对象，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<StoredConversation>` - Returns conversation metadata object on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 返回对话的元数据信息，**不包含**具体的聊天消息内容。元数据包括：
-    /// - 对话基本信息：ID、标题、所属用户、使用的模型
-    /// - 时间信息：创建时间、最后更新时间
-    /// - 统计信息：消息总数、token 总数
-    /// - 摘要信息：对话摘要、最后摘要位置
+    /// # Description
+    /// Returns conversation metadata information, **excluding** specific chat message content. Metadata includes:
+    /// - Basic conversation info: ID, title, owner user, model used
+    /// - Time information: creation time, last update time
+    /// - Statistics: total message count, total token count
+    /// - Summary information: conversation summary, last summary position
     ///
-    /// 这是一个轻量级查询操作，适用于对话列表显示、统计分析等场景。
-    /// 如需获取完整的聊天消息内容，请使用 `get_full_history(conv_id, include_system_message)` 方法。
+    /// This is a lightweight query operation, suitable for conversation list display, statistical analysis and similar scenarios.
+    /// To get complete chat message content, please use `get_full_history(conv_id, include_system_message)` method.
     ///
-    /// 这是一个直接的数据库查询操作，不涉及上下文缓存。
+    /// This is a direct database query operation that doesn't involve context cache.
     ///
-    /// # 错误
-    /// * `MemoryError::ConversationNotFound` - 当指定的对话不存在时
+    /// # Errors
+    /// * `MemoryError::ConversationNotFound` - When specified conversation doesn't exist
     #[allow(dead_code)]
     pub async fn get_conversation(&self, conv_id: &str) -> MemoryResult<StoredConversation> {
         self.store.get_conversation(conv_id).await
     }
 
-    /// 获取对话列表摘要
+    /// Get conversation list summary
     ///
-    /// # 参数
-    /// * `limit` - 返回的最大对话数量，None 表示使用默认限制
+    /// # Parameters
+    /// * `limit` - Maximum number of conversations to return, None means use default limit
     ///
-    /// # 返回值
-    /// * `MemoryResult<Vec<ConversationSummary>>` - 成功时返回对话摘要列表，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<Vec<ConversationSummary>>` - Returns conversation summary list on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 返回按最后更新时间降序排列的对话摘要列表，用于在 UI 中显示对话历史。
-    /// 每个摘要包含对话的基本信息但不包含详细的消息内容，适合快速浏览。
+    /// # Description
+    /// Returns conversation summary list sorted by last update time in descending order, for displaying conversation history in UI.
+    /// Each summary contains basic conversation information but not detailed message content, suitable for quick browsing.
     #[allow(dead_code)]
     pub async fn list_conversations(
         &self,
@@ -881,20 +881,20 @@ impl CompleteChatMemory {
         self.store.list_conversations(limit).await
     }
 
-    /// 获取指定用户的对话列表摘要
+    /// Get conversation list summary for specified user
     ///
-    /// # 参数
-    /// * `user_id` - 用户的唯一标识符
-    /// * `limit` - 返回的最大对话数量，None 表示使用默认限制
+    /// # Parameters
+    /// * `user_id` - User's unique identifier
+    /// * `limit` - Maximum number of conversations to return, None means use default limit
     ///
-    /// # 返回值
-    /// * `MemoryResult<Vec<ConversationSummary>>` - 成功时返回该用户的对话摘要列表，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<Vec<ConversationSummary>>` - Returns conversation summary list for the user on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 返回指定用户按最后更新时间降序排列的对话摘要列表，用于在 UI 中显示用户的对话历史。
-    /// 每个摘要包含对话的基本信息但不包含详细的消息内容，适合快速浏览。
+    /// # Description
+    /// Returns conversation summary list for specified user sorted by last update time in descending order, for displaying user's conversation history in UI.
+    /// Each summary contains basic conversation information but not detailed message content, suitable for quick browsing.
     ///
-    /// 注意：虽然当前系统设计为用户与对话的1:1关系，但此方法支持一个用户拥有多个对话的场景。
+    /// Note: Although current system is designed for 1:1 relationship between user and conversation, this method supports scenarios where one user has multiple conversations.
     pub async fn list_user_conversations(
         &self,
         user_id: &str,
@@ -903,23 +903,23 @@ impl CompleteChatMemory {
         self.store.list_conversations_by_user(user_id, limit).await
     }
 
-    /// 获取对话的当前工作消息
+    /// Get current working messages for conversation
     ///
-    /// # 参数
-    /// * `conv_id` - 对话的唯一标识符
+    /// # Parameters
+    /// * `conv_id` - Unique identifier of the conversation
     ///
-    /// # 返回值
-    /// * `MemoryResult<Vec<StoredMessage>>` - 成功时返回工作消息列表，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<Vec<StoredMessage>>` - Returns working message list on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 返回对话的当前工作上下文中的消息，按序列号升序排列。这些是当前用于模型推理的消息，
-    /// 不包括已被摘要化的历史消息。与 `get_full_history` 不同，此方法只返回活跃的工作消息。
+    /// # Description
+    /// Returns messages in the conversation's current working context, sorted by sequence number in ascending order. These are the messages currently used for model inference,
+    /// excluding historical messages that have been summarized. Unlike `get_full_history`, this method only returns active working messages.
     ///
-    /// 工作消息是内存管理器当前维护的消息集合，通常是最近的N条消息，具体数量由配置决定。
-    /// 当消息历史过长时，旧消息会被摘要化，只保留最近的工作消息用于模型推理。
+    /// Working messages are the message set currently maintained by the memory manager, typically the most recent N messages, with specific count determined by configuration.
+    /// When message history becomes too long, old messages are summarized, keeping only recent working messages for model inference.
     ///
-    /// # 错误
-    /// * `MemoryError::ConversationNotFound` - 当指定的对话不存在时
+    /// # Errors
+    /// * `MemoryError::ConversationNotFound` - When specified conversation doesn't exist
     pub async fn get_working_messages(&self, conv_id: &str) -> MemoryResult<Vec<StoredMessage>> {
         let cache = self.context_cache.lock().await;
         let context = cache
@@ -929,29 +929,29 @@ impl CompleteChatMemory {
         Ok(context.working_messages.clone())
     }
 
-    /// 获取对话的完整消息历史
+    /// Get complete message history for conversation
     ///
-    /// # 参数
-    /// * `conv_id` - 对话的唯一标识符
-    /// * `include_system_message` - 是否在返回结果的开头包含系统消息
+    /// # Parameters
+    /// * `conv_id` - Unique identifier of the conversation
+    /// * `include_system_message` - Whether to include system message at the beginning of returned results
     ///
-    /// # 返回值
-    /// * `MemoryResult<Vec<StoredMessage>>` - 成功时返回完整的消息列表，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<Vec<StoredMessage>>` - Returns complete message list on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 返回对话中的所有消息，按序列号升序排列。与 `get_model_context` 不同，
-    /// 此方法返回完整的历史记录而不是当前的工作上下文。
-    /// 适用于导出对话、审计或分析等场景。
+    /// # Description
+    /// Returns all messages in the conversation, sorted by sequence number in ascending order. Unlike `get_model_context`,
+    /// this method returns complete historical records rather than current working context.
+    /// Suitable for conversation export, auditing, analysis and similar scenarios.
     ///
-    /// ## 系统消息处理
-    /// * 当 `include_system_message` 为 `true` 时：
-    ///   - 如果对话有系统消息，会在返回列表的开头插入一个系统消息
-    ///   - 系统消息的序列号为 0，时间戳为对话创建时间
-    /// * 当 `include_system_message` 为 `false` 时：
-    ///   - 只返回用户、助手和工具消息，不包含系统消息
+    /// ## System Message Handling
+    /// * When `include_system_message` is `true`:
+    ///   - If conversation has system message, it will be inserted at the beginning of returned list
+    ///   - System message sequence number is 0, timestamp is conversation creation time
+    /// * When `include_system_message` is `false`:
+    ///   - Only returns user, assistant and tool messages, excluding system messages
     ///
-    /// # 错误
-    /// * `MemoryError::ConversationNotFound` - 当指定的对话不存在时
+    /// # Errors
+    /// * `MemoryError::ConversationNotFound` - When specified conversation doesn't exist
     pub async fn get_full_history(
         &self,
         conv_id: &str,
@@ -960,18 +960,18 @@ impl CompleteChatMemory {
         let mut messages = self.store.get_full_history(conv_id).await?;
 
         if include_system_message {
-            // 获取对话信息以检查是否有系统消息
+            // Get conversation information to check if there's a system message
             let conversation = self.store.get_conversation(conv_id).await?;
 
             if let Some(system_message) = conversation.system_message {
-                // 创建系统消息对象，插入到列表开头
+                // Create system message object, insert at beginning of list
                 let system_msg = StoredMessage {
                     id: format!("system-{conv_id}"),
                     conversation_id: conv_id.to_string(),
                     role: MessageRole::System,
                     content: system_message,
                     timestamp: conversation.created_at,
-                    sequence: 0, // 系统消息序列号为 0
+                    sequence: 0, // System message sequence number is 0
                     tokens: None,
                     tool_calls: Vec::new(),
                 };
@@ -983,120 +983,120 @@ impl CompleteChatMemory {
         Ok(messages)
     }
 
-    /// 通过用户ID获取完整聊天历史
+    /// Get complete chat history by user ID
     ///
-    /// # 参数
-    /// * `user_id` - 用户的唯一标识符
-    /// * `include_system_message` - 是否在返回结果的开头包含系统消息
+    /// # Parameters
+    /// * `user_id` - User's unique identifier
+    /// * `include_system_message` - Whether to include system message at the beginning of returned results
     ///
-    /// # 返回值
-    /// * `MemoryResult<Vec<StoredMessage>>` - 成功时返回完整的消息列表，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<Vec<StoredMessage>>` - Returns complete message list on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 基于用户ID与对话ID的1:1关系，此方法会：
-    /// 1. 首先查找用户对应的对话（不区分模型）
-    /// 2. 如果找到对话，返回该对话的完整消息历史
-    /// 3. 如果用户没有任何对话，返回空的消息列表
+    /// # Description
+    /// Based on the 1:1 relationship between user ID and conversation ID, this method will:
+    /// 1. First find the conversation corresponding to the user (regardless of model)
+    /// 2. If found, return the complete message history for that conversation
+    /// 3. If user has no conversations, return empty message list
     ///
-    /// 这是一个便捷方法，避免了先获取对话ID再获取历史的两步操作。
-    /// 返回的消息按序列号升序排列，包含完整的对话历史记录。
+    /// This is a convenience method that avoids the two-step operation of first getting conversation ID then getting history.
+    /// Returned messages are sorted by sequence number in ascending order, containing complete conversation history.
     ///
-    /// ## 系统消息处理
-    /// * 当 `include_system_message` 为 `true` 时：
-    ///   - 如果对话有系统消息，会在返回列表的开头插入一个系统消息
-    /// * 当 `include_system_message` 为 `false` 时：
-    ///   - 只返回用户、助手和工具消息，不包含系统消息
+    /// ## System Message Handling
+    /// * When `include_system_message` is `true`:
+    ///   - If conversation has system message, it will be inserted at the beginning of returned list
+    /// * When `include_system_message` is `false`:
+    ///   - Only returns user, assistant and tool messages, excluding system messages
     ///
-    /// # 错误
-    /// * `MemoryError::DatabaseError` - 当数据库查询失败时
+    /// # Errors
+    /// * `MemoryError::DatabaseError` - When database query fails
     pub async fn get_user_full_history(
         &self,
         user_id: &str,
         include_system_message: bool,
     ) -> MemoryResult<Vec<StoredMessage>> {
-        // 1. 获取用户的对话ID
+        // 1. Get user's conversation ID
         if let Some(conv) = self
             .store
             .get_recent_conversation_by_user(user_id, None)
             .await?
         {
-            // 2. 获取完整聊天记录
+            // 2. Get complete chat history
             self.get_full_history(&conv.id, include_system_message)
                 .await
         } else {
-            Ok(Vec::new()) // 用户没有对话历史
+            Ok(Vec::new()) // User has no conversation history
         }
     }
 
-    /// 删除指定的对话及其所有相关数据
+    /// Delete specified conversation and all its related data
     ///
-    /// # 参数
-    /// * `conv_id` - 要删除的对话的唯一标识符
+    /// # Parameters
+    /// * `conv_id` - Unique identifier of the conversation to delete
     ///
-    /// # 返回值
-    /// * `MemoryResult<()>` - 成功时返回 ()，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<()>` - Returns () on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 此方法会完全删除对话的所有数据，包括：
-    /// 1. 内存缓存中的上下文数据
-    /// 2. 数据库中的对话记录和所有消息
+    /// # Description
+    /// This method will completely delete all data for the conversation, including:
+    /// 1. Context data in memory cache
+    /// 2. Conversation records and all messages in database
     ///
-    /// 注意：此操作不可逆，请谨慎使用。由于设置了外键约束的级联删除，
-    /// 删除对话时会自动删除该对话下的所有消息。
+    /// Note: This operation is irreversible, please use with caution. Due to foreign key constraint cascade deletion,
+    /// deleting a conversation will automatically delete all messages under that conversation.
     #[allow(dead_code)]
     pub async fn delete_conversation(&self, conv_id: &str) -> MemoryResult<()> {
-        // 从缓存中移除
+        // Remove from cache
         self.context_cache.lock().await.remove(conv_id);
 
-        // 从数据库中删除
+        // Delete from database
         self.store.delete_conversation(conv_id).await
     }
 
-    /// 获取用于完整历史摘要的所有历史消息
+    /// Get all historical messages for full history summarization
     ///
-    /// # 参数
-    /// * `conv_id` - 对话 ID
-    /// * `current_to_summarize` - 当前需要摘要的消息列表
+    /// # Parameters
+    /// * `conv_id` - Conversation ID
+    /// * `current_to_summarize` - Current message list that needs summarization
     ///
-    /// # 返回值
-    /// * `MemoryResult<Vec<StoredMessage>>` - 包含所有需要摘要的历史消息
+    /// # Returns
+    /// * `MemoryResult<Vec<StoredMessage>>` - Contains all historical messages that need summarization
     ///
-    /// # 说明
-    /// 对于完整历史摘要策略，我们需要获取：
-    /// 1. `current_to_summarize` 中的所有消息
-    /// 2. 数据库中序列号小于 `current_to_summarize` 最小序列号的历史消息
+    /// # Description
+    /// For full history summarization strategy, we need to get:
+    /// 1. All messages in `current_to_summarize`
+    /// 2. Historical messages in database with sequence numbers less than minimum sequence number in `current_to_summarize`
     ///
-    /// 例如：
-    /// - 如果 `current_to_summarize` 包含序列号 [3,4] 的消息
-    /// - 数据库中包含序列号 [1,2,3,4,5,6,...] 的消息
-    /// - 则返回序列号 [1,2,3,4] 的消息用于摘要
+    /// For example:
+    /// - If `current_to_summarize` contains messages with sequence numbers [3,4]
+    /// - Database contains messages with sequence numbers [1,2,3,4,5,6,...]
+    /// - Then return messages with sequence numbers [1,2,3,4] for summarization
     ///
-    /// 这样可以避免重复包含消息，确保摘要包含完整的历史上下文。
+    /// This avoids duplicate inclusion of messages and ensures summary contains complete historical context.
     async fn get_all_historical_messages_for_summary(
         &self,
         conv_id: &str,
         current_to_summarize: &[StoredMessage],
     ) -> MemoryResult<Vec<StoredMessage>> {
-        // 从数据库获取所有历史消息（不包含系统消息，因为摘要不需要）
+        // Get all historical messages from database (excluding system messages, as summaries don't need them)
         let historical_messages = self.store.get_full_history(conv_id).await?;
 
-        // 找到 current_to_summarize 中的最小序列号
+        // Find minimum sequence number in current_to_summarize
         let min_current_sequence = current_to_summarize
             .iter()
             .map(|msg| msg.sequence)
             .min()
             .unwrap_or(i64::MAX);
 
-        // 只保留序列号小于 current_to_summarize 最小序列号的历史消息
+        // Only keep historical messages with sequence numbers less than minimum sequence number in current_to_summarize
         let mut filtered_historical: Vec<StoredMessage> = historical_messages
             .into_iter()
             .filter(|msg| msg.sequence < min_current_sequence)
             .collect();
 
-        // 将过滤后的历史消息和当前要摘要的消息合并
+        // Merge filtered historical messages with current messages to summarize
         filtered_historical.extend_from_slice(current_to_summarize);
 
-        // 按序列号排序，确保消息顺序正确
+        // Sort by sequence number to ensure correct message order
         filtered_historical.sort_by_key(|msg| msg.sequence);
 
         dual_debug!(
@@ -1107,18 +1107,18 @@ impl CompleteChatMemory {
         Ok(filtered_historical)
     }
 
-    /// 获取内存系统的统计信息
+    /// Get memory system statistics
     ///
-    /// # 返回值
-    /// * `MemoryResult<MemoryStats>` - 成功时返回统计信息，失败时返回 MemoryError
+    /// # Returns
+    /// * `MemoryResult<MemoryStats>` - Returns statistics on success, MemoryError on failure
     ///
-    /// # 说明
-    /// 返回整个记忆系统的统计数据，包括：
-    /// - 对话总数和消息总数
-    /// - Token 使用统计
-    /// - 数据库大小等信息
+    /// # Description
+    /// Returns statistical data for the entire memory system, including:
+    /// - Total conversation count and message count
+    /// - Token usage statistics
+    /// - Database size and other information
     ///
-    /// 这些统计信息可用于监控系统使用情况、容量规划和性能分析。
+    /// This statistical information can be used for monitoring system usage, capacity planning and performance analysis.
     #[allow(dead_code)]
     pub async fn get_stats(&self) -> MemoryResult<MemoryStats> {
         self.store.get_stats().await
