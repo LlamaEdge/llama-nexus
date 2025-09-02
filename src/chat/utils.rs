@@ -82,3 +82,56 @@ pub(super) fn convert_tool_calls_to_stored(
         })
         .collect()
 }
+
+/// 将文本智能分块，保持单词完整性和格式
+///
+/// # 参数
+/// * `text` - 要分块的文本
+/// * `chunk_size` - 每个块的目标字符数
+///
+/// # 返回
+/// 分块后的字符串向量，保留原始格式和空白字符
+pub(super) fn gen_chunks_with_formatting(text: impl AsRef<str>, chunk_size: usize) -> Vec<String> {
+    let content = text.as_ref();
+    let mut chunks: Vec<String> = Vec::new();
+
+    let chars: Vec<char> = content.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        // 累积字符直到达到chunk_size或遇到自然的分割点
+        let mut temp_chunk = String::new();
+
+        // 累积字符直到达到chunk_size
+        while i < chars.len() && temp_chunk.len() < chunk_size {
+            temp_chunk.push(chars[i]);
+            i += 1;
+        }
+
+        // 如果不是在文本末尾，尝试在单词边界处分割
+        if i < chars.len() {
+            // 向前查找，直到找到空格、换行符或其他合适的分割点
+            while i < chars.len() && !chars[i].is_whitespace() {
+                temp_chunk.push(chars[i]);
+                i += 1;
+            }
+
+            // 包含紧跟的空白字符（但不包含换行符）
+            while i < chars.len() && chars[i].is_whitespace() && chars[i] != '\n' {
+                temp_chunk.push(chars[i]);
+                i += 1;
+            }
+
+            // 如果下一个字符是换行符，包含它
+            if i < chars.len() && chars[i] == '\n' {
+                temp_chunk.push(chars[i]);
+                i += 1;
+            }
+        }
+
+        if !temp_chunk.is_empty() {
+            chunks.push(temp_chunk);
+        }
+    }
+
+    chunks
+}
