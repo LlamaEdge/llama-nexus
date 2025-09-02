@@ -85,25 +85,7 @@ async fn main() -> ServerResult<()> {
     dual_info!("Version: {}", env!("CARGO_PKG_VERSION"));
 
     // Load the config based on the command
-    let config = match Config::load(&cli.config).await {
-        Ok(config) => {
-            // ! DO NOT REMOVE THIS BLOCK
-            {
-                // if config.rag.is_some() && config.rag.as_ref().unwrap().enable {
-                //     dual_info!("RAG is enabled");
-                // }
-            }
-
-            config
-        }
-        Err(e) => {
-            let err_msg = format!("Failed to load config: {e}");
-            dual_error!("{err_msg}");
-            return Err(ServerError::FailedToLoadConfig(err_msg));
-        }
-    };
-
-    dual_debug!("MCP servers: {:?}", config.mcp);
+    let config = Config::load(&cli.config).await?;
 
     // set the health check interval
     HEALTH_CHECK_INTERVAL

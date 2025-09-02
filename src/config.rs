@@ -55,15 +55,15 @@ impl Config {
             .add_source(config::File::with_name(path.as_ref().to_str().unwrap()))
             .build()
             .map_err(|e| {
-                let err_msg = format!("Failed to build config: {e}");
+                let err_msg = format!("Failed to load config file: {e}");
                 dual_error!("{}", &err_msg);
-                ServerError::Operation(err_msg)
+                ServerError::FailedToLoadConfig(err_msg)
             })?;
 
         let mut config = config.try_deserialize::<Self>().map_err(|e| {
             let err_msg = format!("Failed to deserialize config: {e}");
             dual_error!("{}", &err_msg);
-            ServerError::Operation(err_msg)
+            ServerError::FailedToLoadConfig(err_msg)
         })?;
 
         if let Some(mcp_config) = config.mcp.as_mut()
