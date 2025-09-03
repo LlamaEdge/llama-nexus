@@ -7,8 +7,6 @@ use rmcp::{
 };
 use tokio::sync::RwLock as TokioRwLock;
 
-// Global MCP tools and clients
-pub static MCP_TOOLS: OnceCell<TokioRwLock<HashMap<McpToolName, ServiceName>>> = OnceCell::new();
 // Global MCP clients
 pub static MCP_SERVICES: OnceCell<TokioRwLock<HashMap<ServiceName, TokioRwLock<McpService>>>> =
     OnceCell::new();
@@ -34,9 +32,9 @@ pub struct McpService {
     pub fallback_message: Option<String>,
 }
 impl McpService {
-    pub fn new(name: ServiceName, raw: RawMcpService) -> Self {
+    pub fn new(name: impl AsRef<str>, raw: RawMcpService) -> Self {
         Self {
-            name,
+            name: name.as_ref().to_string(),
             raw,
             tools: Vec::new(),
             fallback_message: None,

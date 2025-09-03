@@ -62,8 +62,13 @@ pub(crate) async fn chat_handler(
                     .unwrap()
                     .iter()
                     .for_each(|mcp_tool| {
+                        let name = format!(
+                            "{}@{}",
+                            &mcp_tool.name,
+                            server_config.server_name.as_deref().unwrap()
+                        );
                         let tool = Tool::new(ToolFunction {
-                            name: mcp_tool.name.to_string(),
+                            name,
                             description: mcp_tool.description.as_ref().map(|s| s.to_string()),
                             parameters: Some((*mcp_tool.input_schema).clone()),
                         });

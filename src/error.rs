@@ -22,8 +22,6 @@ pub enum ServerError {
     FailedToLoadConfig(String),
     #[error("Mcp server returned empty content")]
     McpEmptyContent,
-    #[error("Mcp server not found")]
-    McpNotFoundClient,
     #[error("Mcp operation failed: {0}")]
     McpOperation(String),
 }
@@ -66,13 +64,6 @@ impl IntoResponse for ServerError {
                 "internal_error".into(),
                 None,
                 Some("mcp_empty".into()),
-            ),
-            ServerError::McpNotFoundClient => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Mcp server not found".into(),
-                "internal_error".into(),
-                None,
-                Some("mcp_not_found".into()),
             ),
             ServerError::McpOperation(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,

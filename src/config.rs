@@ -28,7 +28,7 @@ use tokio::{
 use crate::{
     dual_debug, dual_error, dual_info,
     error::{ServerError, ServerResult},
-    mcp::{MCP_SERVICES, MCP_TOOLS, McpService},
+    mcp::{MCP_SERVICES, McpService},
 };
 
 const MCP_REDIRECT_URI: &str = "http://localhost:8080/callback";
@@ -232,21 +232,6 @@ impl<'de> Deserialize<'de> for RagConfig {
     }
 }
 
-// #[derive(Debug, Deserialize, Serialize, Clone)]
-// pub struct RagVectorSearchConfig {
-//     pub url: String,
-//     pub collection_name: Vec<String>,
-//     pub limit: u64,
-//     pub score_threshold: f32,
-// }
-
-// #[derive(Debug, Default, Deserialize, Serialize, Clone)]
-// pub struct KwSearchConfig {
-//     pub enable: bool,
-//     pub url: String,
-//     pub index_name: String,
-// }
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct McpConfig {
     #[serde(rename = "server")]
@@ -268,6 +253,8 @@ pub struct McpToolServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_url: Option<String>,
     pub enable: bool,
+    #[serde(skip_deserializing)]
+    pub server_name: Option<String>,
     #[serde(skip_deserializing)]
     pub tools: Option<Vec<RmcpTool>>,
     pub fallback_message: Option<String>,
@@ -542,6 +529,14 @@ impl McpToolServerConfig {
                         }
                     };
 
+                    // get mcp service name
+                    let service_name = match service.peer_info() {
+                        Some(peer_info) => peer_info.server_info.name.clone(),
+                        None => self.name.clone(),
+                    };
+                    // update server name
+                    self.server_name = Some(service_name.clone());
+
                     // list tools
                     let tools = service.list_all_tools().await.map_err(|e| {
                         let err_msg = format!("Failed to list tools: {e}");
@@ -558,7 +553,7 @@ impl McpToolServerConfig {
                     // update tools
                     self.tools = Some(tools.clone());
 
-                    let mut client = McpService::new(self.name.clone(), service);
+                    let mut client = McpService::new(&service_name, service);
                     client.tools = tools.iter().map(|tool| tool.name.to_string()).collect();
                     client.fallback_message = self.fallback_message.clone();
 
@@ -570,35 +565,23 @@ impl McpToolServerConfig {
                             tool.name,
                             tool.description.as_deref().unwrap_or("No description"),
                         );
-
-                        match MCP_TOOLS.get() {
-                            Some(mcp_tools) => {
-                                let mut tools = mcp_tools.write().await;
-                                tools.insert(tool.name.to_string(), self.name.clone());
-                            }
-                            None => {
-                                let tools =
-                                    HashMap::from([(tool.name.to_string(), self.name.clone())]);
-
-                                MCP_TOOLS.set(TokioRwLock::new(tools)).map_err(|_| {
-                                    let err_msg = "Failed to set MCP_TOOLS";
-                                    dual_error!("{}", err_msg);
-                                    ServerError::Operation(err_msg.to_string())
-                                })?;
-                            }
-                        }
                     }
 
                     // add mcp client to MCP_CLIENTS
                     match MCP_SERVICES.get() {
                         Some(clients) => {
                             let mut clients = clients.write().await;
-                            clients.insert(self.name.clone(), TokioRwLock::new(client));
+                            if clients.contains_key(&service_name) {
+                                let err_msg = format!("Mcp client {service_name} already exists");
+                                dual_error!("{}", err_msg);
+                                return Err(ServerError::Operation(err_msg));
+                            }
+                            clients.insert(service_name, TokioRwLock::new(client));
                         }
                         None => {
                             MCP_SERVICES
                                 .set(TokioRwLock::new(HashMap::from([(
-                                    self.name.clone(),
+                                    service_name,
                                     TokioRwLock::new(client),
                                 )])))
                                 .map_err(|_| {
@@ -836,6 +819,14 @@ impl McpToolServerConfig {
                         }
                     };
 
+                    // get mcp service name
+                    let service_name = match service.peer_info() {
+                        Some(peer_info) => peer_info.server_info.name.clone(),
+                        None => self.name.clone(),
+                    };
+                    // update server name
+                    self.server_name = Some(service_name.clone());
+
                     // list tools
                     let tools = service.list_all_tools().await.map_err(|e| {
                         let err_msg = format!("Failed to list tools: {e}");
@@ -852,7 +843,8 @@ impl McpToolServerConfig {
                     // update tools
                     self.tools = Some(tools.clone());
 
-                    let mut client = McpService::new(self.name.clone(), service);
+                    // create mcp client
+                    let mut client = McpService::new(&service_name, service);
                     client.tools = tools.iter().map(|tool| tool.name.to_string()).collect();
                     client.fallback_message = self.fallback_message.clone();
 
@@ -864,35 +856,23 @@ impl McpToolServerConfig {
                             tool.name,
                             tool.description.as_deref().unwrap_or("No description"),
                         );
-
-                        match MCP_TOOLS.get() {
-                            Some(mcp_tools) => {
-                                let mut tools = mcp_tools.write().await;
-                                tools.insert(tool.name.to_string(), self.name.clone());
-                            }
-                            None => {
-                                let tools =
-                                    HashMap::from([(tool.name.to_string(), self.name.clone())]);
-
-                                MCP_TOOLS.set(TokioRwLock::new(tools)).map_err(|_| {
-                                    let err_msg = "Failed to set MCP_TOOLS";
-                                    dual_error!("{}", err_msg);
-                                    ServerError::Operation(err_msg.to_string())
-                                })?;
-                            }
-                        }
                     }
 
                     // add mcp client to MCP_CLIENTS
                     match MCP_SERVICES.get() {
                         Some(clients) => {
                             let mut clients = clients.write().await;
-                            clients.insert(self.name.clone(), TokioRwLock::new(client));
+                            if clients.contains_key(&service_name) {
+                                let err_msg = format!("Mcp client {service_name} already exists");
+                                dual_error!("{}", err_msg);
+                                return Err(ServerError::Operation(err_msg));
+                            }
+                            clients.insert(service_name, TokioRwLock::new(client));
                         }
                         None => {
                             MCP_SERVICES
                                 .set(TokioRwLock::new(HashMap::from([(
-                                    self.name.clone(),
+                                    service_name,
                                     TokioRwLock::new(client),
                                 )])))
                                 .map_err(|_| {
@@ -914,44 +894,6 @@ impl McpToolServerConfig {
         Ok(())
     }
 }
-
-// #[derive(Debug, Deserialize, Serialize, Clone)]
-// pub enum Transport {
-//     #[serde(rename = "sse")]
-//     Sse,
-//     #[serde(rename = "stdio")]
-//     Stdio,
-//     #[serde(rename = "stream-http")]
-//     StreamHttp,
-// }
-// impl std::fmt::Display for Transport {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         match self {
-//             Transport::Sse => write!(f, "sse"),
-//             Transport::Stdio => write!(f, "stdio"),
-//             Transport::StreamHttp => write!(f, "streamable-http"),
-//         }
-//     }
-// }
-
-// #[derive(Debug, Deserialize, Serialize, Clone)]
-// pub enum Transport {
-//     #[serde(rename = "sse")]
-//     Sse,
-//     #[serde(rename = "stdio")]
-//     Stdio,
-//     #[serde(rename = "stream-http")]
-//     StreamHttp,
-// }
-// impl std::fmt::Display for Transport {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         match self {
-//             Transport::Sse => write!(f, "sse"),
-//             Transport::Stdio => write!(f, "stdio"),
-//             Transport::StreamHttp => write!(f, "streamable-http"),
-//         }
-//     }
-// }
 
 #[derive(Debug, Clone)]
 struct AppState {
