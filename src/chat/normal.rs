@@ -27,7 +27,7 @@ use crate::{
     chat::{gen_chat_id, utils::*},
     dual_debug, dual_error, dual_info, dual_warn,
     error::{ServerError, ServerResult},
-    mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES},
+    mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES, MCP_SEPARATOR},
     memory::{ModelRole, ModelToolCall, StoredToolCall},
     server::{RoutingPolicy, ServerKind, TargetServerInfo},
 };
@@ -135,14 +135,22 @@ pub(crate) async fn chat(
         if let Some(api_key) = &chat_server.api_key
             && !api_key.is_empty()
         {
-            client = client.header(AUTHORIZATION, api_key);
+            let auth_info = if api_key.starts_with("Bearer ") {
+                api_key.clone()
+            } else {
+                format!("Bearer {api_key}")
+            };
+
+            dual_info!("auth_info: {}", &auth_info);
+
+            client = client.header(AUTHORIZATION, auth_info);
         } else if let Some(auth) = headers.get("authorization")
             && let Ok(auth_str) = auth.to_str()
         {
             client = client.header(AUTHORIZATION, auth_str);
         }
 
-        dual_debug!(
+        dual_info!(
             "Request to downstream chat server - request_id: {}\n{}",
             request_id,
             serde_json::to_string_pretty(&request).unwrap()
@@ -188,8 +196,8 @@ pub(crate) async fn chat(
 
                 // TODO: to support multiple tool calls
                 let tool_call = &chat_completion.choices[0].message.tool_calls[0];
-                let contains = tool_call.function.name.as_str().contains("@");
-                let parts: Vec<&str> = tool_call.function.name.as_str().split('@').collect();
+                let contains = tool_call.function.name.as_str().contains(MCP_SEPARATOR);
+                let parts: Vec<&str> = tool_call.function.name.as_str().split(MCP_SEPARATOR).collect();
                 if contains && parts.len() == 2 {
                     call_mcp_server(
                         State(state.clone()),
@@ -550,7 +558,7 @@ async fn call_mcp_server(
     let request_id = request_id.as_ref();
     let chat_service_url = format!("{}/chat/completions", chat_server.url.trim_end_matches('/'));
 
-    let parts: Vec<&str> = tool_call.function.name.as_str().split('@').collect();
+    let parts: Vec<&str> = tool_call.function.name.as_str().split(MCP_SEPARATOR).collect();
     let mcp_tool_name = parts[0];
     let mcp_server_name = parts[1];
     let mcp_tool_args = tool_call.function.arguments.as_str();
@@ -604,7 +612,7 @@ async fn call_mcp_server(
                         let content = &content[0];
                         match &content.raw {
                             RawContent::Text(text) => {
-                                dual_info!("The mcp tool call result: {:#?}", text.text);
+                                dual_info!("The tool call result returned by {} mcp server: {:#?}", &mcp_server_name, text.text);
 
                                 let content = match SEARCH_MCP_SERVER_NAMES
                                     .contains(&mcp_server_name)
@@ -638,6 +646,8 @@ async fn call_mcp_server(
                                     }
                                     false => text.text.clone(),
                                 };
+
+                                dual_debug!("context:\n{}", &content);
 
                                 // Store tool calls and results to memory
                                 if let (Some(conv_id), Some(stored_tcs), Some(memory)) =
@@ -706,10 +716,16 @@ async fn call_mcp_server(
                                 let ds_request = if let Some(api_key) = &chat_server.api_key
                                     && !api_key.is_empty()
                                 {
+                                    let auth_info = if api_key.starts_with("Bearer ") {
+                                        api_key.clone()
+                                    } else {
+                                        format!("Bearer {api_key}")
+                                    };
+
                                     reqwest::Client::new()
                                         .post(&chat_service_url)
                                         .header(CONTENT_TYPE, "application/json")
-                                        .header(AUTHORIZATION, api_key)
+                                        .header(AUTHORIZATION, auth_info)
                                         .json(&request)
                                 } else if headers.contains_key("authorization") {
                                     let authorization = headers

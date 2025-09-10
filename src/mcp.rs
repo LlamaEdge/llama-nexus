@@ -11,7 +11,10 @@ use tokio::sync::RwLock as TokioRwLock;
 pub static MCP_SERVICES: OnceCell<TokioRwLock<HashMap<ServiceName, TokioRwLock<McpService>>>> =
     OnceCell::new();
 
-pub(crate) const SEARCH_MCP_SERVER_NAMES: [&str; 5] = [
+pub(crate) const MCP_SEPARATOR: &str = "---";
+
+pub(crate) const SEARCH_MCP_SERVER_NAMES: [&str; 6] = [
+    "cardea-agentic-search",
     "cardea-agentic-search-mcp-server",
     "cardea-tidb-mcp-server",
     "cardea-qdrant-mcp-server",

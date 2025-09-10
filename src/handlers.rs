@@ -23,6 +23,7 @@ use crate::{
     error::{ServerError, ServerResult},
     info::ApiServer,
     server::{RoutingPolicy, Server, ServerIdToRemove, ServerKind},
+    mcp::MCP_SEPARATOR,
 };
 
 pub(crate) async fn chat_handler(
@@ -63,7 +64,7 @@ pub(crate) async fn chat_handler(
                     .iter()
                     .for_each(|mcp_tool| {
                         let name = format!(
-                            "{}@{}",
+                            "{}{MCP_SEPARATOR}{}",
                             &mcp_tool.name,
                             server_config.server_name.as_deref().unwrap()
                         );
