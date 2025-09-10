@@ -147,6 +147,9 @@ async fn main() -> ServerResult<()> {
 
     let state = Arc::new(state);
 
+    // Register servers defined in configuration file
+    state.register_config_servers().await?;
+
     // Start the health check task if enabled
     if cli.check_health {
         dual_info!("Health check is enabled");
@@ -682,5 +685,30 @@ impl AppState {
                 tokio::time::sleep(check_interval).await;
             }
         });
+    }
+
+    pub(crate) async fn register_config_servers(&self) -> ServerResult<()> {
+        let config = self.config.read().await;
+
+        // Register chat service from configuration file
+        if let Some(chat_config) = &config.chat {
+            dual_info!("Registering chat service from config: {}", chat_config.url);
+            let server = Server::from_chat_config(chat_config)?;
+            self.register_downstream_server(server).await?;
+            dual_info!("Chat service registered successfully");
+        }
+
+        // Register embedding service from configuration file
+        if let Some(embedding_config) = &config.embedding {
+            dual_info!(
+                "Registering embedding service from config: {}",
+                embedding_config.url
+            );
+            let server = Server::from_embedding_config(embedding_config)?;
+            self.register_downstream_server(server).await?;
+            dual_info!("Embedding service registered successfully");
+        }
+
+        Ok(())
     }
 }

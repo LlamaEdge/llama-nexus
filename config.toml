@@ -1,3 +1,9 @@
+# ============================================================================
+# SECTION 1: CORE SERVER CONFIGURATION
+# ============================================================================
+# This section contains the fundamental server settings and memory management
+# configuration that define how LlamaNexus operates.
+
 [server]
 host = "127.0.0.1"   # The host to listen on.
 port = 3389          # The port to listen on.
@@ -30,11 +36,31 @@ max_stored_messages = 20                         # Trigger summarization when me
 summarize_threshold = 12                         # Base number for calculating minimum kept messages (kept = threshold/2)
 
 
-# Note that, if any of the MCP tool servers are enabled, then please guarantee that the
-# corresponding mcp server is started before starting the LlamaNexus server.
+# ============================================================================
+# SECTION 2: AI SERVICE CONFIGURATION
+# ============================================================================
+# This section contains configuration for AI services including chat and
+# embedding models. These are optional services that can be enabled as needed.
+
+# [chat]
+# url = "https://api.openai.com/v1"  # Base URL for the model API
+# api_key = ""                       # API key for the model service (leave empty to use environment variable: DEFAULT_CHAT_SERVICE_API_KEY)
+
+# [embedding]
+# url = "https://api.openai.com/v1"  # Base URL for the model API
+# api_key = ""                       # API key for the model service (leave empty to use environment variable: DEFAULT_EMBEDDING_SERVICE_API_KEY)
 
 
-# Section 1: Third Party MCP Servers
+# ============================================================================
+# SECTION 3: MCP TOOL SERVER CONFIGURATION
+# ============================================================================
+# This section contains configuration for Model Context Protocol (MCP) tool
+# servers. These provide additional capabilities and integrations.
+#
+# Note: If any MCP tool servers are enabled, ensure the corresponding MCP
+# server is started before starting the LlamaNexus server.
+
+# Section 3.1: Third Party MCP Servers
 #
 # The following items are the configuration for the third party MCP tool servers:
 #
@@ -61,7 +87,7 @@ oauth_url = "https://mcp.zapier.com/api/mcp/a/23683142/mcp?serverId=67bdebee-259
 enable    = false
 
 
-# Section 2: Cardea MCP Servers
+# Section 3.2: Cardea MCP Servers
 #
 # The following items are the configuration for the MCP tool servers:
 #
@@ -113,7 +139,7 @@ transport = "stream-http"
 url       = "http://127.0.0.1:8003/mcp"
 enable    = false
 
-# Keyword Search MCP Servers
+# Section 3.3: Keyword Search MCP Servers
 #
 # The following items are the keyword search mcp server configurations:
 #

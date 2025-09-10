@@ -95,7 +95,7 @@ pub(crate) async fn chat_handler(
     // Create or get conversation ID for memory
     let conv_id = if let Some(memory) = &state.memory {
         if let Some(user) = &request.user {
-            // 使用全局持久化的对话管理：同一用户无论使用什么模型都复用同一个对话
+            // Use global persistent conversation management: the same user reuses the same conversation regardless of which model is used
             let model_name = request
                 .model
                 .clone()

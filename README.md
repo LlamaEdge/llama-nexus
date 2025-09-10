@@ -101,6 +101,10 @@ Llama-Nexus is a gateway service for managing and orchestrating LlamaEdge API se
 
   Then, register the LlamaEdge API Servers to Llama-Nexus:
 
+- **Option 1: Manual API Registration (Recommended)**
+
+  Alternatively, you can manually register services via REST API after starting Llama-Nexus:
+
   ```bash
   curl --location 'http://localhost:3389/admin/servers/register' \
   --header 'Content-Type: application/json' \
@@ -123,6 +127,38 @@ Llama-Nexus is a gateway service for managing and orchestrating LlamaEdge API se
       "url": "http://localhost:10010/v1"
   }
   ```
+
+- **Option 2: Configuration-based Registration (Recommended)**
+
+  You can pre-configure AI services in your `config.toml` file. These services will be automatically registered when Llama-Nexus starts:
+
+  ```toml
+  # Uncomment and configure the services you need
+  [chat]
+  url = "http://localhost:10010/v1"  # Your chat service URL
+  api_key = ""                      # Leave empty to use DEFAULT_CHAT_SERVICE_API_KEY env var
+
+  [embedding]
+  url = "http://localhost:10011/v1"  # Your embedding service URL
+  api_key = ""                      # Leave empty to use DEFAULT_EMBEDDING_SERVICE_API_KEY env var
+  ```
+
+  **Environment Variable Support:**
+
+  If you prefer to keep API keys in environment variables:
+
+  ```bash
+  export DEFAULT_CHAT_SERVICE_API_KEY="your-chat-api-key"
+  export DEFAULT_EMBEDDING_SERVICE_API_KEY="your-embedding-api-key"
+  ```
+
+  Then start Llama-Nexus:
+
+  ```bash
+  llama-nexus --config config.toml
+  ```
+
+  The configured services will be automatically registered and available immediately.
 
 ## Usage
 

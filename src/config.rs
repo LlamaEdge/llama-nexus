@@ -39,6 +39,10 @@ const CALLBACK_HTML: &str = include_str!("auth/callback.html");
 pub struct Config {
     pub server: ServerConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat: Option<ChatConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<EmbeddingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rag: Option<RagConfig>,
@@ -89,6 +93,8 @@ impl Default for Config {
                 port: 3389,
                 chat_mode: ChatMode::default(),
             },
+            chat: None,
+            embedding: None,
             memory: None,
             rag: None,
             server_info_push_url: None,
@@ -113,6 +119,38 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default)]
     pub chat_mode: ChatMode,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ChatConfig {
+    pub url: String,
+    api_key: String,
+}
+
+impl ChatConfig {
+    pub fn get_api_key(&self) -> Option<String> {
+        if !self.api_key.is_empty() {
+            Some(self.api_key.clone())
+        } else {
+            std::env::var("DEFAULT_CHAT_SERVICE_API_KEY").ok()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct EmbeddingConfig {
+    pub url: String,
+    api_key: String,
+}
+
+impl EmbeddingConfig {
+    pub fn get_api_key(&self) -> Option<String> {
+        if !self.api_key.is_empty() {
+            Some(self.api_key.clone())
+        } else {
+            std::env::var("DEFAULT_EMBEDDING_SERVICE_API_KEY").ok()
+        }
+    }
 }
 
 /// Summarization strategy for handling conversation history

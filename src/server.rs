@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::{
     HEALTH_CHECK_INTERVAL, dual_error, dual_warn,
@@ -139,6 +140,54 @@ impl Server {
         };
 
         is_healthy
+    }
+
+    pub(crate) fn from_chat_config(chat_config: &crate::config::ChatConfig) -> ServerResult<Self> {
+        // Validate URL format
+        if chat_config.url.is_empty() {
+            return Err(ServerError::Operation(
+                "Chat service URL cannot be empty".to_string(),
+            ));
+        }
+
+        // Check if API key is available
+        let api_key = chat_config.get_api_key();
+
+        let id = format!("config-chat-{}", Uuid::new_v4());
+
+        Ok(Server {
+            id,
+            url: chat_config.url.clone(),
+            kind: ServerKind::chat,
+            api_key,
+            connections: AtomicUsize::new(0),
+            health_status: HealthStatus::default(),
+        })
+    }
+
+    pub(crate) fn from_embedding_config(
+        embedding_config: &crate::config::EmbeddingConfig,
+    ) -> ServerResult<Self> {
+        // Validate URL format
+        if embedding_config.url.is_empty() {
+            return Err(ServerError::Operation(
+                "Embedding service URL cannot be empty".to_string(),
+            ));
+        }
+
+        // Check if API key is available
+        let api_key = embedding_config.get_api_key();
+
+        let id = format!("config-embedding-{}", Uuid::new_v4());
+
+        Ok(Server {
+            id,
+            url: embedding_config.url.clone(),
+            kind: ServerKind::embeddings,
+            api_key,
+            connections: AtomicUsize::new(0),
+            health_status: HealthStatus::default(),
+        })
     }
 }
 
