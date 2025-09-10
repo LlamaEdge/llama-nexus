@@ -27,7 +27,7 @@ use crate::{
     chat::{gen_chat_id, utils::*},
     dual_debug, dual_error, dual_info, dual_warn,
     error::{ServerError, ServerResult},
-    mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES, MCP_SEPARATOR},
+    mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SEPARATOR, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES},
     memory::{ModelRole, ModelToolCall, StoredToolCall},
     server::{RoutingPolicy, ServerKind, TargetServerInfo},
 };
@@ -197,7 +197,12 @@ pub(crate) async fn chat(
                 // TODO: to support multiple tool calls
                 let tool_call = &chat_completion.choices[0].message.tool_calls[0];
                 let contains = tool_call.function.name.as_str().contains(MCP_SEPARATOR);
-                let parts: Vec<&str> = tool_call.function.name.as_str().split(MCP_SEPARATOR).collect();
+                let parts: Vec<&str> = tool_call
+                    .function
+                    .name
+                    .as_str()
+                    .split(MCP_SEPARATOR)
+                    .collect();
                 if contains && parts.len() == 2 {
                     call_mcp_server(
                         State(state.clone()),
@@ -558,7 +563,12 @@ async fn call_mcp_server(
     let request_id = request_id.as_ref();
     let chat_service_url = format!("{}/chat/completions", chat_server.url.trim_end_matches('/'));
 
-    let parts: Vec<&str> = tool_call.function.name.as_str().split(MCP_SEPARATOR).collect();
+    let parts: Vec<&str> = tool_call
+        .function
+        .name
+        .as_str()
+        .split(MCP_SEPARATOR)
+        .collect();
     let mcp_tool_name = parts[0];
     let mcp_server_name = parts[1];
     let mcp_tool_args = tool_call.function.arguments.as_str();
@@ -612,7 +622,11 @@ async fn call_mcp_server(
                         let content = &content[0];
                         match &content.raw {
                             RawContent::Text(text) => {
-                                dual_info!("The tool call result returned by {} mcp server: {:#?}", &mcp_server_name, text.text);
+                                dual_info!(
+                                    "The tool call result returned by {} mcp server: {:#?}",
+                                    &mcp_server_name,
+                                    text.text
+                                );
 
                                 let content = match SEARCH_MCP_SERVER_NAMES
                                     .contains(&mcp_server_name)
