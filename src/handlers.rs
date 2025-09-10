@@ -22,8 +22,8 @@ use crate::{
     dual_debug, dual_error, dual_info, dual_warn,
     error::{ServerError, ServerResult},
     info::ApiServer,
-    server::{RoutingPolicy, Server, ServerIdToRemove, ServerKind},
     mcp::MCP_SEPARATOR,
+    server::{RoutingPolicy, Server, ServerIdToRemove, ServerKind},
 };
 
 pub(crate) async fn chat_handler(
@@ -1213,6 +1213,133 @@ pub(crate) async fn list_user_conversations_handler(
     }
 }
 
+// update the model list
+pub(crate) async fn update_model_list(
+    State(state): State<Arc<AppState>>,
+    headers: &HeaderMap,
+    request_id: impl AsRef<str>,
+    server: &Server,
+) -> ServerResult<()> {
+    let request_id = request_id.as_ref();
+    let server_url = &server.url;
+    let server_id = &server.id;
+
+    // get the models from the downstream server
+    let list_models_url = format!("{server_url}/models");
+    dual_debug!("list_models_url: {}", list_models_url);
+    let response = if let Some(api_key) = &server.api_key
+        && !api_key.is_empty()
+    {
+        let auth_info = if api_key.starts_with("Bearer ") {
+            api_key.clone()
+        } else {
+            format!("Bearer {api_key}")
+        };
+
+        reqwest::Client::new()
+            .get(&list_models_url)
+            .header(CONTENT_TYPE, "application/json")
+            .header(AUTHORIZATION, auth_info)
+            .send()
+            .await
+            .map_err(|e| {
+                let err_msg = format!("Failed to get the models from the downstream server: {e}");
+                dual_error!("{err_msg} - request_id: {request_id}");
+                ServerError::Operation(err_msg)
+            })?
+    } else if headers.contains_key("authorization") {
+        let authorization = headers
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        reqwest::Client::new()
+            .get(&list_models_url)
+            .header(CONTENT_TYPE, "application/json")
+            .header(AUTHORIZATION, authorization)
+            .send()
+            .await
+            .map_err(|e| {
+                let err_msg = format!("Failed to get the models from the downstream server: {e}");
+                dual_error!("{err_msg} - request_id: {request_id}");
+                ServerError::Operation(err_msg)
+            })?
+    } else {
+        reqwest::Client::new()
+            .get(&list_models_url)
+            .send()
+            .await
+            .map_err(|e| {
+                let err_msg = format!("Failed to get the models from the downstream server: {e}");
+                dual_error!("{err_msg} - request_id: {request_id}");
+                ServerError::Operation(err_msg)
+            })?
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let err_msg =
+            format!("Status: {status}. Failed to get model info from {list_models_url}.",);
+        dual_error!("{} - request_id: {}", err_msg, request_id);
+        return Err(ServerError::Operation(err_msg));
+    }
+
+    match server_url.as_str() {
+        "https://openrouter.ai/api/v1" => {
+            let list_models_response = response.json::<serde_json::Value>().await.map_err(|e| {
+                let err_msg = format!("Failed to get the models from {list_models_url}: {e}");
+                dual_error!("{err_msg} - request_id: {request_id}");
+                ServerError::Operation(err_msg)
+            })?;
+
+            match list_models_response.get("data") {
+                Some(data) => {
+                    // get `id` field from each model
+                    let models = data.as_array().unwrap();
+                    let model_info_vec = models
+                        .iter()
+                        .map(|model| {
+                            let id = model.get("id").unwrap().as_str().unwrap();
+                            let created = model.get("created").unwrap().as_u64().unwrap();
+                            Model {
+                                id: id.to_string(),
+                                created,
+                                object: "model".to_string(),
+                                owned_by: "openrouter.ai".to_string(),
+                            }
+                        })
+                        .collect::<Vec<Model>>();
+
+                    // update the models
+                    let mut models = state.models.write().await;
+                    models.insert(server_id.to_string(), model_info_vec);
+                }
+                None => {
+                    let err_msg = format!(
+                        "Failed to get the models from {list_models_url}. Not found `data` field in the response."
+                    );
+                    dual_error!("{err_msg} - request_id: {request_id}");
+                    return Err(ServerError::Operation(err_msg.to_string()));
+                }
+            }
+        }
+        _ => {
+            let list_models_response =
+                response.json::<ListModelsResponse>().await.map_err(|e| {
+                    let err_msg = format!("Failed to get the models from {list_models_url}: {e}");
+                    dual_error!("{err_msg} - request_id: {request_id}");
+                    ServerError::Operation(err_msg)
+                })?;
+
+            // update the models
+            let mut models = state.models.write().await;
+            models.insert(server_id.to_string(), list_models_response.data);
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) mod admin {
     use super::*;
 
@@ -1399,133 +1526,6 @@ pub(crate) mod admin {
         server_info
             .servers
             .insert(server_id.to_string(), api_server);
-
-        Ok(())
-    }
-
-    // update the model list
-    pub(crate) async fn update_model_list(
-        State(state): State<Arc<AppState>>,
-        headers: &HeaderMap,
-        request_id: impl AsRef<str>,
-        server: &Server,
-    ) -> ServerResult<()> {
-        let request_id = request_id.as_ref();
-        let server_url = &server.url;
-        let server_id = &server.id;
-
-        // get the models from the downstream server
-        let list_models_url = format!("{server_url}/models");
-        dual_debug!("list_models_url: {}", list_models_url);
-        let response = if let Some(api_key) = &server.api_key
-            && !api_key.is_empty()
-        {
-            reqwest::Client::new()
-                .get(&list_models_url)
-                .header(CONTENT_TYPE, "application/json")
-                .header(AUTHORIZATION, api_key)
-                .send()
-                .await
-                .map_err(|e| {
-                    let err_msg =
-                        format!("Failed to get the models from the downstream server: {e}");
-                    dual_error!("{err_msg} - request_id: {request_id}");
-                    ServerError::Operation(err_msg)
-                })?
-        } else if headers.contains_key("authorization") {
-            let authorization = headers
-                .get("authorization")
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_string();
-            reqwest::Client::new()
-                .get(&list_models_url)
-                .header(CONTENT_TYPE, "application/json")
-                .header(AUTHORIZATION, authorization)
-                .send()
-                .await
-                .map_err(|e| {
-                    let err_msg =
-                        format!("Failed to get the models from the downstream server: {e}");
-                    dual_error!("{err_msg} - request_id: {request_id}");
-                    ServerError::Operation(err_msg)
-                })?
-        } else {
-            reqwest::Client::new()
-                .get(&list_models_url)
-                .send()
-                .await
-                .map_err(|e| {
-                    let err_msg =
-                        format!("Failed to get the models from the downstream server: {e}");
-                    dual_error!("{err_msg} - request_id: {request_id}");
-                    ServerError::Operation(err_msg)
-                })?
-        };
-        let status = response.status();
-        if !status.is_success() {
-            let err_msg =
-                format!("Status: {status}. Failed to get model info from {list_models_url}.",);
-            dual_error!("{} - request_id: {}", err_msg, request_id);
-            return Err(ServerError::Operation(err_msg));
-        }
-
-        match server_url.as_str() {
-            "https://openrouter.ai/api/v1" => {
-                let list_models_response =
-                    response.json::<serde_json::Value>().await.map_err(|e| {
-                        let err_msg =
-                            format!("Failed to get the models from {list_models_url}: {e}");
-                        dual_error!("{err_msg} - request_id: {request_id}");
-                        ServerError::Operation(err_msg)
-                    })?;
-
-                match list_models_response.get("data") {
-                    Some(data) => {
-                        // get `id` field from each model
-                        let models = data.as_array().unwrap();
-                        let model_info_vec = models
-                            .iter()
-                            .map(|model| {
-                                let id = model.get("id").unwrap().as_str().unwrap();
-                                let created = model.get("created").unwrap().as_u64().unwrap();
-                                Model {
-                                    id: id.to_string(),
-                                    created,
-                                    object: "model".to_string(),
-                                    owned_by: "openrouter.ai".to_string(),
-                                }
-                            })
-                            .collect::<Vec<Model>>();
-
-                        // update the models
-                        let mut models = state.models.write().await;
-                        models.insert(server_id.to_string(), model_info_vec);
-                    }
-                    None => {
-                        let err_msg = format!(
-                            "Failed to get the models from {list_models_url}. Not found `data` field in the response."
-                        );
-                        dual_error!("{err_msg} - request_id: {request_id}");
-                        return Err(ServerError::Operation(err_msg.to_string()));
-                    }
-                }
-            }
-            _ => {
-                let list_models_response =
-                    response.json::<ListModelsResponse>().await.map_err(|e| {
-                        let err_msg =
-                            format!("Failed to get the models from {list_models_url}: {e}");
-                        dual_error!("{err_msg} - request_id: {request_id}");
-                        ServerError::Operation(err_msg)
-                    })?;
-
-                // update the models
-                let mut models = state.models.write().await;
-                models.insert(server_id.to_string(), list_models_response.data);
-            }
-        }
 
         Ok(())
     }

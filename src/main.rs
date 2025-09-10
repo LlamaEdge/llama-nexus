@@ -687,13 +687,32 @@ impl AppState {
         });
     }
 
-    pub(crate) async fn register_config_servers(&self) -> ServerResult<()> {
+    pub(crate) async fn register_config_servers(self: &Arc<Self>) -> ServerResult<()> {
         let config = self.config.read().await;
 
         // Register chat service from configuration file
         if let Some(chat_config) = &config.chat {
             dual_info!("Registering chat service from config: {}", chat_config.url);
             let server = Server::from_chat_config(chat_config)?;
+
+            // Update model list for the server
+            let headers = axum::http::HeaderMap::new();
+            if let Err(e) = crate::handlers::update_model_list(
+                axum::extract::State(Arc::clone(self)),
+                &headers,
+                "config-registration",
+                &server,
+            )
+            .await
+            {
+                dual_warn!(
+                    "Failed to update model list for chat server {}: {}",
+                    server.id,
+                    e
+                );
+                // Continue with registration even if model list update fails
+            }
+
             self.register_downstream_server(server).await?;
             dual_info!("Chat service registered successfully");
         }
@@ -705,6 +724,25 @@ impl AppState {
                 embedding_config.url
             );
             let server = Server::from_embedding_config(embedding_config)?;
+
+            // Update model list for the server
+            let headers = axum::http::HeaderMap::new();
+            if let Err(e) = crate::handlers::update_model_list(
+                axum::extract::State(Arc::clone(self)),
+                &headers,
+                "config-registration",
+                &server,
+            )
+            .await
+            {
+                dual_warn!(
+                    "Failed to update model list for embedding server {}: {}",
+                    server.id,
+                    e
+                );
+                // Continue with registration even if model list update fails
+            }
+
             self.register_downstream_server(server).await?;
             dual_info!("Embedding service registered successfully");
         }
