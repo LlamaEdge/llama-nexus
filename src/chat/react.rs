@@ -295,9 +295,9 @@ pub(crate) async fn chat(
 
                     match tool_result.is_error {
                         Some(false) => {
-                            match &tool_result.content {
-                                Some(content) => {
-                                    let content = content[0].clone();
+                            match !tool_result.content.is_empty() {
+                                true => {
+                                    let content = &tool_result.content[0];
                                     match &content.raw {
                                         RawContent::Text(text) => {
                                             dual_info!(
@@ -535,7 +535,7 @@ pub(crate) async fn chat(
                                         }
                                     }
                                 }
-                                None => {
+                                false => {
                                     let err_msg = "The mcp tool result is empty";
                                     dual_error!("{} - request_id: {}", err_msg, request_id);
                                     return Err(ServerError::McpEmptyContent);

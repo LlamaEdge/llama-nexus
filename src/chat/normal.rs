@@ -617,9 +617,9 @@ async fn call_mcp_server(
 
         match tool_result.is_error {
             Some(false) => {
-                match &tool_result.content {
-                    Some(content) => {
-                        let content = &content[0];
+                match !tool_result.content.is_empty() {
+                    true => {
+                        let content = &tool_result.content[0];
                         match &content.raw {
                             RawContent::Text(text) => {
                                 dual_info!(
@@ -982,7 +982,7 @@ async fn call_mcp_server(
                             }
                         }
                     }
-                    None => {
+                    false => {
                         let err_msg = "The mcp tool result is empty";
                         dual_error!("{} - request_id: {}", err_msg, request_id);
                         Err(ServerError::McpEmptyContent)

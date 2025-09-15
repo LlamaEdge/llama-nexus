@@ -356,6 +356,9 @@ impl McpToolServerConfig {
                                 client_info: Implementation {
                                     name: env!("CARGO_PKG_NAME").to_string(),
                                     version: env!("CARGO_PKG_VERSION").to_string(),
+                                    title: None,
+                                    icons: None,
+                                    website_url: None,
                                 },
                             };
                             client_info.into_dyn().serve(transport).await.map_err(|e| {
@@ -550,6 +553,9 @@ impl McpToolServerConfig {
                                 client_info: Implementation {
                                     name: env!("CARGO_PKG_NAME").to_string(),
                                     version: env!("CARGO_PKG_VERSION").to_string(),
+                                    title: None,
+                                    icons: None,
+                                    website_url: None,
                                 },
                             };
                             let service =
@@ -654,6 +660,9 @@ impl McpToolServerConfig {
                                 client_info: Implementation {
                                     name: env!("CARGO_PKG_NAME").to_string(),
                                     version: env!("CARGO_PKG_VERSION").to_string(),
+                                    title: None,
+                                    icons: None,
+                                    website_url: None,
                                 },
                             };
                             client_info.into_dyn().serve(transport).await.map_err(|e| {
@@ -844,6 +853,9 @@ impl McpToolServerConfig {
                                 client_info: Implementation {
                                     name: env!("CARGO_PKG_NAME").to_string(),
                                     version: env!("CARGO_PKG_VERSION").to_string(),
+                                    title: None,
+                                    icons: None,
+                                    website_url: None,
                                 },
                             };
                             client_info.into_dyn().serve(transport).await.map_err(|e| {
