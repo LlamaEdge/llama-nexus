@@ -33,13 +33,13 @@ pub async fn responses_handler(
             Ok(None) => {
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    format!("Previous response ID not found: {}", prev_id),
+                    format!("Previous response ID not found: {prev_id}"),
                 ));
             }
             Err(e) => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
+                    format!("Database error: {e}"),
                 ));
             }
         }
@@ -94,7 +94,7 @@ pub async fn responses_handler(
         Err(e) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Chat backend error: {}", e),
+                format!("Chat backend error: {e}"),
             ));
         }
     };
@@ -113,7 +113,7 @@ pub async fn responses_handler(
     if let Err(e) = state.db.save_session(&session) {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to save session: {}", e),
+            format!("Failed to save session: {e}"),
         ));
     }
 
@@ -145,7 +145,7 @@ async fn call_chat_backend(
 
     let target_server = match chat_servers.next().await {
         Ok(server) => server,
-        Err(e) => return Err(format!("Failed to get chat server: {}", e)),
+        Err(e) => return Err(format!("Failed to get chat server: {e}")),
     };
 
     let url = format!(
@@ -160,20 +160,20 @@ async fn call_chat_backend(
         .json(&request)
         .send()
         .await
-        .map_err(|e| format!("Request failed: {}", e))?;
+        .map_err(|e| format!("Request failed: {e}"))?;
 
     if !response.status().is_success() {
         let error_text = response
             .text()
             .await
             .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(format!("Chat API Error: {}", error_text));
+        return Err(format!("Chat API Error: {error_text}"));
     }
 
     let chat_response: endpoints::chat::ChatCompletionObject = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
 
     let text = chat_response
         .choices
@@ -184,7 +184,6 @@ async fn call_chat_backend(
 
     Ok(text)
 }
-
 
 pub async fn health_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({

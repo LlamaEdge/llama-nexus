@@ -47,7 +47,7 @@ impl Database {
         Ok(())
     }
 
-    #[allow(dead_code)] 
+    #[allow(dead_code)]
     pub fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT session_data FROM sessions WHERE id = ?1")?;
@@ -128,7 +128,7 @@ impl Database {
         Ok(sessions)
     }
 
-    #[allow(dead_code)] 
+    #[allow(dead_code)]
     pub fn delete_session(&self, session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;

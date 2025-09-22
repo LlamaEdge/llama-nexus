@@ -70,7 +70,16 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> ServerResult<()> {
+    #[cfg(debug_assertions)]
     dotenv::dotenv().ok();
+
+    #[cfg(not(debug_assertions))]
+    {
+        if std::path::Path::new(".env").exists() {
+            panic!("Production should not contain `.env` file");
+        }
+    }
+
     // parse the command line arguments
     let cli = Cli::parse();
 
@@ -150,7 +159,10 @@ async fn main() -> ServerResult<()> {
     let state = Arc::new(state);
 
     // Initialize responses database
-    let db = responses::Database::new("sessions.db").expect("Failed to initialize database");
+    let db_path =
+        std::env::var("NEXUS_RESPONSES_DB_PATH").unwrap_or_else(|_| "sessions.db".to_string());
+    let db = responses::Database::new(&db_path)
+        .map_err(|e| ServerError::Operation(format!("Failed to initialize database: {e}")))?;
     let responses_state = Arc::new(responses::AppState {
         db,
         main_state: state.clone(),
