@@ -5,6 +5,7 @@ mod handlers;
 mod info;
 mod mcp;
 mod memory;
+mod responses;
 mod server;
 mod utils;
 
@@ -69,6 +70,16 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> ServerResult<()> {
+    #[cfg(debug_assertions)]
+    dotenv::dotenv().ok();
+
+    #[cfg(not(debug_assertions))]
+    {
+        if std::path::Path::new(".env").exists() {
+            panic!("Production should not contain `.env` file");
+        }
+    }
+
     // parse the command line arguments
     let cli = Cli::parse();
 
@@ -147,6 +158,16 @@ async fn main() -> ServerResult<()> {
 
     let state = Arc::new(state);
 
+    // Initialize responses database
+    let db_path =
+        std::env::var("NEXUS_RESPONSES_DB_PATH").unwrap_or_else(|_| "sessions.db".to_string());
+    let db = responses::Database::new(&db_path)
+        .map_err(|e| ServerError::Operation(format!("Failed to initialize database: {e}")))?;
+    let responses_state = Arc::new(responses::AppState {
+        db,
+        main_state: state.clone(),
+    });
+
     // Register servers defined in configuration file
     state.register_config_servers().await?;
 
@@ -162,8 +183,8 @@ async fn main() -> ServerResult<()> {
         .allow_headers(Any)
         .allow_origin(Any);
 
-    // Set up the router
-    let mut app = Router::new()
+    // Set up the main router
+    let mut main_router = Router::new()
         .route("/v1/chat/completions", post(handlers::chat_handler))
         .route("/v1/embeddings", post(handlers::embeddings_handler))
         .route(
@@ -195,7 +216,7 @@ async fn main() -> ServerResult<()> {
     // Add memory endpoints only if memory is enabled
     if state.memory.is_some() {
         dual_info!("Memory endpoints are enabled");
-        app = app
+        main_router = main_router
             .route(
                 "/v1/memory/conversations/{conv_id}/history",
                 get(handlers::get_conversation_history_handler),
@@ -212,8 +233,20 @@ async fn main() -> ServerResult<()> {
         dual_info!("Memory endpoints are disabled");
     }
 
+    // Add state to main router
+    let main_router = main_router.with_state(state.clone());
+
+    // Create responses router
+    let responses_router = Router::new()
+        .route("/v1/responses", post(responses::responses_handler))
+        .route("/health", get(responses::health_handler))
+        .with_state(responses_state);
+
     let app =
-        app.layer(cors)
+        Router::new()
+            .merge(main_router)
+            .merge(responses_router)
+            .layer(cors)
             .layer(TraceLayer::new_for_http())
             .layer(axum::middleware::from_fn(
                 |mut req: Request<Body>, next: axum::middleware::Next| async move {
@@ -241,8 +274,7 @@ async fn main() -> ServerResult<()> {
             ))
             .fallback_service(ServeDir::new(&cli.web_ui).not_found_service(
                 ServeDir::new(&cli.web_ui).append_index_html_on_directories(true),
-            ))
-            .with_state(state.clone());
+            ));
 
     // Create the listener
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
