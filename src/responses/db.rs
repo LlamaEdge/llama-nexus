@@ -233,6 +233,7 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_access() {
         use std::sync::Arc;
+
         use tokio::task;
 
         let db = Arc::new(create_test_database().await);
