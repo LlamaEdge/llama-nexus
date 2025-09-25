@@ -162,6 +162,7 @@ async fn main() -> ServerResult<()> {
     let db_path =
         std::env::var("NEXUS_RESPONSES_DB_PATH").unwrap_or_else(|_| "sessions.db".to_string());
     let db = responses::Database::new(&db_path)
+        .await
         .map_err(|e| ServerError::Operation(format!("Failed to initialize database: {e}")))?;
     let responses_state = Arc::new(responses::AppState {
         db,

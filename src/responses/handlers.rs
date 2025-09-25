@@ -28,7 +28,7 @@ pub async fn responses_handler(
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
 
     let mut session = if let Some(prev_id) = &req.previous_response_id {
-        match state.db.find_session_by_response_id(prev_id) {
+        match state.db.find_session_by_response_id(prev_id).await {
             Ok(Some(existing_session)) => existing_session,
             Ok(None) => {
                 return Err((
@@ -110,7 +110,7 @@ pub async fn responses_handler(
 
     let final_result = chat_result;
 
-    if let Err(e) = state.db.save_session(&session) {
+    if let Err(e) = state.db.save_session(&session).await {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to save session: {e}"),
