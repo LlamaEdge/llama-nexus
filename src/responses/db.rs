@@ -1,95 +1,87 @@
-use std::sync::Mutex;
-
-use rusqlite::{Connection, Result, params};
+use sqlx::{Row, SqlitePool};
 
 use crate::responses::models::{Session, SessionRow};
 
+type Result<T> = std::result::Result<T, sqlx::Error>;
+
 pub struct Database {
-    conn: Mutex<Connection>,
+    pool: SqlitePool,
 }
 
 impl Database {
-    pub fn new(db_path: &str) -> Result<Self> {
-        let conn = Connection::open(db_path)?;
-        let db = Database {
-            conn: Mutex::new(conn),
+    pub async fn new(db_path: &str) -> Result<Self> {
+        let connection_string = if db_path.starts_with("sqlite:") {
+            db_path.to_string()
+        } else {
+            format!("sqlite:{db_path}?mode=rwc")
         };
-        db.create_tables()?;
+
+        let pool = SqlitePool::connect(&connection_string).await?;
+
+        let db = Database { pool };
+        db.create_tables().await?;
         Ok(db)
     }
 
-    pub fn create_tables(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+    async fn create_tables(&self) -> Result<()> {
+        sqlx::query(
             "CREATE TABLE IF NOT EXISTS sessions(
                 id TEXT PRIMARY KEY,
                 session_data TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 last_updated INTEGER NOT NULL
             )",
-            [],
-        )?;
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    pub fn save_session(&self, session: &Session) -> Result<()> {
-        let session_json = serde_json::to_string(session)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    pub async fn save_session(&self, session: &Session) -> Result<()> {
+        let session_json =
+            serde_json::to_string(session).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
 
         let now = chrono::Utc::now().timestamp();
-        let conn = self.conn.lock().unwrap();
 
-        conn.execute(
+        sqlx::query(
             "INSERT OR REPLACE INTO sessions (id, session_data, created_at, last_updated)
-            VALUES (?1, ?2, ?3, ?4)",
-            params![session.response_id, session_json, session.created, now],
-        )?;
+            VALUES (?, ?, ?, ?)",
+        )
+        .bind(&session.response_id)
+        .bind(&session_json)
+        .bind(session.created)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     #[allow(dead_code)]
-    pub fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT session_data FROM sessions WHERE id = ?1")?;
+    pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
+        let row = sqlx::query("SELECT session_data FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?;
 
-        let mut session_iter = stmt.query_map([session_id], |row| {
-            let session_data: String = row.get(0)?;
-            Ok(session_data)
-        })?;
-
-        if let Some(session_result) = session_iter.next() {
-            let session_data = session_result?;
-            let session: Session = serde_json::from_str(&session_data).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-            return Ok(Some(session));
+        if let Some(row) = row {
+            let session_data: String = row.get(0);
+            let session: Session = serde_json::from_str(&session_data)
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+            Ok(Some(session))
+        } else {
+            Ok(None)
         }
-
-        Ok(None)
     }
 
-    pub fn find_session_by_response_id(&self, response_id: &str) -> Result<Option<Session>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT session_data FROM sessions")?;
+    pub async fn find_session_by_response_id(&self, response_id: &str) -> Result<Option<Session>> {
+        let rows = sqlx::query("SELECT session_data FROM sessions")
+            .fetch_all(&self.pool)
+            .await?;
 
-        let session_iter = stmt.query_map([], |row| {
-            let session_data: String = row.get(0)?;
-            Ok(session_data)
-        })?;
-
-        for session_result in session_iter {
-            let session_data = session_result?;
-            let session: Session = serde_json::from_str(&session_data).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
+        for row in rows {
+            let session_data: String = row.get(0);
+            let session: Session = serde_json::from_str(&session_data)
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
 
             for message in session.messages.values() {
                 if let Some(msg_response_id) = &message.response_id
@@ -104,34 +96,33 @@ impl Database {
     }
 
     #[allow(dead_code)]
-    pub fn list_sessions(&self) -> Result<Vec<SessionRow>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+    pub async fn list_sessions(&self) -> Result<Vec<SessionRow>> {
+        let rows = sqlx::query(
             "SELECT id, session_data, created_at, last_updated FROM sessions
             ORDER BY last_updated DESC",
-        )?;
-
-        let session_iter = stmt.query_map([], |row| {
-            Ok(SessionRow {
-                id: row.get(0)?,
-                session_data: row.get(1)?,
-                created_at: row.get(2)?,
-                last_updated: row.get(3)?,
-            })
-        })?;
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut sessions = Vec::new();
-        for session in session_iter {
-            sessions.push(session?);
+        for row in rows {
+            sessions.push(SessionRow {
+                id: row.get(0),
+                session_data: row.get(1),
+                created_at: row.get(2),
+                last_updated: row.get(3),
+            });
         }
 
         Ok(sessions)
     }
 
     #[allow(dead_code)]
-    pub fn delete_session(&self, session_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+    pub async fn delete_session(&self, session_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }
@@ -141,8 +132,10 @@ mod tests {
     use super::*;
     use crate::responses::models::Session;
 
-    fn create_test_database() -> Database {
-        Database::new(":memory:").expect("Failed to create test database")
+    async fn create_test_database() -> Database {
+        Database::new(":memory:")
+            .await
+            .expect("Failed to create test database")
     }
 
     fn create_test_session() -> Session {
@@ -171,16 +164,16 @@ mod tests {
         session
     }
 
-    #[test]
-    fn test_save_and_get_session() {
-        let db = create_test_database();
+    #[tokio::test]
+    async fn test_save_and_get_session() {
+        let db = create_test_database().await;
         let session = create_test_session();
         let session_id = session.response_id.clone();
 
-        let result = db.save_session(&session);
+        let result = db.save_session(&session).await;
         assert!(result.is_ok(), "Saving session should succeed");
 
-        let retrieved = db.get_session(&session_id).unwrap();
+        let retrieved = db.get_session(&session_id).await.unwrap();
         assert!(retrieved.is_some(), "Should find the saved session");
 
         let retrieved_session = retrieved.unwrap();
@@ -188,21 +181,21 @@ mod tests {
         assert_eq!(retrieved_session.model_used, session.model_used);
         assert_eq!(retrieved_session.messages.len(), session.messages.len());
 
-        let result = db.get_session("nonexistent_id").unwrap();
+        let result = db.get_session("nonexistent_id").await.unwrap();
         assert!(
             result.is_none(),
             "Should return None for nonexistent session"
         );
     }
 
-    #[test]
-    fn test_find_session_by_response_id() {
-        let db = create_test_database();
+    #[tokio::test]
+    async fn test_find_session_by_response_id() {
+        let db = create_test_database().await;
         let session = create_test_session();
 
-        db.save_session(&session).unwrap();
+        db.save_session(&session).await.unwrap();
 
-        let found = db.find_session_by_response_id("resp_456").unwrap();
+        let found = db.find_session_by_response_id("resp_456").await.unwrap();
         assert!(
             found.is_some(),
             "Should find session by message response ID"
@@ -212,14 +205,15 @@ mod tests {
         assert_eq!(found_session.response_id, session.response_id);
     }
 
-    #[test]
-    fn test_session_serialization_roundtrip() {
-        let db = create_test_database();
+    #[tokio::test]
+    async fn test_session_serialization_roundtrip() {
+        let db = create_test_database().await;
         let original_session = create_test_session();
 
-        db.save_session(&original_session).unwrap();
+        db.save_session(&original_session).await.unwrap();
         let retrieved = db
             .get_session(&original_session.response_id)
+            .await
             .unwrap()
             .unwrap();
 
@@ -236,16 +230,17 @@ mod tests {
         assert_eq!(retrieved_msg.response_id, original_msg.response_id);
     }
 
-    #[test]
-    fn test_concurrent_access() {
-        use std::{sync::Arc, thread};
+    #[tokio::test]
+    async fn test_concurrent_access() {
+        use std::sync::Arc;
+        use tokio::task;
 
-        let db = Arc::new(create_test_database());
+        let db = Arc::new(create_test_database().await);
         let mut handles = vec![];
 
         for i in 0..10 {
             let db_clone = Arc::clone(&db);
-            let handle = thread::spawn(move || {
+            let handle = task::spawn(async move {
                 let mut session = Session::new(
                     format!("session_{}", i),
                     "test_model".to_string(),
@@ -268,13 +263,14 @@ mod tests {
                     Some(format!("resp_{}", i)),
                 );
 
-                db_clone.save_session(&session).unwrap();
+                db_clone.save_session(&session).await.unwrap();
 
-                let retrieved = db_clone.get_session(&session.response_id).unwrap();
+                let retrieved = db_clone.get_session(&session.response_id).await.unwrap();
                 assert!(retrieved.is_some());
 
                 let found = db_clone
                     .find_session_by_response_id(&format!("resp_{}", i))
+                    .await
                     .unwrap();
                 assert!(found.is_some());
             });
@@ -282,10 +278,10 @@ mod tests {
         }
 
         for handle in handles {
-            handle.join().unwrap();
+            handle.await.unwrap();
         }
 
-        let sessions = db.list_sessions().unwrap();
+        let sessions = db.list_sessions().await.unwrap();
         assert_eq!(sessions.len(), 10);
     }
 }
