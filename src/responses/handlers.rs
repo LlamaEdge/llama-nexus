@@ -8,9 +8,8 @@ use tokio::sync::OnceCell;
 
 use crate::{
     AppState as MainAppState,
-    error::ServerError,
     responses::{
-        db::Database,
+        db::{Database, DatabaseError},
         models::{ResponseReply, ResponseRequest, Session},
     },
     server::RoutingPolicy,
@@ -41,6 +40,23 @@ impl From<ResponseError> for (StatusCode, String) {
     }
 }
 
+impl From<DatabaseError> for ResponseError {
+    fn from(error: DatabaseError) -> Self {
+        match error {
+            DatabaseError::SessionNotFound { id } => {
+                ResponseError::SessionNotFound(format!("Session not found: {id}"))
+            }
+            DatabaseError::Sqlx(e) => ResponseError::DatabaseError(format!("Database error: {e}")),
+            DatabaseError::Serialization(e) => {
+                ResponseError::DatabaseError(format!("Data serialization error: {e}"))
+            }
+            DatabaseError::InvalidSessionData => {
+                ResponseError::DatabaseError("Invalid session data".to_string())
+            }
+        }
+    }
+}
+
 pub struct ResponsesAppState {
     db: OnceCell<Arc<Database>>,
     db_path: String,
@@ -56,17 +72,10 @@ impl ResponsesAppState {
         }
     }
 
-    async fn get_or_create_db(&self) -> Result<Arc<Database>, ServerError> {
+    async fn get_or_create_db(&self) -> Result<Arc<Database>, DatabaseError> {
         let db = self
             .db
-            .get_or_try_init(|| async {
-                Database::new(&self.db_path)
-                    .await
-                    .map(Arc::new)
-                    .map_err(|e| {
-                        ServerError::Operation(format!("Failed to initialize database: {e}"))
-                    })
-            })
+            .get_or_try_init(|| async { Database::new(&self.db_path).await.map(Arc::new) })
             .await?;
 
         Ok(Arc::clone(db))
@@ -101,21 +110,14 @@ async fn responses_handler_impl(
     let model = req.model.clone();
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
 
-    let db = state.get_or_create_db().await.map_err(|e| {
-        ResponseError::DatabaseError(format!("Database initialization failed: {e}"))
-    })?;
+    let db = state.get_or_create_db().await?;
 
     let mut session = if let Some(prev_id) = &req.previous_response_id {
-        match db.find_session_by_response_id(prev_id).await {
-            Ok(Some(existing_session)) => existing_session,
-            Ok(None) => {
+        match db.find_session_by_response_id(prev_id).await? {
+            Some(existing_session) => existing_session,
+            None => {
                 return Err(ResponseError::SessionNotFound(format!(
                     "Previous response ID not found: {prev_id}"
-                )));
-            }
-            Err(e) => {
-                return Err(ResponseError::DatabaseError(format!(
-                    "Failed to lookup session: {e}"
                 )));
             }
         }
@@ -180,9 +182,7 @@ async fn responses_handler_impl(
 
     let final_result = chat_result;
 
-    db.save_session(&session)
-        .await
-        .map_err(|e| ResponseError::DatabaseError(format!("Failed to save session: {e}")))?;
+    db.save_session(&session).await?;
 
     let response = ResponseReply::new(
         response_id,

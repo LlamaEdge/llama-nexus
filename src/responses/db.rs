@@ -1,15 +1,33 @@
 use sqlx::{Row, SqlitePool};
+use thiserror::Error;
 
 use crate::responses::models::{Session, SessionRow};
 
-type Result<T> = std::result::Result<T, sqlx::Error>;
+#[derive(Debug, Error)]
+pub enum DatabaseError {
+    #[error("Database error: {0}")]
+    Sqlx(#[from] sqlx::Error),
+
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+
+    #[error("Session not found: {id}")]
+    #[allow(dead_code)]
+    SessionNotFound { id: String },
+
+    #[error("Invalid session data")]
+    #[allow(dead_code)]
+    InvalidSessionData,
+}
+
+type DBResult<T> = std::result::Result<T, DatabaseError>;
 
 pub struct Database {
     pool: SqlitePool,
 }
 
 impl Database {
-    pub async fn new(db_path: &str) -> Result<Self> {
+    pub async fn new(db_path: &str) -> DBResult<Self> {
         let connection_string = if db_path.starts_with("sqlite:") {
             db_path.to_string()
         } else {
@@ -23,7 +41,7 @@ impl Database {
         Ok(db)
     }
 
-    async fn create_tables(&self) -> Result<()> {
+    async fn create_tables(&self) -> DBResult<()> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS sessions(
                 id TEXT PRIMARY KEY,
@@ -37,9 +55,8 @@ impl Database {
         Ok(())
     }
 
-    pub async fn save_session(&self, session: &Session) -> Result<()> {
-        let session_json =
-            serde_json::to_string(session).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    pub async fn save_session(&self, session: &Session) -> DBResult<()> {
+        let session_json = serde_json::to_string(session)?;
 
         let now = chrono::Utc::now().timestamp();
 
@@ -57,7 +74,7 @@ impl Database {
     }
 
     #[allow(dead_code)]
-    pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
+    pub async fn get_session(&self, session_id: &str) -> DBResult<Option<Session>> {
         let row = sqlx::query("SELECT session_data FROM sessions WHERE id = ?")
             .bind(session_id)
             .fetch_optional(&self.pool)
@@ -65,23 +82,24 @@ impl Database {
 
         if let Some(row) = row {
             let session_data: String = row.get(0);
-            let session: Session = serde_json::from_str(&session_data)
-                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+            let session: Session = serde_json::from_str(&session_data)?;
             Ok(Some(session))
         } else {
             Ok(None)
         }
     }
 
-    pub async fn find_session_by_response_id(&self, response_id: &str) -> Result<Option<Session>> {
+    pub async fn find_session_by_response_id(
+        &self,
+        response_id: &str,
+    ) -> DBResult<Option<Session>> {
         let rows = sqlx::query("SELECT session_data FROM sessions")
             .fetch_all(&self.pool)
             .await?;
 
         for row in rows {
             let session_data: String = row.get(0);
-            let session: Session = serde_json::from_str(&session_data)
-                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+            let session: Session = serde_json::from_str(&session_data)?;
 
             for message in session.messages.values() {
                 if let Some(msg_response_id) = &message.response_id
@@ -96,7 +114,7 @@ impl Database {
     }
 
     #[allow(dead_code)]
-    pub async fn list_sessions(&self) -> Result<Vec<SessionRow>> {
+    pub async fn list_sessions(&self) -> DBResult<Vec<SessionRow>> {
         let rows = sqlx::query(
             "SELECT id, session_data, created_at, last_updated FROM sessions
             ORDER BY last_updated DESC",
@@ -118,7 +136,7 @@ impl Database {
     }
 
     #[allow(dead_code)]
-    pub async fn delete_session(&self, session_id: &str) -> Result<()> {
+    pub async fn delete_session(&self, session_id: &str) -> DBResult<()> {
         sqlx::query("DELETE FROM sessions WHERE id = ?")
             .bind(session_id)
             .execute(&self.pool)
