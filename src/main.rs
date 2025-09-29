@@ -158,15 +158,10 @@ async fn main() -> ServerResult<()> {
 
     let state = Arc::new(state);
 
-    // Initialize responses database
+    // Initialize responses state with lazy database initialization
     let db_path =
         std::env::var("NEXUS_RESPONSES_DB_PATH").unwrap_or_else(|_| "sessions.db".to_string());
-    let db = responses::Database::new(&db_path)
-        .map_err(|e| ServerError::Operation(format!("Failed to initialize database: {e}")))?;
-    let responses_state = Arc::new(responses::AppState {
-        db,
-        main_state: state.clone(),
-    });
+    let responses_state = Arc::new(responses::ResponsesAppState::new(db_path, state.clone()));
 
     // Register servers defined in configuration file
     state.register_config_servers().await?;

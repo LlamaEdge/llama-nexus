@@ -4,43 +4,121 @@ use axum::{extract::State, http::StatusCode, response::Json};
 use endpoints::chat::{
     ChatCompletionRequest, ChatCompletionRequestMessage, ChatCompletionUserMessageContent,
 };
+use tokio::sync::OnceCell;
 
 use crate::{
     AppState as MainAppState,
     responses::{
-        db::Database,
+        db::{Database, DatabaseError},
         models::{ResponseReply, ResponseRequest, Session},
     },
     server::RoutingPolicy,
 };
 
-pub struct AppState {
-    pub db: Database,
+#[derive(Debug)]
+enum ResponseError {
+    InvalidInput(String),
+    SessionNotFound(String),
+    DatabaseError(String),
+    ChatBackendError(String),
+}
+
+impl ResponseError {
+    fn to_http_error(&self) -> (StatusCode, String) {
+        match self {
+            Self::InvalidInput(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            Self::SessionNotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            Self::DatabaseError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            Self::ChatBackendError(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
+        }
+    }
+}
+
+impl From<ResponseError> for (StatusCode, String) {
+    fn from(error: ResponseError) -> Self {
+        error.to_http_error()
+    }
+}
+
+impl From<DatabaseError> for ResponseError {
+    fn from(error: DatabaseError) -> Self {
+        match error {
+            DatabaseError::SessionNotFound { id } => {
+                ResponseError::SessionNotFound(format!("Session not found: {id}"))
+            }
+            DatabaseError::Sqlx(e) => ResponseError::DatabaseError(format!("Database error: {e}")),
+            DatabaseError::Serialization(e) => {
+                ResponseError::DatabaseError(format!("Data serialization error: {e}"))
+            }
+            DatabaseError::InvalidSessionData => {
+                ResponseError::DatabaseError("Invalid session data".to_string())
+            }
+        }
+    }
+}
+
+pub struct ResponsesAppState {
+    db: OnceCell<Arc<Database>>,
+    db_path: String,
     pub main_state: Arc<MainAppState>,
 }
 
+impl ResponsesAppState {
+    pub fn new(db_path: String, main_state: Arc<MainAppState>) -> Self {
+        Self {
+            db: OnceCell::new(),
+            db_path,
+            main_state,
+        }
+    }
+
+    async fn get_or_create_db(&self) -> Result<Arc<Database>, DatabaseError> {
+        let db = self
+            .db
+            .get_or_try_init(|| async { Database::new(&self.db_path).await.map(Arc::new) })
+            .await?;
+
+        Ok(Arc::clone(db))
+    }
+}
+
 pub async fn responses_handler(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<ResponsesAppState>>,
     Json(req): Json<ResponseRequest>,
 ) -> Result<Json<ResponseReply>, (StatusCode, String)> {
-    let model = req.model.clone();
+    match responses_handler_impl(state, req).await {
+        Ok(response) => Ok(response),
+        Err(error) => Err(error.into()),
+    }
+}
 
+async fn responses_handler_impl(
+    state: Arc<ResponsesAppState>,
+    req: ResponseRequest,
+) -> Result<Json<ResponseReply>, ResponseError> {
+    if req.model.trim().is_empty() {
+        return Err(ResponseError::InvalidInput(
+            "Model name cannot be empty".to_string(),
+        ));
+    }
+    if req.input.trim().is_empty() {
+        return Err(ResponseError::InvalidInput(
+            "Input message cannot be empty".to_string(),
+        ));
+    }
+
+    let model = req.model.clone();
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
 
+    let db = state.get_or_create_db().await?;
+
     let mut session = if let Some(prev_id) = &req.previous_response_id {
-        match state.db.find_session_by_response_id(prev_id) {
-            Ok(Some(existing_session)) => existing_session,
-            Ok(None) => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("Previous response ID not found: {prev_id}"),
-                ));
-            }
-            Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {e}"),
-                ));
+        match db.find_session_by_response_id(prev_id).await? {
+            Some(existing_session) => existing_session,
+            None => {
+                return Err(ResponseError::SessionNotFound(format!(
+                    "Previous response ID not found: {prev_id}"
+                )));
             }
         }
     } else {
@@ -89,15 +167,9 @@ pub async fn responses_handler(
         ..Default::default()
     };
 
-    let chat_result = match call_chat_backend(&state.main_state, chat_request).await {
-        Ok(result) => result,
-        Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Chat backend error: {e}"),
-            ));
-        }
-    };
+    let chat_result = call_chat_backend(&state.main_state, chat_request)
+        .await
+        .map_err(|e| ResponseError::ChatBackendError(format!("Chat backend failed: {e}")))?;
 
     let output_tokens = estimate_tokens(&chat_result);
     session.add_message(
@@ -110,12 +182,7 @@ pub async fn responses_handler(
 
     let final_result = chat_result;
 
-    if let Err(e) = state.db.save_session(&session) {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to save session: {e}"),
-        ));
-    }
+    db.save_session(&session).await?;
 
     let response = ResponseReply::new(
         response_id,
@@ -218,5 +285,36 @@ mod tests {
         let json_value = response.0;
         assert_eq!(json_value["status"], "ok");
         assert_eq!(json_value["service"], "responses-api");
+    }
+
+    #[test]
+    fn test_response_error_to_http_error() {
+        let invalid_input = ResponseError::InvalidInput("Invalid request".to_string());
+        let (status, msg) = invalid_input.to_http_error();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(msg, "Invalid request");
+
+        let session_not_found = ResponseError::SessionNotFound("Session missing".to_string());
+        let (status, msg) = session_not_found.to_http_error();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(msg, "Session missing");
+
+        let database_error = ResponseError::DatabaseError("DB connection failed".to_string());
+        let (status, msg) = database_error.to_http_error();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(msg, "DB connection failed");
+
+        let backend_error = ResponseError::ChatBackendError("Backend unavailable".to_string());
+        let (status, msg) = backend_error.to_http_error();
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(msg, "Backend unavailable");
+    }
+
+    #[test]
+    fn test_response_error_from_conversion() {
+        let error = ResponseError::InvalidInput("Bad data".to_string());
+        let (status, msg): (StatusCode, String) = error.into();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(msg, "Bad data");
     }
 }
