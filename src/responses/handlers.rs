@@ -88,30 +88,35 @@ async fn responses_handler_impl(
     req: ResponseRequest,
 ) -> Result<Json<ResponseReply>, ResponseError> {
     if req.model.trim().is_empty() {
-        return Err(ResponseError::InvalidInput("Model name cannot be empty".to_string()));
+        return Err(ResponseError::InvalidInput(
+            "Model name cannot be empty".to_string(),
+        ));
     }
     if req.input.trim().is_empty() {
-        return Err(ResponseError::InvalidInput("Input message cannot be empty".to_string()));
+        return Err(ResponseError::InvalidInput(
+            "Input message cannot be empty".to_string(),
+        ));
     }
 
     let model = req.model.clone();
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
 
-    let db = state.get_or_create_db().await
-        .map_err(|e| ResponseError::DatabaseError(format!("Database initialization failed: {e}")))?;
+    let db = state.get_or_create_db().await.map_err(|e| {
+        ResponseError::DatabaseError(format!("Database initialization failed: {e}"))
+    })?;
 
     let mut session = if let Some(prev_id) = &req.previous_response_id {
         match db.find_session_by_response_id(prev_id).await {
             Ok(Some(existing_session)) => existing_session,
             Ok(None) => {
-                return Err(ResponseError::SessionNotFound(
-                    format!("Previous response ID not found: {prev_id}")
-                ));
+                return Err(ResponseError::SessionNotFound(format!(
+                    "Previous response ID not found: {prev_id}"
+                )));
             }
             Err(e) => {
-                return Err(ResponseError::DatabaseError(
-                    format!("Failed to lookup session: {e}")
-                ));
+                return Err(ResponseError::DatabaseError(format!(
+                    "Failed to lookup session: {e}"
+                )));
             }
         }
     } else {
@@ -160,7 +165,8 @@ async fn responses_handler_impl(
         ..Default::default()
     };
 
-    let chat_result = call_chat_backend(&state.main_state, chat_request).await
+    let chat_result = call_chat_backend(&state.main_state, chat_request)
+        .await
         .map_err(|e| ResponseError::ChatBackendError(format!("Chat backend failed: {e}")))?;
 
     let output_tokens = estimate_tokens(&chat_result);
@@ -174,7 +180,8 @@ async fn responses_handler_impl(
 
     let final_result = chat_result;
 
-    db.save_session(&session).await
+    db.save_session(&session)
+        .await
         .map_err(|e| ResponseError::DatabaseError(format!("Failed to save session: {e}")))?;
 
     let response = ResponseReply::new(
