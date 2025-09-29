@@ -4,9 +4,11 @@ use axum::{extract::State, http::StatusCode, response::Json};
 use endpoints::chat::{
     ChatCompletionRequest, ChatCompletionRequestMessage, ChatCompletionUserMessageContent,
 };
+use tokio::sync::OnceCell;
 
 use crate::{
     AppState as MainAppState,
+    error::ServerError,
     responses::{
         db::Database,
         models::{ResponseReply, ResponseRequest, Session},
@@ -14,21 +16,58 @@ use crate::{
     server::RoutingPolicy,
 };
 
-pub struct AppState {
-    pub db: Database,
+pub struct ResponsesAppState {
+    db: OnceCell<Arc<Database>>,
+    db_path: String,
     pub main_state: Arc<MainAppState>,
 }
 
+impl ResponsesAppState {
+    pub fn new(db_path: String, main_state: Arc<MainAppState>) -> Self {
+        Self {
+            db: OnceCell::new(),
+            db_path,
+            main_state,
+        }
+    }
+
+    async fn get_or_create_db(&self) -> Result<Arc<Database>, ServerError> {
+        let db = self
+            .db
+            .get_or_try_init(|| async {
+                Database::new(&self.db_path)
+                    .await
+                    .map(Arc::new)
+                    .map_err(|e| {
+                        ServerError::Operation(format!("Failed to initialize database: {e}"))
+                    })
+            })
+            .await?;
+
+        Ok(Arc::clone(db))
+    }
+}
+
 pub async fn responses_handler(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<ResponsesAppState>>,
     Json(req): Json<ResponseRequest>,
 ) -> Result<Json<ResponseReply>, (StatusCode, String)> {
     let model = req.model.clone();
 
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
 
+    let db = match state.get_or_create_db().await {
+        Ok(db) => db,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database initialization error: {e}"),
+            ));
+        }
+    };
+
     let mut session = if let Some(prev_id) = &req.previous_response_id {
-        match state.db.find_session_by_response_id(prev_id).await {
+        match db.find_session_by_response_id(prev_id).await {
             Ok(Some(existing_session)) => existing_session,
             Ok(None) => {
                 return Err((
@@ -110,7 +149,7 @@ pub async fn responses_handler(
 
     let final_result = chat_result;
 
-    if let Err(e) = state.db.save_session(&session).await {
+    if let Err(e) = db.save_session(&session).await {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to save session: {e}"),
