@@ -107,6 +107,8 @@ async fn responses_handler_impl(
         ));
     }
 
+    let mut warnings = validate_request(&req)?;
+
     let model = req.model.clone();
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
 
@@ -122,7 +124,7 @@ async fn responses_handler_impl(
             }
         }
     } else {
-        Session::new(response_id.clone(), model.clone(), req.instructions)
+        Session::new(response_id.clone(), model.clone(), req.instructions.clone())
     };
 
     let user_tokens = estimate_tokens(&req.input);
@@ -159,13 +161,41 @@ async fn responses_handler_impl(
         }
     }
 
-    let chat_request = ChatCompletionRequest {
+    let mut chat_request = ChatCompletionRequest {
         model: Some(model.clone()),
         messages,
-        user: Some("responses-api".to_string()),
+        user: req
+            .user
+            .clone()
+            .or_else(|| Some("responses-api".to_string())),
         stream: Some(false),
         ..Default::default()
     };
+
+    if let Some(temp) = req.temperature {
+        chat_request.temperature = Some(temp.into());
+    }
+    if let Some(top_p) = req.top_p {
+        chat_request.top_p = Some(top_p.into());
+    }
+    if let Some(max_tokens) = req.max_output_tokens {
+        chat_request.max_completion_tokens = Some(max_tokens as i32);
+    }
+
+    if let Some(user_tools) = &req.tools
+        && !user_tools.is_empty()
+    {
+        let mcp_tool_names: Vec<String> = Vec::new();
+        let tool_warnings = check_tool_conflicts(&req, &mcp_tool_names)?;
+        warnings.extend(tool_warnings);
+
+        warnings
+            .push("User-supplied tools are not yet fully integrated with chat backend".to_string());
+    }
+
+    if let Some(_tool_choice) = &req.tool_choice {
+        warnings.push("Tool choice specification not yet fully supported".to_string());
+    }
 
     let chat_result = call_chat_backend(&state.main_state, chat_request)
         .await
@@ -182,9 +212,27 @@ async fn responses_handler_impl(
 
     let final_result = chat_result;
 
+    let mut extended_data = serde_json::json!({});
+    if let Some(metadata) = &req.metadata {
+        extended_data["metadata"] =
+            serde_json::to_value(metadata).unwrap_or(serde_json::Value::Null);
+    }
+    if let Some(attachments) = &req.attachments {
+        extended_data["attachments"] =
+            serde_json::to_value(attachments).unwrap_or(serde_json::Value::Null);
+    }
+    if let Some(tool_resources) = &req.tool_resources {
+        extended_data["tool_resources"] =
+            serde_json::to_value(tool_resources).unwrap_or(serde_json::Value::Null);
+    }
+
+    if !extended_data.as_object().unwrap().is_empty() {
+        session.extended_data = Some(extended_data);
+    }
+
     db.save_session(&session).await?;
 
-    let response = ResponseReply::new(
+    let mut response = ResponseReply::new(
         response_id,
         model,
         final_result,
@@ -193,11 +241,105 @@ async fn responses_handler_impl(
         req.previous_response_id,
     );
 
+    response.metadata = req.metadata.clone();
+    response.instructions = req.instructions.clone();
+    response.modalities = req.modalities.clone();
+    response.response_format = req.response_format.clone();
+
+    if !warnings.is_empty() {
+        response.warnings = Some(warnings);
+    }
+
     Ok(Json(response))
 }
 
 fn estimate_tokens(text: &str) -> i32 {
     (text.len() as f32 / 4.0).ceil() as i32
+}
+
+fn validate_request(req: &ResponseRequest) -> Result<Vec<String>, ResponseError> {
+    let mut warnings = Vec::new();
+
+    if let Some(temp) = req.temperature
+        && !(0.0..=2.0).contains(&temp)
+    {
+        return Err(ResponseError::InvalidInput(
+            "Temperature must be between 0.0 and 2.0".to_string(),
+        ));
+    }
+
+    if let Some(top_p) = req.top_p
+        && !(0.0..=1.0).contains(&top_p)
+    {
+        return Err(ResponseError::InvalidInput(
+            "top_p must be between 0.0 and 1.0".to_string(),
+        ));
+    }
+
+    if let Some(max_tokens) = req.max_output_tokens
+        && max_tokens == 0
+    {
+        return Err(ResponseError::InvalidInput(
+            "max_output_tokens must be positive".to_string(),
+        ));
+    }
+
+    if req.stream == Some(true) {
+        return Err(ResponseError::InvalidInput(
+            "Streaming not yet implemented".to_string(),
+        ));
+    }
+
+    if req.modalities.is_some() {
+        warnings.push("Multiple modalities not yet fully supported".to_string());
+    }
+
+    if req.reasoning.is_some() {
+        warnings.push("Reasoning enhancements not yet supported by backend".to_string());
+    }
+
+    if req.response_format.is_some() {
+        warnings.push("Custom response formats not yet fully supported".to_string());
+    }
+
+    if req.tool_resources.is_some() {
+        warnings.push("Tool resources not yet fully supported".to_string());
+    }
+
+    if req.attachments.is_some() {
+        warnings.push("Attachments not yet fully supported".to_string());
+    }
+
+    Ok(warnings)
+}
+
+fn check_tool_conflicts(
+    req: &ResponseRequest,
+    mcp_tool_names: &[String],
+) -> Result<Vec<String>, ResponseError> {
+    let mut warnings = Vec::new();
+
+    if let Some(user_tools) = &req.tools {
+        for tool in user_tools {
+            if let Some(function) = &tool.function
+                && mcp_tool_names.contains(&function.name)
+            {
+                return Err(ResponseError::InvalidInput(format!(
+                    "Tool name '{}' conflicts with existing MCP tool",
+                    function.name
+                )));
+            }
+        }
+
+        if !user_tools.is_empty() {
+            warnings.push(format!(
+                "User-supplied tools ({}) will be appended after MCP tools",
+                user_tools.len()
+            ));
+        }
+    }
+
+    Ok(warnings)
 }
 
 async fn call_chat_backend(
@@ -316,5 +458,185 @@ mod tests {
         let (status, msg): (StatusCode, String) = error.into();
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(msg, "Bad data");
+    }
+
+    #[test]
+    fn test_validate_request_temperature_range() {
+        use crate::responses::models::ResponseRequest;
+
+        let mut req = ResponseRequest {
+            model: "test_model".to_string(),
+            input: "test input".to_string(),
+            instructions: None,
+            previous_response_id: None,
+            modalities: None,
+            response_format: None,
+            reasoning: None,
+            temperature: Some(1.5),
+            top_p: None,
+            max_output_tokens: None,
+            stream: None,
+            include: None,
+            tools: None,
+            tool_choice: None,
+            tool_resources: None,
+            attachments: None,
+            metadata: None,
+            user: None,
+        };
+
+        let result = validate_request(&req);
+        assert!(result.is_ok());
+
+        req.temperature = Some(2.5);
+        let result = validate_request(&req);
+        assert!(result.is_err());
+
+        req.temperature = Some(-0.1);
+        let result = validate_request(&req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_request_top_p_range() {
+        use crate::responses::models::ResponseRequest;
+
+        let mut req = ResponseRequest {
+            model: "test_model".to_string(),
+            input: "test input".to_string(),
+            instructions: None,
+            previous_response_id: None,
+            modalities: None,
+            response_format: None,
+            reasoning: None,
+            temperature: None,
+            top_p: Some(0.95),
+            max_output_tokens: None,
+            stream: None,
+            include: None,
+            tools: None,
+            tool_choice: None,
+            tool_resources: None,
+            attachments: None,
+            metadata: None,
+            user: None,
+        };
+
+        let result = validate_request(&req);
+        assert!(result.is_ok());
+
+        req.top_p = Some(1.1);
+        let result = validate_request(&req);
+        assert!(result.is_err());
+
+        req.top_p = Some(-0.1);
+        let result = validate_request(&req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_request_max_output_tokens() {
+        use crate::responses::models::ResponseRequest;
+
+        let mut req = ResponseRequest {
+            model: "test_model".to_string(),
+            input: "test input".to_string(),
+            instructions: None,
+            previous_response_id: None,
+            modalities: None,
+            response_format: None,
+            reasoning: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: Some(100),
+            stream: None,
+            include: None,
+            tools: None,
+            tool_choice: None,
+            tool_resources: None,
+            attachments: None,
+            metadata: None,
+            user: None,
+        };
+
+        let result = validate_request(&req);
+        assert!(result.is_ok());
+
+        req.max_output_tokens = Some(0);
+        let result = validate_request(&req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_request_streaming_not_implemented() {
+        use crate::responses::models::ResponseRequest;
+
+        let req = ResponseRequest {
+            model: "test_model".to_string(),
+            input: "test input".to_string(),
+            instructions: None,
+            previous_response_id: None,
+            modalities: None,
+            response_format: None,
+            reasoning: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: None,
+            stream: Some(true),
+            include: None,
+            tools: None,
+            tool_choice: None,
+            tool_resources: None,
+            attachments: None,
+            metadata: None,
+            user: None,
+        };
+
+        let result = validate_request(&req);
+        assert!(result.is_err());
+        match result {
+            Err(ResponseError::InvalidInput(msg)) => {
+                assert!(msg.contains("Streaming not yet implemented"));
+            }
+            _ => panic!("Expected InvalidInput error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_request_warnings() {
+        use std::collections::HashMap;
+
+        use crate::responses::models::{ReasoningSettings, ResponseRequest};
+
+        let req = ResponseRequest {
+            model: "test_model".to_string(),
+            input: "test input".to_string(),
+            instructions: None,
+            previous_response_id: None,
+            modalities: Some(vec!["text".to_string(), "audio".to_string()]),
+            response_format: None,
+            reasoning: Some(ReasoningSettings {
+                effort: "medium".to_string(),
+                extra: HashMap::new(),
+            }),
+            temperature: None,
+            top_p: None,
+            max_output_tokens: None,
+            stream: None,
+            include: None,
+            tools: None,
+            tool_choice: None,
+            tool_resources: None,
+            attachments: None,
+            metadata: None,
+            user: None,
+        };
+
+        let result = validate_request(&req);
+        assert!(result.is_ok());
+        let warnings = result.unwrap();
+        assert!(!warnings.is_empty());
+        assert!(warnings.iter().any(|w| w.contains("modalities")));
+        assert!(warnings.iter().any(|w| w.contains("Reasoning")));
     }
 }
