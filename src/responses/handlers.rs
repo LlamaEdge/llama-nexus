@@ -291,11 +291,15 @@ fn validate_request(req: &ResponseRequest) -> Result<Vec<String>, ResponseError>
     }
 
     if req.modalities.is_some() {
-        warnings.push("Multiple modalities not yet fully supported".to_string());
+        warnings.push(
+            "`modalities` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
+        );
     }
 
     if req.reasoning.is_some() {
-        warnings.push("Reasoning enhancements not yet supported by backend".to_string());
+        warnings.push(
+            "`reasoning` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
+        );
     }
 
     if req.response_format.is_some() {
@@ -303,11 +307,27 @@ fn validate_request(req: &ResponseRequest) -> Result<Vec<String>, ResponseError>
     }
 
     if req.tool_resources.is_some() {
-        warnings.push("Tool resources not yet fully supported".to_string());
+        warnings.push(
+            "`tool_resources` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
+        );
     }
 
     if req.attachments.is_some() {
-        warnings.push("Attachments not yet fully supported".to_string());
+        warnings.push(
+            "`attachments` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
+        );
+    }
+
+    if req.metadata.is_some() {
+        warnings.push(
+            "`metadata` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
+        );
+    }
+
+    if req.include.is_some() {
+        warnings.push(
+            "`include` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
+        );
     }
 
     Ok(warnings)
