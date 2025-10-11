@@ -179,7 +179,10 @@ async fn responses_handler_impl(
         chat_request.top_p = Some(top_p.into());
     }
     if let Some(max_tokens) = req.max_output_tokens {
-        chat_request.max_completion_tokens = Some(max_tokens as i32);
+        chat_request.max_completion_tokens = Some(max_tokens.try_into().unwrap_or_else(|_| {
+            warnings.push("max_output_tokens exceeds i32::MAX, clamping to maximum".to_string());
+            i32::MAX
+        }));
     }
 
     if let Some(user_tools) = &req.tools
