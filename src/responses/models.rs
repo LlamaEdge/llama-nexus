@@ -287,7 +287,7 @@ pub struct Session {
     pub model_used: String,
     pub messages: HashMap<String, SessionMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub extended_data: Option<serde_json::Value>,
+    pub extended_data: Option<serde_json::Value>, // extra request data (metadata, attachments, tool resources)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
