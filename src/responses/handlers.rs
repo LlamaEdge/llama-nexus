@@ -185,10 +185,31 @@ async fn responses_handler_impl(
         }));
     }
 
+    let mcp_tool_names: Vec<String> = {
+        let config_guard = state.main_state.config.read().await;
+        config_guard
+            .mcp
+            .as_ref()
+            .map(|mcp| {
+                mcp.server
+                    .tool_servers
+                    .iter()
+                    .flat_map(|server| {
+                        server
+                            .tools
+                            .as_ref()
+                            .into_iter()
+                            .flatten()
+                            .map(|tool| tool.name.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
     if let Some(user_tools) = &req.tools
         && !user_tools.is_empty()
     {
-        let mcp_tool_names: Vec<String> = Vec::new();
         let tool_warnings = check_tool_conflicts(&req, &mcp_tool_names)?;
         warnings.extend(tool_warnings);
 
