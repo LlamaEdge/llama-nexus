@@ -132,11 +132,9 @@ async fn responses_handler_impl(
         )
     };
 
-    if let Some(text) = user_text {
-        if !text.trim().is_empty() {
-            let user_tokens = estimate_tokens(&text);
-            session.add_message("user".to_string(), text, user_tokens, None, None);
-        }
+    if let Some(text) = user_text.filter(|value| !value.trim().is_empty()) {
+        let user_tokens = estimate_tokens(&text);
+        session.add_message("user".to_string(), text, user_tokens, None, None);
     }
 
     if let Some(assistant_text) = extract_assistant_text(&response) {
@@ -371,28 +369,31 @@ fn validate_request(req: &ResponseRequest) -> Result<Vec<String>, ResponseError>
         }
     }
 
-    if let Some(temp) = inner.temperature {
-        if !(0.0..=2.0).contains(&temp) {
-            return Err(ResponseError::InvalidInput(
-                "Temperature must be between 0.0 and 2.0".to_string(),
-            ));
-        }
+    if inner
+        .temperature
+        .is_some_and(|temp| !(0.0..=2.0).contains(&temp))
+    {
+        return Err(ResponseError::InvalidInput(
+            "Temperature must be between 0.0 and 2.0".to_string(),
+        ));
     }
 
-    if let Some(top_p) = inner.top_p {
-        if !(0.0..=1.0).contains(&top_p) {
-            return Err(ResponseError::InvalidInput(
-                "top_p must be between 0.0 and 1.0".to_string(),
-            ));
-        }
+    if inner
+        .top_p
+        .is_some_and(|top_p| !(0.0..=1.0).contains(&top_p))
+    {
+        return Err(ResponseError::InvalidInput(
+            "top_p must be between 0.0 and 1.0".to_string(),
+        ));
     }
 
-    if let Some(max_tokens) = inner.max_output_tokens {
-        if max_tokens <= 0 {
-            return Err(ResponseError::InvalidInput(
-                "max_output_tokens must be positive".to_string(),
-            ));
-        }
+    if inner
+        .max_output_tokens
+        .is_some_and(|max_tokens| max_tokens <= 0)
+    {
+        return Err(ResponseError::InvalidInput(
+            "max_output_tokens must be positive".to_string(),
+        ));
     }
 
     if inner.stream == Some(true) {
