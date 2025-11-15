@@ -335,7 +335,7 @@ fn apply_warnings(response: &mut ResponseReply, warnings: &mut Vec<String>) {
         return;
     }
 
-    let merged = warnings.drain(..).collect::<Vec<_>>().join(" | ");
+    let merged = std::mem::take(warnings).join(" | ");
     let key = "llama_nexus_warnings".to_string();
 
     if let Some(existing) = response.metadata.get_mut(&key) {
