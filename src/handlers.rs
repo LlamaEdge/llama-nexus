@@ -1214,6 +1214,19 @@ pub(crate) async fn list_user_conversations_handler(
 }
 
 // update the model list
+pub(crate) fn build_api_url(base: &str, endpoint: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    let mut url = String::from(trimmed);
+    if !trimmed.ends_with("/v1") {
+        url.push_str("/v1");
+    }
+    if !endpoint.is_empty() {
+        url.push('/');
+        url.push_str(endpoint.trim_start_matches('/'));
+    }
+    url
+}
+
 pub(crate) async fn update_model_list(
     State(state): State<Arc<AppState>>,
     headers: &HeaderMap,
@@ -1225,7 +1238,7 @@ pub(crate) async fn update_model_list(
     let server_id = &server.id;
 
     // get the models from the downstream server
-    let list_models_url = format!("{server_url}/models");
+    let list_models_url = build_api_url(server_url, "models");
     dual_debug!("list_models_url: {}", list_models_url);
     let response = if let Some(api_key) = &server.api_key
         && !api_key.is_empty()
