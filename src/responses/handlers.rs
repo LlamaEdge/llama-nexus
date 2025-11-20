@@ -138,11 +138,10 @@ async fn responses_handler_impl(
     }
 
     if let Some(assistant_text) = extract_assistant_text(&response) {
-        let output_tokens = tokens_to_i32(response.usage.output_tokens);
         session.add_message(
             "assistant".to_string(),
             assistant_text,
-            output_tokens,
+            response.usage.output_tokens,
             None,
             Some(response_id.clone()),
         );
@@ -320,12 +319,8 @@ fn extract_assistant_text(response: &ResponseReply) -> Option<String> {
     None
 }
 
-fn tokens_to_i32(value: u64) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
-}
-
-fn estimate_tokens(text: &str) -> i32 {
-    (text.len() as f32 / 4.0).ceil() as i32
+fn estimate_tokens(text: &str) -> u64 {
+    (text.len() as f32 / 4.0).ceil() as u64
 }
 
 fn apply_warnings(response: &mut ResponseReply, warnings: &mut Vec<String>) {
@@ -546,6 +541,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::responses::models::{ReasoningSettings, ResponseFormat};
 
     fn base_request() -> ResponseRequest {
         ResponseRequest {
@@ -581,12 +577,12 @@ mod tests {
 
     #[test]
     fn test_estimate_tokens() {
-        assert_eq!(estimate_tokens(""), 0);
-        assert_eq!(estimate_tokens("a"), 1);
-        assert_eq!(estimate_tokens("test"), 1);
-        assert_eq!(estimate_tokens("hello"), 2);
-        assert_eq!(estimate_tokens("This is a test message"), 6);
-        assert_eq!(estimate_tokens("Hello, world!"), 4);
+        assert_eq!(estimate_tokens(""), 0_u64);
+        assert_eq!(estimate_tokens("a"), 1_u64);
+        assert_eq!(estimate_tokens("test"), 1_u64);
+        assert_eq!(estimate_tokens("hello"), 2_u64);
+        assert_eq!(estimate_tokens("This is a test message"), 6_u64);
+        assert_eq!(estimate_tokens("Hello, world!"), 4_u64);
     }
 
     #[test]
@@ -689,7 +685,7 @@ mod tests {
         req.modalities = Some(vec!["text".to_string()]);
         req.response_format = Some(ResponseFormat::JsonObject);
         req.reasoning = Some(ReasoningSettings {
-            effort: "medium".to_string(),
+            effort: crate::responses::models::ReasoningEffort::Medium,
             extra: HashMap::new(),
         });
         req.user = Some("demo-user".to_string());

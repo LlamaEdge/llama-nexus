@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -26,9 +25,17 @@ pub struct JsonSchemaDefinition {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReasoningSettings {
-    pub effort: String,
+    pub effort: ReasoningEffort,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,7 +111,7 @@ pub struct Session {
     pub response_id: String,
     pub created: i64,
     pub model_used: String,
-    pub messages: HashMap<String, SessionMessage>,
+    pub messages: Vec<SessionMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extended_data: Option<serde_json::Value>,
 }
@@ -113,7 +120,7 @@ pub struct Session {
 pub struct SessionMessage {
     pub role: String,
     pub content: String,
-    pub tokens: i32,
+    pub tokens: u64,
     pub created_at: i64,
     pub response_time: Option<i64>,
     pub response_id: Option<String>,
@@ -131,20 +138,17 @@ pub struct SessionRow {
 impl Session {
     pub fn new(response_id: String, model: String, instructions: Option<String>) -> Self {
         let now = chrono::Utc::now().timestamp();
-        let mut messages = HashMap::new();
+        let mut messages = Vec::new();
 
         if let Some(inst) = instructions {
-            messages.insert(
-                "0".to_string(),
-                SessionMessage {
-                    role: "system".to_string(),
-                    content: inst,
-                    tokens: 0,
-                    created_at: now,
-                    response_time: None,
-                    response_id: None,
-                },
-            );
+            messages.push(SessionMessage {
+                role: "system".to_string(),
+                content: inst,
+                tokens: 0,
+                created_at: now,
+                response_time: None,
+                response_id: None,
+            });
         }
 
         Session {
@@ -160,43 +164,35 @@ impl Session {
         &mut self,
         role: String,
         content: String,
-        tokens: i32,
+        tokens: u64,
         response_time: Option<i64>,
         response_id: Option<String>,
     ) {
         let now = chrono::Utc::now().timestamp();
-        let index = self.messages.len().to_string();
-
-        self.messages.insert(
-            index,
-            SessionMessage {
-                role,
-                content,
-                tokens,
-                created_at: now,
-                response_time,
-                response_id,
-            },
-        );
+        self.messages.push(SessionMessage {
+            role,
+            content,
+            tokens,
+            created_at: now,
+            response_time,
+            response_id,
+        });
     }
 
     #[allow(dead_code)]
     pub fn get_conversation_history(&self) -> Vec<(String, String)> {
         let mut history = Vec::new();
 
-        for i in 0..self.messages.len() {
-            let key = i.to_string();
-            if let Some(msg) = self.messages.get(&key) {
-                history.push((msg.role.clone(), msg.content.clone()));
-            }
+        for msg in &self.messages {
+            history.push((msg.role.clone(), msg.content.clone()));
         }
 
         history
     }
 
     #[allow(dead_code)]
-    pub fn total_tokens(&self) -> i32 {
-        self.messages.values().map(|msg| msg.tokens).sum()
+    pub fn total_tokens(&self) -> u64 {
+        self.messages.iter().map(|msg| msg.tokens).sum()
     }
 }
 
@@ -211,7 +207,7 @@ mod tests {
         session.add_message("user".to_string(), "Hello!".to_string(), 5, None, None);
 
         assert_eq!(session.messages.len(), 1);
-        let message = session.messages.get("0").unwrap();
+        let message = &session.messages[0];
         assert_eq!(message.role, "user");
         assert_eq!(message.content, "Hello!");
         assert_eq!(message.tokens, 5);
@@ -226,7 +222,7 @@ mod tests {
         );
 
         assert_eq!(session.messages.len(), 2);
-        let assistant_msg = session.messages.get("1").unwrap();
+        let assistant_msg = &session.messages[1];
         assert_eq!(assistant_msg.role, "assistant");
         assert_eq!(assistant_msg.content, "Hi there!");
         assert_eq!(assistant_msg.tokens, 10);
