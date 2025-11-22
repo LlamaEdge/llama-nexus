@@ -259,39 +259,32 @@ fn extract_user_text(req: &ResponseRequest) -> Option<String> {
                 Some(text.clone())
             }
         }
-        Input::InputItemList(items) => {
-            let mut last_user: Option<String> = None;
-
-            for item in items {
-                if let InputItem::InputMessage { content, role, .. } = item {
-                    if role != "user" {
-                        continue;
+        Input::InputItemList(items) => items.iter().rev().find_map(|item| {
+            if let InputItem::InputMessage { content, role, .. } = item
+                && role == "user"
+            {
+                match content {
+                    InputMessageContent::Text(text) => {
+                        if !text.trim().is_empty() {
+                            return Some(text.clone());
+                        }
                     }
-
-                    match content {
-                        InputMessageContent::Text(text) => {
-                            if !text.trim().is_empty() {
-                                last_user = Some(text.clone());
+                    InputMessageContent::InputItemContentList(parts) => {
+                        let mut buffer = String::new();
+                        for part in parts {
+                            if let ResponseItemInputMessageContent::Text { text, .. } = part {
+                                buffer.push_str(text);
                             }
                         }
-                        InputMessageContent::InputItemContentList(parts) => {
-                            let mut buffer = String::new();
-                            for part in parts {
-                                if let ResponseItemInputMessageContent::Text { text, .. } = part {
-                                    buffer.push_str(text);
-                                }
-                            }
 
-                            if !buffer.trim().is_empty() {
-                                last_user = Some(buffer);
-                            }
+                        if !buffer.trim().is_empty() {
+                            return Some(buffer);
                         }
                     }
                 }
             }
-
-            last_user
-        }
+            None
+        }),
     }
 }
 
