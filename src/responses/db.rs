@@ -101,7 +101,7 @@ impl Database {
             let session_data: String = row.get(0);
             let session: Session = serde_json::from_str(&session_data)?;
 
-            for message in session.messages.values() {
+            for message in &session.messages {
                 if let Some(msg_response_id) = &message.response_id
                     && msg_response_id == response_id
                 {
@@ -240,8 +240,8 @@ mod tests {
         assert_eq!(retrieved.created, original_session.created);
         assert_eq!(retrieved.messages.len(), original_session.messages.len());
 
-        let original_msg = original_session.messages.get("2").unwrap();
-        let retrieved_msg = retrieved.messages.get("2").unwrap();
+        let original_msg = original_session.messages.get(2).unwrap();
+        let retrieved_msg = retrieved.messages.get(2).unwrap();
         assert_eq!(retrieved_msg.role, original_msg.role);
         assert_eq!(retrieved_msg.content, original_msg.content);
         assert_eq!(retrieved_msg.tokens, original_msg.tokens);

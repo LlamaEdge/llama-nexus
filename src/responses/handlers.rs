@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::Json};
-use endpoints::chat::{
-    ChatCompletionRequest, ChatCompletionRequestMessage, ChatCompletionUserMessageContent,
-};
 use tokio::sync::OnceCell;
 
 use crate::{
     AppState as MainAppState,
     responses::{
         db::{Database, DatabaseError},
-        models::{ResponseReply, ResponseRequest, Session},
+        models::{
+            Input, InputItem, InputMessageContent, ResponseItemInputMessageContent,
+            ResponseOutputItem, ResponseOutputItemOutputMessageContent, ResponseReply,
+            ResponseRequest, Session, ToolChoice,
+        },
     },
     server::RoutingPolicy,
 };
@@ -20,7 +21,7 @@ enum ResponseError {
     InvalidInput(String),
     SessionNotFound(String),
     DatabaseError(String),
-    ChatBackendError(String),
+    BackendError(String),
 }
 
 impl ResponseError {
@@ -29,7 +30,7 @@ impl ResponseError {
             Self::InvalidInput(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             Self::SessionNotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             Self::DatabaseError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-            Self::ChatBackendError(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
+            Self::BackendError(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
         }
     }
 }
@@ -96,27 +97,13 @@ async fn responses_handler_impl(
     state: Arc<ResponsesAppState>,
     req: ResponseRequest,
 ) -> Result<Json<ResponseReply>, ResponseError> {
-    if req.model.trim().is_empty() {
-        return Err(ResponseError::InvalidInput(
-            "Model name cannot be empty".to_string(),
-        ));
-    }
-    if req.input.trim().is_empty() {
-        return Err(ResponseError::InvalidInput(
-            "Input message cannot be empty".to_string(),
-        ));
-    }
-
     let mut warnings = validate_request(&req)?;
-
-    let model = req.model.clone();
-    let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
 
     let db = state.get_or_create_db().await?;
 
-    let mut session = if let Some(prev_id) = &req.previous_response_id {
+    let existing_session = if let Some(prev_id) = req.upstream().previous_response_id.as_ref() {
         match db.find_session_by_response_id(prev_id).await? {
-            Some(existing_session) => existing_session,
+            Some(session) => Some(session),
             None => {
                 return Err(ResponseError::SessionNotFound(format!(
                     "Previous response ID not found: {prev_id}"
@@ -124,318 +111,415 @@ async fn responses_handler_impl(
             }
         }
     } else {
-        Session::new(response_id.clone(), model.clone(), req.instructions.clone())
+        None
     };
 
-    let user_tokens = estimate_tokens(&req.input);
-    session.add_message(
-        "user".to_string(),
-        req.input.clone(),
-        user_tokens,
-        None,
-        None,
-    );
+    let user_text = extract_user_text(&req);
 
-    let conversation = session.get_conversation_history();
+    let mut response = call_responses_backend(&state.main_state, &req).await?;
 
-    let mut messages = Vec::new();
-    for (role, content) in conversation {
-        match role.as_str() {
-            "system" => {
-                let system_msg = ChatCompletionRequestMessage::new_system_message(content, None);
-                messages.push(system_msg);
-            }
-            "user" => {
-                let user_msg = ChatCompletionRequestMessage::new_user_message(
-                    ChatCompletionUserMessageContent::Text(content),
-                    None,
-                );
-                messages.push(user_msg);
-            }
-            "assistant" => {
-                let assistant_msg =
-                    ChatCompletionRequestMessage::new_assistant_message(Some(content), None, None);
-                messages.push(assistant_msg);
-            }
-            _ => {}
-        }
-    }
+    let response_id = response.id.clone();
+    let model_used = response.model.clone();
 
-    let mut chat_request = ChatCompletionRequest {
-        model: Some(model.clone()),
-        messages,
-        user: req
-            .user
-            .clone()
-            .or_else(|| Some("responses-api".to_string())),
-        stream: Some(false),
-        ..Default::default()
+    let mut session = if let Some(mut session) = existing_session {
+        session.model_used = model_used.clone();
+        session
+    } else {
+        Session::new(
+            response_id.clone(),
+            model_used.clone(),
+            req.upstream().instructions.clone(),
+        )
     };
 
-    if let Some(temp) = req.temperature {
-        chat_request.temperature = Some(temp.into());
-    }
-    if let Some(top_p) = req.top_p {
-        chat_request.top_p = Some(top_p.into());
-    }
-    if let Some(max_tokens) = req.max_output_tokens {
-        chat_request.max_completion_tokens = Some(max_tokens.try_into().unwrap_or_else(|_| {
-            warnings.push("max_output_tokens exceeds i32::MAX, clamping to maximum".to_string());
-            i32::MAX
-        }));
+    if let Some(text) = user_text.filter(|value| !value.trim().is_empty()) {
+        let user_tokens = estimate_tokens(&text);
+        session.add_message("user".to_string(), text, user_tokens, None, None);
     }
 
-    let mcp_tool_names: Vec<String> = {
-        let config_guard = state.main_state.config.read().await;
-        config_guard
-            .mcp
-            .as_ref()
-            .map(|mcp| {
-                mcp.server
-                    .tool_servers
-                    .iter()
-                    .flat_map(|server| {
-                        server
-                            .tools
-                            .as_ref()
-                            .into_iter()
-                            .flatten()
-                            .map(|tool| tool.name.to_string())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-
-    if let Some(user_tools) = &req.tools
-        && !user_tools.is_empty()
-    {
-        let tool_warnings = check_tool_conflicts(&req, &mcp_tool_names)?;
-        warnings.extend(tool_warnings);
-
-        warnings
-            .push("User-supplied tools are not yet fully integrated with chat backend".to_string());
+    if let Some(assistant_text) = extract_assistant_text(&response) {
+        session.add_message(
+            "assistant".to_string(),
+            assistant_text,
+            response.usage.output_tokens,
+            None,
+            Some(response_id.clone()),
+        );
     }
 
-    if let Some(_tool_choice) = &req.tool_choice {
-        warnings.push("Tool choice specification not yet fully supported".to_string());
-    }
-
-    let chat_result = call_chat_backend(&state.main_state, chat_request)
-        .await
-        .map_err(|e| ResponseError::ChatBackendError(format!("Chat backend failed: {e}")))?;
-
-    let output_tokens = estimate_tokens(&chat_result);
-    session.add_message(
-        "assistant".to_string(),
-        chat_result.clone(),
-        output_tokens,
-        None,
-        Some(response_id.clone()),
-    );
-
-    let final_result = chat_result;
-
-    let mut extended_data = serde_json::json!({});
-    if let Some(metadata) = &req.metadata {
-        extended_data["metadata"] =
-            serde_json::to_value(metadata).unwrap_or(serde_json::Value::Null);
-    }
-    if let Some(attachments) = &req.attachments {
-        extended_data["attachments"] =
-            serde_json::to_value(attachments).unwrap_or(serde_json::Value::Null);
-    }
-    if let Some(tool_resources) = &req.tool_resources {
-        extended_data["tool_resources"] =
-            serde_json::to_value(tool_resources).unwrap_or(serde_json::Value::Null);
-    }
-
-    if !extended_data.as_object().unwrap().is_empty() {
-        session.extended_data = Some(extended_data);
-    }
+    update_session_extended_data(&mut session, &req);
 
     db.save_session(&session).await?;
 
-    let mut response = ResponseReply::new(
-        response_id,
-        model,
-        final_result,
-        user_tokens,
-        output_tokens,
-        req.previous_response_id,
-    );
-
-    response.metadata = req.metadata.clone();
-    response.instructions = req.instructions.clone();
-    response.modalities = req.modalities.clone();
-    response.response_format = req.response_format.clone();
-
-    if !warnings.is_empty() {
-        response.warnings = Some(warnings);
-    }
+    apply_warnings(&mut response, &mut warnings);
 
     Ok(Json(response))
 }
 
-fn estimate_tokens(text: &str) -> i32 {
-    (text.len() as f32 / 4.0).ceil() as i32
+fn update_session_extended_data(session: &mut Session, req: &ResponseRequest) {
+    let inner = req.upstream();
+
+    let mut extended = session
+        .extended_data
+        .take()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    if let Some(metadata) = &inner.metadata {
+        extended.insert(
+            "metadata".to_string(),
+            serde_json::to_value(metadata).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(include) = &inner.include {
+        extended.insert(
+            "include".to_string(),
+            serde_json::to_value(include).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(conversation) = &inner.conversation {
+        extended.insert(
+            "conversation".to_string(),
+            serde_json::to_value(conversation).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(tools) = &inner.tools {
+        extended.insert(
+            "tools".to_string(),
+            serde_json::to_value(tools).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if !matches!(inner.tool_choice, ToolChoice::None) {
+        extended.insert(
+            "tool_choice".to_string(),
+            serde_json::to_value(&inner.tool_choice).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if inner.max_tool_calls.is_some() {
+        extended.insert(
+            "max_tool_calls".to_string(),
+            serde_json::to_value(inner.max_tool_calls).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if inner.parallel_tool_calls.is_some() {
+        extended.insert(
+            "parallel_tool_calls".to_string(),
+            serde_json::to_value(inner.parallel_tool_calls).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(modalities) = &req.modalities {
+        extended.insert(
+            "modalities".to_string(),
+            serde_json::to_value(modalities).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(response_format) = &req.response_format {
+        extended.insert(
+            "response_format".to_string(),
+            serde_json::to_value(response_format).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(reasoning) = &req.reasoning {
+        extended.insert(
+            "reasoning".to_string(),
+            serde_json::to_value(reasoning).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(tool_resources) = &req.tool_resources {
+        extended.insert(
+            "tool_resources".to_string(),
+            serde_json::to_value(tool_resources).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(attachments) = &req.attachments {
+        extended.insert(
+            "attachments".to_string(),
+            serde_json::to_value(attachments).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(user) = &req.user {
+        extended.insert("user".to_string(), serde_json::Value::String(user.clone()));
+    }
+
+    session.extended_data = if extended.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(extended))
+    };
+}
+
+fn extract_user_text(req: &ResponseRequest) -> Option<String> {
+    let input = req.upstream().input.as_ref()?;
+
+    match input {
+        Input::Text(text) => {
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text.clone())
+            }
+        }
+        Input::InputItemList(items) => items.iter().rev().find_map(|item| {
+            if let InputItem::InputMessage { content, role, .. } = item
+                && role == "user"
+            {
+                match content {
+                    InputMessageContent::Text(text) => {
+                        if !text.trim().is_empty() {
+                            return Some(text.clone());
+                        }
+                    }
+                    InputMessageContent::InputItemContentList(parts) => {
+                        let mut buffer = String::new();
+                        for part in parts {
+                            if let ResponseItemInputMessageContent::Text { text, .. } = part {
+                                buffer.push_str(text);
+                            }
+                        }
+
+                        if !buffer.trim().is_empty() {
+                            return Some(buffer);
+                        }
+                    }
+                }
+            }
+            None
+        }),
+    }
+}
+
+fn extract_assistant_text(response: &ResponseReply) -> Option<String> {
+    for item in &response.output {
+        if let ResponseOutputItem::OutputMessage { content, .. } = item {
+            let mut buffer = String::new();
+            for element in content {
+                match element {
+                    ResponseOutputItemOutputMessageContent::OutputText { text, .. } => {
+                        buffer.push_str(text)
+                    }
+                    ResponseOutputItemOutputMessageContent::Refusal { refusal, .. } => {
+                        buffer.push_str(refusal)
+                    }
+                }
+            }
+
+            if !buffer.is_empty() {
+                return Some(buffer);
+            }
+        }
+    }
+
+    None
+}
+
+fn estimate_tokens(text: &str) -> u64 {
+    (text.len() as f32 / 4.0).ceil() as u64
+}
+
+fn apply_warnings(response: &mut ResponseReply, warnings: &mut Vec<String>) {
+    if warnings.is_empty() {
+        return;
+    }
+
+    let merged = std::mem::take(warnings).join(" | ");
+    let key = "llama_nexus_warnings".to_string();
+
+    if let Some(existing) = response.metadata.get_mut(&key) {
+        if !existing.is_empty() {
+            existing.push_str(" | ");
+        }
+        existing.push_str(&merged);
+    } else {
+        response.metadata.insert(key, merged);
+    }
 }
 
 fn validate_request(req: &ResponseRequest) -> Result<Vec<String>, ResponseError> {
     let mut warnings = Vec::new();
+    let inner = req.upstream();
 
-    if let Some(temp) = req.temperature
-        && !(0.0..=2.0).contains(&temp)
+    let model = inner
+        .model
+        .as_ref()
+        .ok_or_else(|| ResponseError::InvalidInput("Model name cannot be empty".to_string()))?;
+    if model.trim().is_empty() {
+        return Err(ResponseError::InvalidInput(
+            "Model name cannot be empty".to_string(),
+        ));
+    }
+
+    match extract_user_text(req) {
+        Some(input) if !input.trim().is_empty() => {}
+        _ => {
+            return Err(ResponseError::InvalidInput(
+                "Input message cannot be empty".to_string(),
+            ));
+        }
+    }
+
+    if inner
+        .temperature
+        .is_some_and(|temp| !(0.0..=2.0).contains(&temp))
     {
         return Err(ResponseError::InvalidInput(
             "Temperature must be between 0.0 and 2.0".to_string(),
         ));
     }
 
-    if let Some(top_p) = req.top_p
-        && !(0.0..=1.0).contains(&top_p)
+    if inner
+        .top_p
+        .is_some_and(|top_p| !(0.0..=1.0).contains(&top_p))
     {
         return Err(ResponseError::InvalidInput(
             "top_p must be between 0.0 and 1.0".to_string(),
         ));
     }
 
-    if let Some(max_tokens) = req.max_output_tokens
-        && max_tokens == 0
+    if inner
+        .max_output_tokens
+        .is_some_and(|max_tokens| max_tokens <= 0)
     {
         return Err(ResponseError::InvalidInput(
             "max_output_tokens must be positive".to_string(),
         ));
     }
 
-    if req.stream == Some(true) {
+    if inner.stream == Some(true) {
         return Err(ResponseError::InvalidInput(
             "Streaming not yet implemented".to_string(),
         ));
     }
 
-    if req.modalities.is_some() {
+    if inner
+        .include
+        .as_ref()
+        .is_some_and(|items| !items.is_empty())
+    {
         warnings.push(
-            "`modalities` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
+            "`include` ignored: llama-api-server currently returns core text fields only"
+                .to_string(),
         );
     }
 
-    if req.reasoning.is_some() {
+    if inner.tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
+        warnings
+            .push("`tools` ignored: tool calling is not enabled for text responses".to_string());
+    }
+
+    if !matches!(inner.tool_choice, ToolChoice::None) {
         warnings.push(
-            "`reasoning` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
+            "`tool_choice` ignored: tool calling is not enabled for text responses".to_string(),
+        );
+    }
+
+    if inner.max_tool_calls.is_some() {
+        warnings.push(
+            "`max_tool_calls` ignored: tool calling is not enabled for text responses".to_string(),
+        );
+    }
+
+    if inner.parallel_tool_calls.is_some() {
+        warnings.push(
+            "`parallel_tool_calls` ignored: tool calling is not enabled for text responses"
+                .to_string(),
+        );
+    }
+
+    if inner.background == Some(true) {
+        warnings.push("`background` ignored: asynchronous responses are not supported".to_string());
+    }
+
+    if inner.conversation.is_some() {
+        warnings.push(
+            "`conversation` object ignored: llama-nexus manages sessions locally".to_string(),
+        );
+    }
+
+    if req
+        .modalities
+        .as_ref()
+        .is_some_and(|items| !items.is_empty())
+    {
+        warnings.push(
+            "`modalities` ignored: llama-api-server currently supports text responses only"
+                .to_string(),
         );
     }
 
     if req.response_format.is_some() {
-        warnings.push("Custom response formats not yet fully supported".to_string());
+        warnings
+            .push("`response_format` ignored: structured outputs not yet supported".to_string());
+    }
+
+    if req.reasoning.is_some() {
+        warnings.push("`reasoning` ignored: reasoning traces not yet supported".to_string());
     }
 
     if req.tool_resources.is_some() {
         warnings.push(
-            "`tool_resources` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
+            "`tool_resources` ignored: tool calling is not enabled for text responses".to_string(),
         );
     }
 
-    if req.attachments.is_some() {
+    if req
+        .attachments
+        .as_ref()
+        .is_some_and(|items| !items.is_empty())
+    {
         warnings.push(
-            "`attachments` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
+            "`attachments` ignored: llama-api-server currently supports text inputs only"
+                .to_string(),
         );
     }
 
-    if req.metadata.is_some() {
-        warnings.push(
-            "`metadata` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
-        );
-    }
-
-    if req.include.is_some() {
-        warnings.push(
-            "`include` ignored: current backend only exposes `/chat/completions`; full Responses support will enable this field.".to_string(),
-        );
+    if req.user.is_some() {
+        warnings
+            .push("`user` ignored: responses backend does not accept user identifiers".to_string());
     }
 
     Ok(warnings)
 }
 
-fn check_tool_conflicts(
-    req: &ResponseRequest,
-    mcp_tool_names: &[String],
-) -> Result<Vec<String>, ResponseError> {
-    let mut warnings = Vec::new();
-
-    if let Some(user_tools) = &req.tools {
-        for tool in user_tools {
-            if let Some(function) = &tool.function
-                && mcp_tool_names.contains(&function.name)
-            {
-                return Err(ResponseError::InvalidInput(format!(
-                    "Tool name '{}' conflicts with existing MCP tool",
-                    function.name
-                )));
-            }
-        }
-
-        if !user_tools.is_empty() {
-            warnings.push(format!(
-                "User-supplied tools ({}) will be appended after MCP tools",
-                user_tools.len()
-            ));
-        }
-    }
-
-    Ok(warnings)
-}
-
-async fn call_chat_backend(
+async fn call_responses_backend(
     main_state: &Arc<MainAppState>,
-    request: ChatCompletionRequest,
-) -> Result<String, String> {
+    request: &ResponseRequest,
+) -> Result<ResponseReply, ResponseError> {
     let servers = main_state.server_group.read().await;
-    let chat_servers = match servers.get(&crate::server::ServerKind::chat) {
-        Some(servers) => servers,
-        None => return Err("No chat server available".to_string()),
-    };
+    let chat_servers = servers
+        .get(&crate::server::ServerKind::chat)
+        .ok_or_else(|| ResponseError::BackendError("No chat server available".to_string()))?;
 
-    let target_server = match chat_servers.next().await {
-        Ok(server) => server,
-        Err(e) => return Err(format!("Failed to get chat server: {e}")),
-    };
+    let target_server = chat_servers
+        .next()
+        .await
+        .map_err(|e| ResponseError::BackendError(format!("Failed to get chat server: {e}")))?;
 
-    let url = format!(
-        "{}/chat/completions",
-        target_server.url.trim_end_matches('/')
-    );
+    let url = crate::handlers::build_api_url(&target_server.url, "responses");
 
     let client = reqwest::Client::new();
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .json(&request)
+        .json(request.upstream())
         .send()
         .await
-        .map_err(|e| format!("Request failed: {e}"))?;
+        .map_err(|e| ResponseError::BackendError(format!("Request failed: {e}")))?;
 
     if !response.status().is_success() {
-        let error_text = response
+        let status = response.status();
+        let body = response
             .text()
             .await
             .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(format!("Chat API Error: {error_text}"));
+        return Err(ResponseError::BackendError(format!(
+            "Responses API error ({status}): {body}"
+        )));
     }
 
-    let chat_response: endpoints::chat::ChatCompletionObject = response
-        .json()
+    response
+        .json::<ResponseReply>()
         .await
-        .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-    let text = chat_response
-        .choices
-        .first()
-        .and_then(|choice| choice.message.content.as_ref())
-        .map(|content| content.to_string())
-        .unwrap_or_else(|| "No response content".to_string());
-
-    Ok(text)
+        .map_err(|e| ResponseError::BackendError(format!("Failed to parse response: {e}")))
 }
 
 pub async fn health_handler() -> Json<serde_json::Value> {
@@ -447,20 +531,51 @@ pub async fn health_handler() -> Json<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+    use crate::responses::models::{ReasoningSettings, ResponseFormat};
+
+    fn base_request() -> ResponseRequest {
+        ResponseRequest {
+            inner: endpoints::responses::response_object::RequestOfModelResponse {
+                background: None,
+                conversation: None,
+                include: None,
+                input: Some(Input::Text("test input".to_string())),
+                instructions: None,
+                max_output_tokens: None,
+                max_tool_calls: None,
+                metadata: None,
+                model: Some("test_model".to_string()),
+                parallel_tool_calls: None,
+                previous_response_id: None,
+                safety_identifier: None,
+                store: None,
+                stream: None,
+                temperature: None,
+                tool_choice: ToolChoice::None,
+                tools: None,
+                top_p: None,
+                truncation: None,
+            },
+            modalities: None,
+            response_format: None,
+            reasoning: None,
+            tool_resources: None,
+            attachments: None,
+            user: None,
+        }
+    }
 
     #[test]
     fn test_estimate_tokens() {
-        assert_eq!(estimate_tokens(""), 0);
-
-        assert_eq!(estimate_tokens("a"), 1);
-
-        assert_eq!(estimate_tokens("test"), 1);
-        assert_eq!(estimate_tokens("hello"), 2);
-
-        assert_eq!(estimate_tokens("This is a test message"), 6);
-
-        assert_eq!(estimate_tokens("Hello, world!"), 4);
+        assert_eq!(estimate_tokens(""), 0_u64);
+        assert_eq!(estimate_tokens("a"), 1_u64);
+        assert_eq!(estimate_tokens("test"), 1_u64);
+        assert_eq!(estimate_tokens("hello"), 2_u64);
+        assert_eq!(estimate_tokens("This is a test message"), 6_u64);
+        assert_eq!(estimate_tokens("Hello, world!"), 4_u64);
     }
 
     #[test]
@@ -490,7 +605,7 @@ mod tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(msg, "DB connection failed");
 
-        let backend_error = ResponseError::ChatBackendError("Backend unavailable".to_string());
+        let backend_error = ResponseError::BackendError("Backend unavailable".to_string());
         let (status, msg) = backend_error.to_http_error();
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(msg, "Backend unavailable");
@@ -506,138 +621,46 @@ mod tests {
 
     #[test]
     fn test_validate_request_temperature_range() {
-        use crate::responses::models::ResponseRequest;
-
-        let mut req = ResponseRequest {
-            model: "test_model".to_string(),
-            input: "test input".to_string(),
-            instructions: None,
-            previous_response_id: None,
-            modalities: None,
-            response_format: None,
-            reasoning: None,
-            temperature: Some(1.5),
-            top_p: None,
-            max_output_tokens: None,
-            stream: None,
-            include: None,
-            tools: None,
-            tool_choice: None,
-            tool_resources: None,
-            attachments: None,
-            metadata: None,
-            user: None,
-        };
-
+        let mut req = base_request();
+        req.inner.temperature = Some(1.5);
         let result = validate_request(&req);
         assert!(result.is_ok());
 
-        req.temperature = Some(2.5);
-        let result = validate_request(&req);
-        assert!(result.is_err());
-
-        req.temperature = Some(-0.1);
+        req.inner.temperature = Some(2.5);
         let result = validate_request(&req);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_request_top_p_range() {
-        use crate::responses::models::ResponseRequest;
-
-        let mut req = ResponseRequest {
-            model: "test_model".to_string(),
-            input: "test input".to_string(),
-            instructions: None,
-            previous_response_id: None,
-            modalities: None,
-            response_format: None,
-            reasoning: None,
-            temperature: None,
-            top_p: Some(0.95),
-            max_output_tokens: None,
-            stream: None,
-            include: None,
-            tools: None,
-            tool_choice: None,
-            tool_resources: None,
-            attachments: None,
-            metadata: None,
-            user: None,
-        };
-
+        let mut req = base_request();
+        req.inner.top_p = Some(0.9);
         let result = validate_request(&req);
         assert!(result.is_ok());
 
-        req.top_p = Some(1.1);
-        let result = validate_request(&req);
-        assert!(result.is_err());
+        req.inner.top_p = Some(1.1);
+        assert!(validate_request(&req).is_err());
 
-        req.top_p = Some(-0.1);
-        let result = validate_request(&req);
-        assert!(result.is_err());
+        req.inner.top_p = Some(-0.1);
+        assert!(validate_request(&req).is_err());
     }
 
     #[test]
     fn test_validate_request_max_output_tokens() {
-        use crate::responses::models::ResponseRequest;
+        let mut req = base_request();
+        req.inner.max_output_tokens = Some(100);
+        assert!(validate_request(&req).is_ok());
 
-        let mut req = ResponseRequest {
-            model: "test_model".to_string(),
-            input: "test input".to_string(),
-            instructions: None,
-            previous_response_id: None,
-            modalities: None,
-            response_format: None,
-            reasoning: None,
-            temperature: None,
-            top_p: None,
-            max_output_tokens: Some(100),
-            stream: None,
-            include: None,
-            tools: None,
-            tool_choice: None,
-            tool_resources: None,
-            attachments: None,
-            metadata: None,
-            user: None,
-        };
-
-        let result = validate_request(&req);
-        assert!(result.is_ok());
-
-        req.max_output_tokens = Some(0);
-        let result = validate_request(&req);
-        assert!(result.is_err());
+        req.inner.max_output_tokens = Some(0);
+        assert!(validate_request(&req).is_err());
     }
 
     #[test]
     fn test_validate_request_streaming_not_implemented() {
-        use crate::responses::models::ResponseRequest;
-
-        let req = ResponseRequest {
-            model: "test_model".to_string(),
-            input: "test input".to_string(),
-            instructions: None,
-            previous_response_id: None,
-            modalities: None,
-            response_format: None,
-            reasoning: None,
-            temperature: None,
-            top_p: None,
-            max_output_tokens: None,
-            stream: Some(true),
-            include: None,
-            tools: None,
-            tool_choice: None,
-            tool_resources: None,
-            attachments: None,
-            metadata: None,
-            user: None,
-        };
+        let mut req = base_request();
+        req.inner.stream = Some(true);
 
         let result = validate_request(&req);
-        assert!(result.is_err());
         match result {
             Err(ResponseError::InvalidInput(msg)) => {
                 assert!(msg.contains("Streaming not yet implemented"));
@@ -648,39 +671,24 @@ mod tests {
 
     #[test]
     fn test_validate_request_warnings() {
-        use std::collections::HashMap;
+        let mut req = base_request();
+        req.inner.include = Some(vec!["message.output_text.logprobs".to_string()]);
+        req.inner.tool_choice = ToolChoice::Auto;
+        req.inner.parallel_tool_calls = Some(false);
+        req.modalities = Some(vec!["text".to_string()]);
+        req.response_format = Some(ResponseFormat::JsonObject);
+        req.reasoning = Some(ReasoningSettings {
+            effort: crate::responses::models::ReasoningEffort::Medium,
+            extra: HashMap::new(),
+        });
+        req.user = Some("demo-user".to_string());
 
-        use crate::responses::models::{ReasoningSettings, ResponseRequest};
-
-        let req = ResponseRequest {
-            model: "test_model".to_string(),
-            input: "test input".to_string(),
-            instructions: None,
-            previous_response_id: None,
-            modalities: Some(vec!["text".to_string(), "audio".to_string()]),
-            response_format: None,
-            reasoning: Some(ReasoningSettings {
-                effort: "medium".to_string(),
-                extra: HashMap::new(),
-            }),
-            temperature: None,
-            top_p: None,
-            max_output_tokens: None,
-            stream: None,
-            include: None,
-            tools: None,
-            tool_choice: None,
-            tool_resources: None,
-            attachments: None,
-            metadata: None,
-            user: None,
-        };
-
-        let result = validate_request(&req);
-        assert!(result.is_ok());
-        let warnings = result.unwrap();
-        assert!(!warnings.is_empty());
+        let warnings = validate_request(&req).unwrap();
+        assert!(warnings.iter().any(|w| w.contains("include")));
+        assert!(warnings.iter().any(|w| w.contains("tool calling")));
         assert!(warnings.iter().any(|w| w.contains("modalities")));
-        assert!(warnings.iter().any(|w| w.contains("Reasoning")));
+        assert!(warnings.iter().any(|w| w.contains("response_format")));
+        assert!(warnings.iter().any(|w| w.contains("reasoning")));
+        assert!(warnings.iter().any(|w| w.contains("user")));
     }
 }
