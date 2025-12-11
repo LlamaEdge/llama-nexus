@@ -2,10 +2,14 @@ use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::Json};
 use tokio::sync::OnceCell;
+use uuid::Uuid;
+
+const INTERPRETER_OUTPUT_LIMIT: usize = 2000;
 
 use crate::{
     AppState as MainAppState,
     responses::{
+        code_interpreter::{CodeInterpreterService, ExecutionResult},
         db::{Database, DatabaseError},
         models::{
             Input, InputItem, InputMessageContent, ResponseItemInputMessageContent,
@@ -62,14 +66,20 @@ pub struct ResponsesAppState {
     db: OnceCell<Arc<Database>>,
     db_path: String,
     pub main_state: Arc<MainAppState>,
+    code_interpreter: Option<Arc<CodeInterpreterService>>,
 }
 
 impl ResponsesAppState {
-    pub fn new(db_path: String, main_state: Arc<MainAppState>) -> Self {
+    pub fn new(
+        db_path: String,
+        main_state: Arc<MainAppState>,
+        code_interpreter: Option<Arc<CodeInterpreterService>>,
+    ) -> Self {
         Self {
             db: OnceCell::new(),
             db_path,
             main_state,
+            code_interpreter,
         }
     }
 
@@ -80,6 +90,10 @@ impl ResponsesAppState {
             .await?;
 
         Ok(Arc::clone(db))
+    }
+
+    fn interpreter(&self) -> Option<Arc<CodeInterpreterService>> {
+        self.code_interpreter.as_ref().map(Arc::clone)
     }
 }
 
@@ -95,30 +109,43 @@ pub async fn responses_handler(
 
 async fn responses_handler_impl(
     state: Arc<ResponsesAppState>,
-    req: ResponseRequest,
+    mut req: ResponseRequest,
 ) -> Result<Json<ResponseReply>, ResponseError> {
+    let client_previous_response_id = req.upstream().previous_response_id.clone();
     let mut warnings = validate_request(&req)?;
 
     let db = state.get_or_create_db().await?;
 
-    let existing_session = if let Some(prev_id) = req.upstream().previous_response_id.as_ref() {
-        match db.find_session_by_response_id(prev_id).await? {
-            Some(session) => Some(session),
-            None => {
-                return Err(ResponseError::SessionNotFound(format!(
-                    "Previous response ID not found: {prev_id}"
-                )));
-            }
-        }
-    } else {
-        None
-    };
+    let mut existing_session = None;
+    let mut normalized_previous_backend_id = None;
+    let mut session_id = None;
 
+    if let Some(prev_id) = client_previous_response_id.clone() {
+        if let Some(session) = db.get_session(&prev_id).await? {
+            normalized_previous_backend_id = session.latest_backend_response_id();
+            session_id = Some(session.session_id.clone());
+            existing_session = Some(session);
+        } else if let Some(session) = db.find_session_by_backend_response_id(&prev_id).await? {
+            normalized_previous_backend_id = Some(prev_id.clone());
+            session_id = Some(session.session_id.clone());
+            existing_session = Some(session);
+        } else {
+            return Err(ResponseError::SessionNotFound(format!(
+                "Previous response ID not found: {prev_id}"
+            )));
+        }
+    }
+
+    req.inner.previous_response_id = normalized_previous_backend_id.clone();
+
+    let session_id = session_id.unwrap_or_else(|| format!("resp_{}", Uuid::new_v4().simple()));
+
+    let interpreter_requested = request_wants_code_interpreter(&req);
     let user_text = extract_user_text(&req);
 
     let mut response = call_responses_backend(&state.main_state, &req).await?;
 
-    let response_id = response.id.clone();
+    let backend_response_id = response.id.clone();
     let model_used = response.model.clone();
 
     let mut session = if let Some(mut session) = existing_session {
@@ -126,7 +153,7 @@ async fn responses_handler_impl(
         session
     } else {
         Session::new(
-            response_id.clone(),
+            session_id.clone(),
             model_used.clone(),
             req.upstream().instructions.clone(),
         )
@@ -137,19 +164,60 @@ async fn responses_handler_impl(
         session.add_message("user".to_string(), text, user_tokens, None, None);
     }
 
-    if let Some(assistant_text) = extract_assistant_text(&response) {
+    let assistant_text = extract_assistant_text(&response);
+    if let Some(ref text) = assistant_text {
         session.add_message(
             "assistant".to_string(),
-            assistant_text,
+            text.clone(),
             response.usage.output_tokens,
             None,
-            Some(response_id.clone()),
+            Some(backend_response_id.clone()),
         );
+    }
+
+    if interpreter_requested {
+        if let Some(service) = state.interpreter() {
+            if let Some(code_block) = assistant_text
+                .as_deref()
+                .and_then(extract_python_code_block)
+            {
+                match service.execute(&session.session_id, &code_block).await {
+                    Ok(result) => {
+                        let summary = format_execution_result(&result);
+                        session.add_message("tool".to_string(), summary.clone(), 0, None, None);
+                        attach_interpreter_output(&mut response, &summary);
+                        response
+                            .metadata
+                            .insert("code_interpreter".to_string(), "executed".to_string());
+                    }
+                    Err(err) => warnings.push(format!("Code interpreter failed: {err}")),
+                }
+            } else if assistant_text.is_some() {
+                warnings.push(
+                    "Code interpreter requested but no Python code block was returned".to_string(),
+                );
+            } else {
+                warnings.push(
+                    "Code interpreter requested but downstream returned no assistant text"
+                        .to_string(),
+                );
+            }
+        } else {
+            warnings.push(
+                "`tool_resources.code_interpreter` requested but interpreter is disabled"
+                    .to_string(),
+            );
+        }
     }
 
     update_session_extended_data(&mut session, &req);
 
     db.save_session(&session).await?;
+
+    response.id = session_id.clone();
+    if client_previous_response_id.is_some() {
+        response.previous_response_id = client_previous_response_id;
+    }
 
     apply_warnings(&mut response, &mut warnings);
 
@@ -334,6 +402,78 @@ fn apply_warnings(response: &mut ResponseReply, warnings: &mut Vec<String>) {
     }
 }
 
+fn request_wants_code_interpreter(req: &ResponseRequest) -> bool {
+    req.tool_resources
+        .as_ref()
+        .and_then(|resources| resources.code_interpreter.as_ref())
+        .is_some()
+}
+
+fn extract_python_code_block(text: &str) -> Option<String> {
+    for marker in ["```python", "```py"] {
+        if let Some(start) = text.find(marker) {
+            let code_start = start + marker.len();
+            if let Some(end) = text[code_start..].find("```") {
+                let snippet = text[code_start..code_start + end].trim();
+                if !snippet.is_empty() {
+                    return Some(snippet.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn attach_interpreter_output(response: &mut ResponseReply, text: &str) {
+    let message_id = format!("msg_tool_{}", Uuid::new_v4().simple());
+    let content = ResponseOutputItemOutputMessageContent::OutputText {
+        annotations: Vec::new(),
+        text: text.to_string(),
+        ty: "output_text".to_string(),
+        logprobs: None,
+    };
+
+    response.output.push(ResponseOutputItem::OutputMessage {
+        content: vec![content],
+        id: message_id,
+        role: "assistant".to_string(),
+        status: "completed".to_string(),
+        ty: "message".to_string(),
+    });
+}
+
+fn format_execution_result(result: &ExecutionResult) -> String {
+    let mut sections = vec![format!("exit_code: {}", result.exit_code)];
+
+    if !result.stdout.trim().is_empty() {
+        sections.push(format!(
+            "stdout:\n{}",
+            truncate_output(result.stdout.trim())
+        ));
+    }
+
+    if !result.stderr.trim().is_empty() {
+        sections.push(format!(
+            "stderr:\n{}",
+            truncate_output(result.stderr.trim())
+        ));
+    }
+
+    sections.join("\n\n")
+}
+
+fn truncate_output(text: &str) -> String {
+    if text.chars().count() <= INTERPRETER_OUTPUT_LIMIT {
+        return text.to_string();
+    }
+
+    text.chars()
+        .take(INTERPRETER_OUTPUT_LIMIT - 1)
+        .collect::<String>()
+        + "…"
+}
+
 fn validate_request(req: &ResponseRequest) -> Result<Vec<String>, ResponseError> {
     let mut warnings = Vec::new();
     let inner = req.upstream();
@@ -455,7 +595,8 @@ fn validate_request(req: &ResponseRequest) -> Result<Vec<String>, ResponseError>
         warnings.push("`reasoning` ignored: reasoning traces not yet supported".to_string());
     }
 
-    if req.tool_resources.is_some() {
+    let code_interpreter_requested = request_wants_code_interpreter(req);
+    if req.tool_resources.is_some() && !code_interpreter_requested {
         warnings.push(
             "`tool_resources` ignored: tool calling is not enabled for text responses".to_string(),
         );
@@ -690,5 +831,28 @@ mod tests {
         assert!(warnings.iter().any(|w| w.contains("response_format")));
         assert!(warnings.iter().any(|w| w.contains("reasoning")));
         assert!(warnings.iter().any(|w| w.contains("user")));
+    }
+
+    #[test]
+    fn test_extract_python_code_block() {
+        let snippet = "Here is code:\n```python\nprint('hello')\n```";
+        assert_eq!(
+            extract_python_code_block(snippet),
+            Some("print('hello')".to_string())
+        );
+        assert!(extract_python_code_block("no code here").is_none());
+    }
+
+    #[test]
+    fn test_format_execution_result() {
+        let result = ExecutionResult {
+            stdout: "1\n2".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
+        let formatted = format_execution_result(&result);
+        assert!(formatted.contains("exit_code: 0"));
+        assert!(formatted.contains("stdout"));
+        assert!(formatted.contains("1"));
     }
 }

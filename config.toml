@@ -35,6 +35,17 @@ summarization_strategy = "Incremental"
 max_stored_messages = 20                         # Trigger summarization when message count reaches this limit
 summarize_threshold = 12                         # Base number for calculating minimum kept messages (kept = threshold/2)
 
+# Optional sandboxed code interpreter for responses API
+[code_interpreter]
+enable = true                                    # Enable/disable Docker-based interpreter
+docker_image = "python:3.11-slim"                # Container image used for execution
+execution_timeout_secs = 20                      # Max seconds a snippet is allowed to run
+memory_limit_mb = 512                            # Memory cap per sandbox (in MB)
+cpu_percent = 50                                 # CPU share limit per sandbox (0-100)
+max_sessions = 4                                 # Maximum simultaneous sandboxes kept alive
+idle_timeout_secs = 300                          # Stop idle sandboxes after this many seconds
+preload_packages = ["numpy", "pandas"]           # Optional packages installed when a sandbox boots
+
 
 # ============================================================================
 # SECTION 2: AI SERVICE CONFIGURATION

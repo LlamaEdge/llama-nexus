@@ -97,6 +97,7 @@ async fn main() -> ServerResult<()> {
 
     // Load the config based on the command
     let config = Config::load(&cli.config).await?;
+    let code_interpreter_config = config.code_interpreter.clone();
 
     // set the health check interval
     HEALTH_CHECK_INTERVAL
@@ -151,6 +152,21 @@ async fn main() -> ServerResult<()> {
     // Initialize application state
     let mut state = AppState::new(config, ServerInfo::default());
 
+    let interpreter = if let Some(ci_config) = code_interpreter_config.filter(|cfg| cfg.enable) {
+        match responses::code_interpreter::CodeInterpreterService::new(ci_config.into()).await {
+            Ok(service) => {
+                dual_info!("Code interpreter enabled");
+                Some(Arc::new(service))
+            }
+            Err(err) => {
+                dual_error!("Failed to initialize code interpreter: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Attach memory system to state
     if let Some(memory_system) = memory {
         state = state.with_memory(memory_system);
@@ -161,7 +177,11 @@ async fn main() -> ServerResult<()> {
     // Initialize responses state with lazy database initialization
     let db_path =
         std::env::var("NEXUS_RESPONSES_DB_PATH").unwrap_or_else(|_| "sessions.db".to_string());
-    let responses_state = Arc::new(responses::ResponsesAppState::new(db_path, state.clone()));
+    let responses_state = Arc::new(responses::ResponsesAppState::new(
+        db_path,
+        state.clone(),
+        interpreter.clone(),
+    ));
 
     // Register servers defined in configuration file
     state.register_config_servers().await?;
