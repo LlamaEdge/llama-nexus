@@ -45,6 +45,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_interpreter: Option<CodeInterpreterConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rag: Option<RagConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_info_push_url: Option<String>,
@@ -96,6 +98,7 @@ impl Default for Config {
             chat: None,
             embedding: None,
             memory: None,
+            code_interpreter: None,
             rag: None,
             server_info_push_url: None,
             server_health_push_url: None,
@@ -234,6 +237,51 @@ impl Default for MemoryConfig {
             summary_service_base_url: "http://localhost:10086/v1".to_string(),
             summary_service_api_key: String::new(),
         }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CodeInterpreterConfig {
+    pub enable: bool,
+    #[serde(default = "CodeInterpreterConfig::default_docker_image")]
+    pub docker_image: String,
+    #[serde(default = "CodeInterpreterConfig::default_timeout")]
+    pub execution_timeout_secs: u64,
+    #[serde(default = "CodeInterpreterConfig::default_memory")]
+    pub memory_limit_mb: u64,
+    #[serde(default = "CodeInterpreterConfig::default_cpu_percent")]
+    pub cpu_percent: u64,
+    #[serde(default = "CodeInterpreterConfig::default_max_sessions")]
+    pub max_sessions: usize,
+    #[serde(default = "CodeInterpreterConfig::default_idle_timeout")]
+    pub idle_timeout_secs: u64,
+    #[serde(default)]
+    pub preload_packages: Vec<String>,
+}
+
+impl CodeInterpreterConfig {
+    fn default_docker_image() -> String {
+        "python:3.11-slim".to_string()
+    }
+
+    const fn default_timeout() -> u64 {
+        20
+    }
+
+    const fn default_memory() -> u64 {
+        512
+    }
+
+    const fn default_cpu_percent() -> u64 {
+        50
+    }
+
+    const fn default_max_sessions() -> usize {
+        4
+    }
+
+    const fn default_idle_timeout() -> u64 {
+        300
     }
 }
 

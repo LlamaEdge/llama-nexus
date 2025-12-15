@@ -109,9 +109,12 @@ pub use endpoints::responses::{
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
-    pub response_id: String,
+    /// Nexus-managed identifier that callers pass back via previous_response_id
+    pub session_id: String,
     pub created: i64,
     pub model_used: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_backend_response_id: Option<String>,
     pub messages: Vec<SessionMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extended_data: Option<serde_json::Value>,
@@ -137,7 +140,7 @@ pub struct SessionRow {
 }
 
 impl Session {
-    pub fn new(response_id: String, model: String, instructions: Option<String>) -> Self {
+    pub fn new(session_id: String, model: String, instructions: Option<String>) -> Self {
         let now = chrono::Utc::now().timestamp();
         let mut messages = Vec::new();
 
@@ -153,9 +156,10 @@ impl Session {
         }
 
         Session {
-            response_id,
+            session_id,
             created: now,
             model_used: model,
+            last_backend_response_id: None,
             messages,
             extended_data: None,
         }
@@ -178,6 +182,10 @@ impl Session {
             response_time,
             response_id,
         });
+
+        if let Some(resp_id) = self.messages.last().and_then(|msg| msg.response_id.clone()) {
+            self.last_backend_response_id = Some(resp_id);
+        }
     }
 
     #[allow(dead_code)]
@@ -194,6 +202,17 @@ impl Session {
     #[allow(dead_code)]
     pub fn total_tokens(&self) -> u64 {
         self.messages.iter().map(|msg| msg.tokens).sum()
+    }
+
+    pub fn latest_backend_response_id(&self) -> Option<String> {
+        if let Some(id) = &self.last_backend_response_id {
+            return Some(id.clone());
+        }
+
+        self.messages
+            .iter()
+            .rev()
+            .find_map(|msg| msg.response_id.clone())
     }
 }
 
@@ -229,6 +248,10 @@ mod tests {
         assert_eq!(assistant_msg.tokens, 10);
         assert_eq!(assistant_msg.response_time, Some(150));
         assert_eq!(assistant_msg.response_id, Some("resp_123".to_string()));
+        assert_eq!(
+            session.last_backend_response_id,
+            Some("resp_123".to_string())
+        );
     }
 
     #[test]
@@ -279,6 +302,21 @@ mod tests {
         assert_eq!(
             history[3],
             ("user".to_string(), "Second message".to_string())
+        );
+
+        assert_eq!(session.latest_backend_response_id(), None);
+
+        session.add_message(
+            "assistant".to_string(),
+            "Final".to_string(),
+            4,
+            None,
+            Some("resp_999".to_string()),
+        );
+
+        assert_eq!(
+            session.latest_backend_response_id(),
+            Some("resp_999".to_string())
         );
     }
 }

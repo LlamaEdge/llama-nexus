@@ -1,3 +1,4 @@
+pub mod code_interpreter;
 pub mod db;
 pub mod handlers;
 pub mod models;

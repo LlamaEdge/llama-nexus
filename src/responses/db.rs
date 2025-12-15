@@ -64,7 +64,7 @@ impl Database {
             "INSERT OR REPLACE INTO sessions (id, session_data, created_at, last_updated)
             VALUES (?, ?, ?, ?)",
         )
-        .bind(&session.response_id)
+        .bind(&session.session_id)
         .bind(&session_json)
         .bind(session.created)
         .bind(now)
@@ -89,7 +89,7 @@ impl Database {
         }
     }
 
-    pub async fn find_session_by_response_id(
+    pub async fn find_session_by_backend_response_id(
         &self,
         response_id: &str,
     ) -> DBResult<Option<Session>> {
@@ -186,7 +186,7 @@ mod tests {
     async fn test_save_and_get_session() {
         let db = create_test_database().await;
         let session = create_test_session();
-        let session_id = session.response_id.clone();
+        let session_id = session.session_id.clone();
 
         let result = db.save_session(&session).await;
         assert!(result.is_ok(), "Saving session should succeed");
@@ -195,7 +195,7 @@ mod tests {
         assert!(retrieved.is_some(), "Should find the saved session");
 
         let retrieved_session = retrieved.unwrap();
-        assert_eq!(retrieved_session.response_id, session.response_id);
+        assert_eq!(retrieved_session.session_id, session.session_id);
         assert_eq!(retrieved_session.model_used, session.model_used);
         assert_eq!(retrieved_session.messages.len(), session.messages.len());
 
@@ -207,20 +207,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_find_session_by_response_id() {
+    async fn test_find_session_by_backend_response_id() {
         let db = create_test_database().await;
         let session = create_test_session();
 
         db.save_session(&session).await.unwrap();
 
-        let found = db.find_session_by_response_id("resp_456").await.unwrap();
+        let found = db
+            .find_session_by_backend_response_id("resp_456")
+            .await
+            .unwrap();
         assert!(
             found.is_some(),
             "Should find session by message response ID"
         );
 
         let found_session = found.unwrap();
-        assert_eq!(found_session.response_id, session.response_id);
+        assert_eq!(found_session.session_id, session.session_id);
     }
 
     #[tokio::test]
@@ -230,12 +233,12 @@ mod tests {
 
         db.save_session(&original_session).await.unwrap();
         let retrieved = db
-            .get_session(&original_session.response_id)
+            .get_session(&original_session.session_id)
             .await
             .unwrap()
             .unwrap();
 
-        assert_eq!(retrieved.response_id, original_session.response_id);
+        assert_eq!(retrieved.session_id, original_session.session_id);
         assert_eq!(retrieved.model_used, original_session.model_used);
         assert_eq!(retrieved.created, original_session.created);
         assert_eq!(retrieved.messages.len(), original_session.messages.len());
@@ -284,11 +287,11 @@ mod tests {
 
                 db_clone.save_session(&session).await.unwrap();
 
-                let retrieved = db_clone.get_session(&session.response_id).await.unwrap();
+                let retrieved = db_clone.get_session(&session.session_id).await.unwrap();
                 assert!(retrieved.is_some());
 
                 let found = db_clone
-                    .find_session_by_response_id(&format!("resp_{}", i))
+                    .find_session_by_backend_response_id(&format!("resp_{}", i))
                     .await
                     .unwrap();
                 assert!(found.is_some());
