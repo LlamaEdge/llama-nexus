@@ -21,7 +21,6 @@ use futures_util::{
     StreamExt,
     stream::{self},
 };
-use regex::Regex;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use rmcp::model::{CallToolRequestParam, RawContent};
 use tokio::select;
@@ -33,6 +32,10 @@ use crate::{
         gen_chat_id,
         trace::{IterationTrace, ReactTrace, TokenUsage, ToolCallTrace, TraceStatus},
         utils::*,
+        xml_parser::{
+            extract_action, extract_final_answer, extract_thought, has_action_tag,
+            has_final_answer_tag, has_thought_tag,
+        },
     },
     dual_debug, dual_error, dual_info, dual_warn,
     error::{ServerError, ServerResult},
@@ -52,10 +55,6 @@ pub(crate) async fn chat(
 
     // Get target server
     let chat_server = get_chat_server(&state, request_id).await?;
-
-    let action_pattern = Regex::new(r"(?s)<action>(.*?)</action>").unwrap();
-    let thought_pattern = Regex::new(r"(?s)<thought>(.*?)</thought>").unwrap();
-    let final_answer_pattern = Regex::new(r"(?s).*<final_answer>(.*?)</final_answer>").unwrap();
 
     // Extract user message for memory storage
     let user_message = extract_user_message(&request);
@@ -275,23 +274,20 @@ pub(crate) async fn chat(
             };
 
             if let Some(content) = chat_completion.choices[0].message.content.as_ref() {
-                // Detect <thought> tags
-                if content.contains("<thought>") {
-                    // get the text between <thought> and </thought>
-                    if let Some(captures) = thought_pattern.captures(content) {
-                        let thought = captures.get(1).unwrap().as_str();
-                        dual_info!("💭 Thought: {}", thought);
-                        iter_trace.thought = Some(thought.to_string());
-                    }
+                // Detect <thought> tags (using flexible parser)
+                if has_thought_tag(content)
+                    && let Some(thought) = extract_thought(content)
+                {
+                    dual_info!("💭 Thought: {}", thought);
+                    iter_trace.thought = Some(thought);
                 }
 
-                // Detect <action> tags
-                if content.contains("<action>") {
-                    match action_pattern.captures(content) {
-                        Some(captures) => {
-                            let action = captures.get(1).unwrap().as_str();
+                // Detect <action> tags (using flexible parser)
+                if has_action_tag(content) {
+                    match extract_action(content) {
+                        Some(action) => {
                             dual_info!("🔧 Action: {}", action);
-                            iter_trace.action = Some(action.to_string());
+                            iter_trace.action = Some(action);
                         }
                         None => {
                             let err_msg = format!(
@@ -303,7 +299,7 @@ pub(crate) async fn chat(
                                 TraceStatus::Error(err_msg.clone()),
                             );
                             dual_info!("React trace: {}", trace.summary());
-                            return Err(ServerError::Operation(err_msg));
+                            return Err(ServerError::MissingXmlTag("action".to_string()));
                         }
                     }
                 }
@@ -769,26 +765,28 @@ pub(crate) async fn chat(
         } else {
             match chat_completion.choices[0].message.content.as_ref() {
                 Some(content) => {
-                    // Detect <thought> tags
-                    if content.contains("<thought>") {
-                        // get the text between <thought> and </thought>
-                        if let Some(captures) = thought_pattern.captures(content) {
-                            let thought = captures.get(1).unwrap().as_str();
-                            dual_info!("💭 Thought: {}", thought);
-                            iter_trace.thought = Some(thought.to_string());
-                        }
+                    // Detect <thought> tags (using flexible parser)
+                    if has_thought_tag(content)
+                        && let Some(thought) = extract_thought(content)
+                    {
+                        dual_info!("💭 Thought: {}", thought);
+                        iter_trace.thought = Some(thought);
                     }
 
-                    // Detect <final_answer> tags
-                    if content.contains("<final_answer>") {
-                        // get the text between <final_answer> and </final_answer>
-                        let final_answer = final_answer_pattern
-                            .captures(content)
-                            .unwrap()
-                            .get(1)
-                            .unwrap()
-                            .as_str()
-                            .to_string(); // Convert to String to avoid borrowing issues
+                    // Detect <final_answer> tags (using flexible parser)
+                    if has_final_answer_tag(content) {
+                        // Extract final answer with flexible parser
+                        let final_answer = match extract_final_answer(content) {
+                            Some(answer) => answer,
+                            None => {
+                                // Fallback: use the entire content if extraction fails
+                                dual_warn!(
+                                    "Failed to extract final_answer content, using raw content - request_id: {}",
+                                    request_id
+                                );
+                                content.clone()
+                            }
+                        };
                         dual_info!("✅ Final answer: {}", final_answer);
 
                         // Finalize iteration and trace
@@ -932,12 +930,11 @@ pub(crate) async fn chat(
                         }
                     }
 
-                    // Detect <action> tags
-                    match action_pattern.captures(content) {
-                        Some(captures) => {
-                            let action = captures.get(1).unwrap().as_str();
+                    // Detect <action> tags (using flexible parser)
+                    match extract_action(content) {
+                        Some(action) => {
                             dual_info!("🔧 Action: {}", action);
-                            iter_trace.action = Some(action.to_string());
+                            iter_trace.action = Some(action);
 
                             // Finalize iteration trace for action without final_answer
                             iter_trace.duration = iter_start.elapsed();

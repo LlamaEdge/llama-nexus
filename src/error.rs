@@ -34,11 +34,9 @@ pub enum ServerError {
         attempts: u32,
         message: String,
     },
-    // Reserved for Task 2.5: XML parsing enhancement
     #[allow(dead_code)]
     #[error("Invalid XML tag format: {0}")]
     InvalidXmlTag(String),
-    #[allow(dead_code)]
     #[error("Missing required XML tag: {0}")]
     MissingXmlTag(String),
 }
