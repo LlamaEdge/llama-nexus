@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::SystemTime};
+use std::{sync::Arc, time::{Duration, Instant, SystemTime}};
 
 use axum::{
     Json,
@@ -128,7 +128,44 @@ pub(crate) async fn chat(
         request.stream = Some(false);
     }
 
+    // React mode iteration and timeout control
+    let (max_iterations, react_timeout_secs) = {
+        let config = state.config.read().await;
+        (config.server.max_react_iterations, config.server.react_timeout_secs)
+    };
+    let react_timeout = Duration::from_secs(react_timeout_secs);
+    let start_time = Instant::now();
+    let mut iteration_count: u32 = 0;
+
     loop {
+        // Check iteration limit
+        iteration_count += 1;
+        if iteration_count > max_iterations {
+            dual_warn!(
+                "React loop exceeded maximum iterations ({}) - request_id: {}",
+                max_iterations,
+                request_id
+            );
+            return Err(ServerError::MaxIterationsExceeded(max_iterations));
+        }
+
+        // Check timeout
+        if start_time.elapsed() > react_timeout {
+            dual_warn!(
+                "React loop timeout after {} seconds - request_id: {}",
+                react_timeout_secs,
+                request_id
+            );
+            return Err(ServerError::ReactTimeout(react_timeout_secs));
+        }
+
+        dual_debug!(
+            "React iteration {}/{} (elapsed: {:?}) - request_id: {}",
+            iteration_count,
+            max_iterations,
+            start_time.elapsed(),
+            request_id
+        );
         // * build request
         let url = format!("{}/chat/completions", chat_server.url.trim_end_matches('/'));
         let mut client = reqwest::Client::new().post(&url);

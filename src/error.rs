@@ -24,6 +24,10 @@ pub enum ServerError {
     McpEmptyContent,
     #[error("Mcp operation failed: {0}")]
     McpOperation(String),
+    #[error("React loop exceeded maximum iterations ({0})")]
+    MaxIterationsExceeded(u32),
+    #[error("React loop timeout after {0} seconds")]
+    ReactTimeout(u64),
 }
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
@@ -71,6 +75,20 @@ impl IntoResponse for ServerError {
                 "internal_error".into(),
                 None,
                 Some("mcp_operation_failed".into()),
+            ),
+            ServerError::MaxIterationsExceeded(max) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("React loop exceeded maximum iterations ({max})"),
+                "internal_error".into(),
+                Some("max_react_iterations".into()),
+                Some("max_iterations_exceeded".into()),
+            ),
+            ServerError::ReactTimeout(secs) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("React loop timeout after {secs} seconds"),
+                "timeout_error".into(),
+                Some("react_timeout_secs".into()),
+                Some("react_timeout".into()),
             ),
         };
 

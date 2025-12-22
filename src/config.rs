@@ -92,6 +92,8 @@ impl Default for Config {
                 host: "127.0.0.1".to_string(),
                 port: 3389,
                 chat_mode: ChatMode::default(),
+                max_react_iterations: default_max_react_iterations(),
+                react_timeout_secs: default_react_timeout_secs(),
             },
             chat: None,
             embedding: None,
@@ -119,6 +121,22 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default)]
     pub chat_mode: ChatMode,
+    /// Maximum number of iterations for React mode loop.
+    /// Prevents infinite loops when the model fails to produce a final answer.
+    #[serde(default = "default_max_react_iterations")]
+    pub max_react_iterations: u32,
+    /// Timeout in seconds for the entire React mode loop.
+    /// Prevents long-running tool calls from blocking indefinitely.
+    #[serde(default = "default_react_timeout_secs")]
+    pub react_timeout_secs: u64,
+}
+
+fn default_max_react_iterations() -> u32 {
+    10 // Default maximum 10 iterations
+}
+
+fn default_react_timeout_secs() -> u64 {
+    300 // Default 5 minutes timeout
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
