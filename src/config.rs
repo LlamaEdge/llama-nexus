@@ -94,6 +94,7 @@ impl Default for Config {
                 chat_mode: ChatMode::default(),
                 max_react_iterations: default_max_react_iterations(),
                 react_timeout_secs: default_react_timeout_secs(),
+                max_tools_per_iteration: default_max_tools_per_iteration(),
             },
             chat: None,
             embedding: None,
@@ -129,6 +130,10 @@ pub struct ServerConfig {
     /// Prevents long-running tool calls from blocking indefinitely.
     #[serde(default = "default_react_timeout_secs")]
     pub react_timeout_secs: u64,
+    /// Maximum number of tool calls allowed per iteration.
+    /// Prevents excessive tool execution in a single loop iteration.
+    #[serde(default = "default_max_tools_per_iteration")]
+    pub max_tools_per_iteration: usize,
 }
 
 fn default_max_react_iterations() -> u32 {
@@ -137,6 +142,10 @@ fn default_max_react_iterations() -> u32 {
 
 fn default_react_timeout_secs() -> u64 {
     300 // Default 5 minutes timeout
+}
+
+fn default_max_tools_per_iteration() -> usize {
+    5 // Default maximum 5 tools per iteration
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
