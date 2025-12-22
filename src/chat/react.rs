@@ -29,7 +29,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     AppState,
-    chat::{gen_chat_id, utils::*},
+    chat::{
+        gen_chat_id,
+        trace::{IterationTrace, ReactTrace, TokenUsage, ToolCallTrace, TraceStatus},
+        utils::*,
+    },
     dual_debug, dual_error, dual_info, dual_warn,
     error::{ServerError, ServerResult},
     mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SEPARATOR, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES},
@@ -144,7 +148,11 @@ pub(crate) async fn chat(
     let start_time = Instant::now();
     let mut iteration_count: u32 = 0;
 
+    // Initialize execution trace
+    let mut trace = ReactTrace::new(request_id.to_string(), conv_id.clone());
+
     loop {
+        let iter_start = Instant::now();
         // Check iteration limit
         iteration_count += 1;
         if iteration_count > max_iterations {
@@ -153,6 +161,8 @@ pub(crate) async fn chat(
                 max_iterations,
                 request_id
             );
+            trace.finalize(start_time.elapsed(), TraceStatus::MaxIterationsExceeded);
+            dual_info!("React trace: {}", trace.summary());
             return Err(ServerError::MaxIterationsExceeded(max_iterations));
         }
 
@@ -163,8 +173,13 @@ pub(crate) async fn chat(
                 react_timeout_secs,
                 request_id
             );
+            trace.finalize(start_time.elapsed(), TraceStatus::Timeout);
+            dual_info!("React trace: {}", trace.summary());
             return Err(ServerError::ReactTimeout(react_timeout_secs));
         }
+
+        // Initialize iteration trace
+        let mut iter_trace = IterationTrace::new(iteration_count);
 
         dual_debug!(
             "React iteration {}/{} (elapsed: {:?}) - request_id: {}",
@@ -233,6 +248,10 @@ pub(crate) async fn chat(
             serde_json::to_string_pretty(&chat_completion).unwrap()
         );
 
+        // Record token usage in iteration trace
+        let usage = &chat_completion.usage;
+        iter_trace.llm_tokens = TokenUsage::new(usage.prompt_tokens, usage.completion_tokens);
+
         // Check if the response requires tool call
         let requires_tool_call = !chat_completion.choices[0].message.tool_calls.is_empty();
         if requires_tool_call {
@@ -250,13 +269,11 @@ pub(crate) async fn chat(
                 // Detect <thought> tags
                 if content.contains("<thought>") {
                     // get the text between <thought> and </thought>
-                    let thought = thought_pattern
-                        .captures(content)
-                        .unwrap()
-                        .get(1)
-                        .unwrap()
-                        .as_str();
-                    dual_info!("💭 Thought: {}", thought);
+                    if let Some(captures) = thought_pattern.captures(content) {
+                        let thought = captures.get(1).unwrap().as_str();
+                        dual_info!("💭 Thought: {}", thought);
+                        iter_trace.thought = Some(thought.to_string());
+                    }
                 }
 
                 // Detect <action> tags
@@ -265,12 +282,18 @@ pub(crate) async fn chat(
                         Some(captures) => {
                             let action = captures.get(1).unwrap().as_str();
                             dual_info!("🔧 Action: {}", action);
+                            iter_trace.action = Some(action.to_string());
                         }
                         None => {
                             let err_msg = format!(
                                 "No <action> tags found in the response. The message content in the response: {content}"
                             );
                             dual_error!("{} - request_id: {}", err_msg, request_id);
+                            trace.finalize(
+                                start_time.elapsed(),
+                                TraceStatus::Error(err_msg.clone()),
+                            );
+                            dual_info!("React trace: {}", trace.summary());
                             return Err(ServerError::Operation(err_msg));
                         }
                     }
@@ -330,6 +353,16 @@ pub(crate) async fn chat(
                         request_id
                     );
 
+                    // Start tool call trace
+                    let tool_call_start = Instant::now();
+                    let tool_args_json: serde_json::Value =
+                        serde_json::from_str(mcp_tool_args).unwrap_or(serde_json::json!({}));
+                    let mut tool_trace = ToolCallTrace::new(
+                        mcp_tool_name.to_string(),
+                        mcp_server_name.to_string(),
+                        tool_args_json,
+                    );
+
                     if let Some(services) = MCP_SERVICES.get() {
                         let service_map = services.read().await;
                         // get the mcp client
@@ -375,6 +408,13 @@ pub(crate) async fn chat(
                                                     "The mcp tool call result: {:#?}",
                                                     text.text
                                                 );
+
+                                                // Record successful tool call
+                                                tool_trace.set_result(
+                                                    text.text.clone(),
+                                                    tool_call_start.elapsed(),
+                                                );
+                                                iter_trace.add_tool_call(tool_trace.clone());
 
                                                 match SEARCH_MCP_SERVER_NAMES
                                                     .contains(&mcp_server_name)
@@ -612,6 +652,12 @@ pub(crate) async fn chat(
                                                     err_msg,
                                                     request_id
                                                 );
+                                                // Record failed tool call
+                                                tool_trace.set_error(
+                                                    err_msg.to_string(),
+                                                    tool_call_start.elapsed(),
+                                                );
+                                                iter_trace.add_tool_call(tool_trace);
                                                 return Err(ServerError::Operation(
                                                     err_msg.to_string(),
                                                 ));
@@ -621,6 +667,12 @@ pub(crate) async fn chat(
                                     false => {
                                         let err_msg = "The mcp tool result is empty";
                                         dual_error!("{} - request_id: {}", err_msg, request_id);
+                                        // Record failed tool call
+                                        tool_trace.set_error(
+                                            err_msg.to_string(),
+                                            tool_call_start.elapsed(),
+                                        );
+                                        iter_trace.add_tool_call(tool_trace);
                                         return Err(ServerError::McpEmptyContent);
                                     }
                                 }
@@ -628,12 +680,18 @@ pub(crate) async fn chat(
                             _ => {
                                 let err_msg = format!("Failed to call the tool: {mcp_tool_name}");
                                 dual_error!("{} - request_id: {}", err_msg, request_id);
+                                // Record failed tool call
+                                tool_trace.set_error(err_msg.clone(), tool_call_start.elapsed());
+                                iter_trace.add_tool_call(tool_trace);
                                 return Err(ServerError::Operation(err_msg));
                             }
                         }
                     } else {
                         let err_msg = "Empty MCP CLIENTS";
                         dual_error!("{} - request_id: {}", err_msg, request_id);
+                        // Record failed tool call (no MCP clients available)
+                        tool_trace.set_error(err_msg.to_string(), tool_call_start.elapsed());
+                        iter_trace.add_tool_call(tool_trace);
                         return Err(ServerError::McpOperation(err_msg.to_string()));
                     }
                 } else {
@@ -646,19 +704,21 @@ pub(crate) async fn chat(
                     continue;
                 }
             } // end of for loop over tool_calls_to_execute
+
+            // Finalize iteration trace and add to main trace
+            iter_trace.duration = iter_start.elapsed();
+            trace.add_iteration(iter_trace);
         } else {
             match chat_completion.choices[0].message.content.as_ref() {
                 Some(content) => {
                     // Detect <thought> tags
                     if content.contains("<thought>") {
                         // get the text between <thought> and </thought>
-                        let thought = thought_pattern
-                            .captures(content)
-                            .unwrap()
-                            .get(1)
-                            .unwrap()
-                            .as_str();
-                        dual_info!("💭 Thought: {}", thought);
+                        if let Some(captures) = thought_pattern.captures(content) {
+                            let thought = captures.get(1).unwrap().as_str();
+                            dual_info!("💭 Thought: {}", thought);
+                            iter_trace.thought = Some(thought.to_string());
+                        }
                     }
 
                     // Detect <final_answer> tags
@@ -672,6 +732,16 @@ pub(crate) async fn chat(
                             .as_str()
                             .to_string(); // Convert to String to avoid borrowing issues
                         dual_info!("✅ Final answer: {}", final_answer);
+
+                        // Finalize iteration and trace
+                        iter_trace.duration = iter_start.elapsed();
+                        trace.add_iteration(iter_trace);
+                        trace.finalize(start_time.elapsed(), TraceStatus::Success);
+                        dual_info!("React trace: {}", trace.summary());
+                        dual_debug!(
+                            "React trace details:\n{}",
+                            serde_json::to_string_pretty(&trace).unwrap_or_default()
+                        );
 
                         // Store assistant message to memory
                         if let (Some(memory), Some(conv_id)) = (&state.memory, &conv_id)
@@ -809,6 +879,11 @@ pub(crate) async fn chat(
                         Some(captures) => {
                             let action = captures.get(1).unwrap().as_str();
                             dual_info!("🔧 Action: {}", action);
+                            iter_trace.action = Some(action.to_string());
+
+                            // Finalize iteration trace for action without final_answer
+                            iter_trace.duration = iter_start.elapsed();
+                            trace.add_iteration(iter_trace);
                         }
                         None => {
                             let warn_msg = format!(
@@ -817,6 +892,16 @@ pub(crate) async fn chat(
                             dual_warn!("{} - request_id: {}", warn_msg, request_id);
 
                             dual_info!("✅ Final answer: {}", content);
+
+                            // Finalize iteration and trace (treating as success with raw content)
+                            iter_trace.duration = iter_start.elapsed();
+                            trace.add_iteration(iter_trace);
+                            trace.finalize(start_time.elapsed(), TraceStatus::Success);
+                            dual_info!("React trace: {}", trace.summary());
+                            dual_debug!(
+                                "React trace details:\n{}",
+                                serde_json::to_string_pretty(&trace).unwrap_or_default()
+                            );
 
                             // Store assistant message to memory
                             if let (Some(memory), Some(conv_id)) = (&state.memory, &conv_id)

@@ -1,5 +1,6 @@
 pub mod normal;
 pub mod react;
+pub mod trace;
 mod utils;
 
 // Generate a unique chat id for the chat completion request
