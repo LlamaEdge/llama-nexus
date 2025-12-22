@@ -28,6 +28,19 @@ pub enum ServerError {
     MaxIterationsExceeded(u32),
     #[error("React loop timeout after {0} seconds")]
     ReactTimeout(u64),
+    #[error("Tool call '{tool_name}' failed after {attempts} retries: {message}")]
+    ToolCallRetryExhausted {
+        tool_name: String,
+        attempts: u32,
+        message: String,
+    },
+    // Reserved for Task 2.5: XML parsing enhancement
+    #[allow(dead_code)]
+    #[error("Invalid XML tag format: {0}")]
+    InvalidXmlTag(String),
+    #[allow(dead_code)]
+    #[error("Missing required XML tag: {0}")]
+    MissingXmlTag(String),
 }
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
@@ -89,6 +102,31 @@ impl IntoResponse for ServerError {
                 "timeout_error".into(),
                 Some("react_timeout_secs".into()),
                 Some("react_timeout".into()),
+            ),
+            ServerError::ToolCallRetryExhausted {
+                tool_name,
+                attempts,
+                message,
+            } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Tool call '{tool_name}' failed after {attempts} retries: {message}"),
+                "internal_error".into(),
+                Some("tool_call".into()),
+                Some("tool_call_retry_exhausted".into()),
+            ),
+            ServerError::InvalidXmlTag(tag) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Invalid XML tag format: {tag}"),
+                "internal_error".into(),
+                Some("xml_tag".into()),
+                Some("invalid_xml_tag".into()),
+            ),
+            ServerError::MissingXmlTag(tag) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Missing required XML tag: {tag}"),
+                "internal_error".into(),
+                Some("xml_tag".into()),
+                Some("missing_xml_tag".into()),
             ),
         };
 

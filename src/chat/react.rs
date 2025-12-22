@@ -136,14 +136,23 @@ pub(crate) async fn chat(
     }
 
     // React mode iteration and timeout control
-    let (max_iterations, react_timeout_secs, max_tools_per_iteration) = {
+    let (
+        max_iterations,
+        react_timeout_secs,
+        max_tools_per_iteration,
+        tool_call_max_retries,
+        tool_call_retry_delay_ms,
+    ) = {
         let config = state.config.read().await;
         (
             config.server.max_react_iterations,
             config.server.react_timeout_secs,
             config.server.max_tools_per_iteration,
+            config.server.tool_call_max_retries,
+            config.server.tool_call_retry_delay_ms,
         )
     };
+    let tool_call_retry_delay = Duration::from_millis(tool_call_retry_delay_ms);
     let react_timeout = Duration::from_secs(react_timeout_secs);
     let start_time = Instant::now();
     let mut iteration_count: u32 = 0;
@@ -377,24 +386,73 @@ pub(crate) async fn chat(
                             }
                         };
 
-                        // call a tool
-                        let request_param = CallToolRequestParam {
-                            name: mcp_tool_name.to_string().into(),
-                            arguments: serde_json::from_str::<
-                                serde_json::Map<String, serde_json::Value>,
-                            >(mcp_tool_args)
-                            .ok(),
+                        // call a tool with retry logic
+                        let mut last_error: Option<String> = None;
+                        let mut tool_result = None;
+
+                        for attempt in 0..=tool_call_max_retries {
+                            if attempt > 0 {
+                                dual_info!(
+                                    "Retrying tool call {} (attempt {}/{}) - request_id: {}",
+                                    mcp_tool_name,
+                                    attempt + 1,
+                                    tool_call_max_retries + 1,
+                                    request_id
+                                );
+                                tokio::time::sleep(tool_call_retry_delay).await;
+                            }
+
+                            let request_param = CallToolRequestParam {
+                                name: mcp_tool_name.to_string().into(),
+                                arguments: serde_json::from_str::<
+                                    serde_json::Map<String, serde_json::Value>,
+                                >(mcp_tool_args)
+                                .ok(),
+                            };
+
+                            match service.read().await.raw.call_tool(request_param).await {
+                                Ok(result) => {
+                                    tool_result = Some(result);
+                                    last_error = None;
+                                    break;
+                                }
+                                Err(e) => {
+                                    let err_msg = e.to_string();
+                                    dual_warn!(
+                                        "Tool call failed (attempt {}/{}): {} - request_id: {}",
+                                        attempt + 1,
+                                        tool_call_max_retries + 1,
+                                        err_msg,
+                                        request_id
+                                    );
+                                    last_error = Some(err_msg);
+                                }
+                            }
+                        }
+
+                        // Check if all retries exhausted
+                        let tool_result = match tool_result {
+                            Some(result) => result,
+                            None => {
+                                let err_msg =
+                                    last_error.unwrap_or_else(|| "Unknown error".to_string());
+                                dual_error!(
+                                    "Tool call '{}' failed after {} retries: {} - request_id: {}",
+                                    mcp_tool_name,
+                                    tool_call_max_retries + 1,
+                                    err_msg,
+                                    request_id
+                                );
+                                // Record failed tool call
+                                tool_trace.set_error(err_msg.clone(), tool_call_start.elapsed());
+                                iter_trace.add_tool_call(tool_trace);
+                                return Err(ServerError::ToolCallRetryExhausted {
+                                    tool_name: mcp_tool_name.to_string(),
+                                    attempts: tool_call_max_retries + 1,
+                                    message: err_msg,
+                                });
+                            }
                         };
-                        let tool_result = service
-                            .read()
-                            .await
-                            .raw
-                            .call_tool(request_param)
-                            .await
-                            .map_err(|e| {
-                            dual_error!("Failed to call the tool: {}", e);
-                            ServerError::Operation(e.to_string())
-                        })?;
                         dual_debug!("{}", serde_json::to_string_pretty(&tool_result).unwrap());
 
                         match tool_result.is_error {

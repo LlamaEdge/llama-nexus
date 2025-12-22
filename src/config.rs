@@ -95,6 +95,8 @@ impl Default for Config {
                 max_react_iterations: default_max_react_iterations(),
                 react_timeout_secs: default_react_timeout_secs(),
                 max_tools_per_iteration: default_max_tools_per_iteration(),
+                tool_call_max_retries: default_tool_call_max_retries(),
+                tool_call_retry_delay_ms: default_tool_call_retry_delay_ms(),
             },
             chat: None,
             embedding: None,
@@ -134,6 +136,14 @@ pub struct ServerConfig {
     /// Prevents excessive tool execution in a single loop iteration.
     #[serde(default = "default_max_tools_per_iteration")]
     pub max_tools_per_iteration: usize,
+    /// Maximum number of retries for a failed tool call.
+    /// Allows automatic recovery from transient failures.
+    #[serde(default = "default_tool_call_max_retries")]
+    pub tool_call_max_retries: u32,
+    /// Delay in milliseconds between tool call retries.
+    /// Provides backoff time for transient failures to resolve.
+    #[serde(default = "default_tool_call_retry_delay_ms")]
+    pub tool_call_retry_delay_ms: u64,
 }
 
 fn default_max_react_iterations() -> u32 {
@@ -146,6 +156,14 @@ fn default_react_timeout_secs() -> u64 {
 
 fn default_max_tools_per_iteration() -> usize {
     5 // Default maximum 5 tools per iteration
+}
+
+fn default_tool_call_max_retries() -> u32 {
+    2 // Default maximum 2 retries
+}
+
+fn default_tool_call_retry_delay_ms() -> u64 {
+    500 // Default 500ms delay between retries
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
