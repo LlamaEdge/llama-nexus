@@ -1,0 +1,148 @@
+name: Test Server in React Mode
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+      - release-*
+      - feat-*
+      - ci-*
+      - refactor-*
+      - fix-*
+      - test-*
+    paths:
+      - ".github/workflows/test_react.yml"
+      - "**/Cargo.toml"
+      - "**/*.rs"
+      - "**/*.sh"
+      - "**/.cargo/config.toml"
+      - "tests/*.hurl"
+  pull_request:
+    branches:
+      - dev
+      - main
+    types: [opened, synchronize, reopened]
+    paths:
+      - ".github/workflows/**"
+      - "**/Cargo.toml"
+      - "**/*.rs"
+      - "**/*.sh"
+      - "tests/*.hurl"
+
+jobs:
+  test-llama-nexus-ubuntu:
+    runs-on: ubuntu-latest
+    env:
+      LLAMAEDGE_VERSION: "0.22.1"
+    strategy:
+      matrix:
+        wasmedge_version: [0.14.1]
+        ggml_version: [b5640]
+        # whisper_api_server_version: [0.4.1]
+    steps:
+      - name: Clone project
+        id: checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust-nightly
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          target: wasm32-wasip1
+          components: rustfmt, clippy
+
+      - name: Install Rust-stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-wasip1
+
+      - name: Install WasmEdge
+        run: |
+          curl -sSf https://raw.githubusercontent.com/WasmEdge/WasmEdge/master/utils/install_v2.sh | bash -s -- -v ${{ matrix.wasmedge_version }} --ggmlbn=${{ matrix.ggml_version }}
+          ls -al $HOME/.wasmedge/bin
+
+      - name: Install Hurl
+        run: |
+          curl --location --remote-name https://github.com/Orange-OpenSource/hurl/releases/download/5.0.1/hurl_5.0.1_amd64.deb
+          sudo apt update && sudo apt install ./hurl_5.0.1_amd64.deb
+
+      - name: Generate SQLx cache if missing
+        run: |
+          # 检查是否存在SQLx缓存文件
+          if [ ! -d ".sqlx" ] || [ -z "$(ls -A .sqlx 2>/dev/null)" ]; then
+            echo "SQLx cache not found, generating..."
+            cargo sqlx prepare
+          else
+            echo "SQLx cache found, using existing cache"
+          fi
+        env:
+          SQLX_OFFLINE: false
+
+      - name: Build LlamaEdge-Nexus
+        run: |
+          cargo build --release
+          cp target/release/llama-nexus ./llama-nexus
+        env:
+          SQLX_OFFLINE: true
+
+      - name: Download LlamaEdge
+        run: |
+          curl -LO https://github.com/LlamaEdge/LlamaEdge/releases/download/${{ env.LLAMAEDGE_VERSION }}/llama-api-server.wasm
+          ls -al
+
+      - name: Start Cardea Calculator MCP Server
+        run: |
+            curl -LO https://github.com/cardea-mcp/cardea-calculator/releases/download/0.10.0/cardea-calculator-unknown-linux-gnu-x86_64.tar.gz
+
+            tar -xvf cardea-calculator-unknown-linux-gnu-x86_64.tar.gz
+
+            nohup ./cardea-calculator > ./cardea-calculator-mcp-server.log 2>&1 &
+
+            sleep 5
+            cat cardea-calculator-mcp-server.log
+
+      - name: Start llama-api-server
+        run: |
+          curl -LO https://huggingface.co/second-state/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q2_K.gguf
+
+          nohup $HOME/.wasmedge/bin/wasmedge --dir .:. --nn-preload default:GGML:AUTO:Qwen3-4B-Q2_K.gguf llama-api-server.wasm --model-name Qwen3-4B --prompt-template qwen3-agent --ctx-size 4096 --port 9068 > ./chat-server.log 2>&1 &
+
+          sleep 15
+          cat chat-server.log
+
+      - name: Start LlamaEdge-Nexus
+        run: |
+          nohup ./llama-nexus --config tests/react/config.toml --log-destination file --log-file llama-nexus.log > ./start-llama-nexus.log 2>&1 &
+
+          sleep 5
+          cat start-llama-nexus.log
+
+      - name: Register llama-api-server
+        run: |
+          curl --location 'http://localhost:3389/admin/servers/register' --header 'Content-Type: application/json' --data '{"url": "http://localhost:9068/v1","kind": "chat"}'
+          sleep 5
+
+      - name: Print LlamaEdge-Nexus logs on failure
+        if: failure()
+        run: |
+          echo "LlamaEdge-Nexus logs:"
+          cat start-llama-nexus.log
+
+      - name: Run test_chat.hurl
+        run: |
+          hurl --test --jobs 1 ./tests/react/test_chat.hurl
+
+      - name: Print chat-server.log
+        if: failure()
+        run: |
+          cat chat-server.log
+
+      - name: Stop LlamaEdge-Nexus
+        run: |
+          pkill -f llama-nexus
+
+      - name: Stop llama-api-server
+        run: |
+          pkill -f wasmedge
