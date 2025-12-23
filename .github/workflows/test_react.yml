@@ -34,12 +34,11 @@ jobs:
   test-llama-nexus-ubuntu:
     runs-on: ubuntu-latest
     env:
-      LLAMAEDGE_VERSION: "0.22.1"
+      LLAMAEDGE_VERSION: "0.28.1"
     strategy:
       matrix:
         wasmedge_version: [0.14.1]
         ggml_version: [b5640]
-        # whisper_api_server_version: [0.4.1]
     steps:
       - name: Clone project
         id: checkout
