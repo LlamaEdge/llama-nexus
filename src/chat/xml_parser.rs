@@ -102,10 +102,19 @@ pub fn sanitize_xml_content(content: &str) -> String {
         .replace("&apos;", "'");
 
     // 2. Fix missing closing tags (only add if opening tag exists without closing)
+    // React mode tags
     result = fix_missing_closing_tag(&result, "thought");
     result = fix_missing_closing_tag(&result, "action");
     result = fix_missing_closing_tag(&result, "final_answer");
     result = fix_missing_closing_tag(&result, "observation");
+    // Plan mode tags
+    result = fix_missing_closing_tag(&result, "task_plan");
+    result = fix_missing_closing_tag(&result, "goal");
+    result = fix_missing_closing_tag(&result, "subtasks");
+    result = fix_missing_closing_tag(&result, "subtask");
+    result = fix_missing_closing_tag(&result, "description");
+    result = fix_missing_closing_tag(&result, "dependencies");
+    result = fix_missing_closing_tag(&result, "tools");
 
     // 3. Fix common typos
     result = fix_common_typos(&result);
@@ -162,7 +171,41 @@ fn fix_common_typos(content: &str) -> String {
     result = result.replace("<FinalAnswer>", "<final_answer>");
     result = result.replace("</FinalAnswer>", "</final_answer>");
 
+    // Common typos for task_plan (Plan mode)
+    result = result.replace("<taskplan>", "<task_plan>");
+    result = result.replace("</taskplan>", "</task_plan>");
+    result = result.replace("<task-plan>", "<task_plan>");
+    result = result.replace("</task-plan>", "</task_plan>");
+    result = result.replace("<TaskPlan>", "<task_plan>");
+    result = result.replace("</TaskPlan>", "</task_plan>");
+    result = result.replace("<Taskplan>", "<task_plan>");
+    result = result.replace("</Taskplan>", "</task_plan>");
+
+    // Common typos for subtask
+    result = result.replace("<sub_task", "<subtask");
+    result = result.replace("</sub_task>", "</subtask>");
+    result = result.replace("<sub-task", "<subtask");
+    result = result.replace("</sub-task>", "</subtask>");
+    result = result.replace("<SubTask", "<subtask");
+    result = result.replace("</SubTask>", "</subtask>");
+
+    // Fix unquoted subtask id attributes: id=1 -> id="1"
+    // This handles cases like <subtask id=1> or <subtask id=2>
+    result = fix_unquoted_subtask_id(&result);
+
     result
+}
+
+/// Fixes unquoted subtask id attributes.
+/// Converts `<subtask id=1>` to `<subtask id="1">`.
+fn fix_unquoted_subtask_id(content: &str) -> String {
+    use regex::Regex;
+    static UNQUOTED_ID_PATTERN: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"(?i)<\s*subtask\s+id\s*=\s*(\d+)\s*>"#).unwrap());
+
+    UNQUOTED_ID_PATTERN
+        .replace_all(content, r#"<subtask id="$1">"#)
+        .to_string()
 }
 
 /// Result of XML tag extraction with diagnostic information.
@@ -439,6 +482,175 @@ pub fn extract_task_plan(content: &str) -> Option<TaskPlanRaw> {
 pub fn has_task_plan_tag(content: &str) -> bool {
     let lower = content.to_lowercase();
     lower.contains("<task_plan") || lower.contains("< task_plan")
+}
+
+/// Result of task plan extraction with diagnostic information.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct TaskPlanExtractionResult {
+    /// The extracted task plan, if successful.
+    pub plan: Option<TaskPlanRaw>,
+    /// Whether the content was sanitized/repaired before extraction.
+    pub was_repaired: bool,
+    /// Description of repairs made, if any.
+    pub repair_notes: Option<String>,
+}
+
+#[allow(dead_code)]
+impl TaskPlanExtractionResult {
+    /// Creates a successful result without repairs.
+    pub fn success(plan: TaskPlanRaw) -> Self {
+        Self {
+            plan: Some(plan),
+            was_repaired: false,
+            repair_notes: None,
+        }
+    }
+
+    /// Creates a successful result after repairs were applied.
+    pub fn repaired(plan: TaskPlanRaw, notes: String) -> Self {
+        Self {
+            plan: Some(plan),
+            was_repaired: true,
+            repair_notes: Some(notes),
+        }
+    }
+
+    /// Creates a failed result.
+    pub fn failed() -> Self {
+        Self {
+            plan: None,
+            was_repaired: false,
+            repair_notes: None,
+        }
+    }
+
+    /// Returns true if extraction was successful.
+    pub fn is_success(&self) -> bool {
+        self.plan.is_some()
+    }
+}
+
+/// Extracts a task plan with detailed result information.
+///
+/// This function provides diagnostic information about the extraction process,
+/// including whether repairs were needed and what was fixed.
+#[allow(dead_code)]
+pub fn extract_task_plan_detailed(content: &str) -> TaskPlanExtractionResult {
+    // Try direct extraction first (on original content)
+    if let Some(plan) = try_extract_task_plan_raw(content) {
+        return TaskPlanExtractionResult::success(plan);
+    }
+
+    // Try with sanitization
+    let sanitized = sanitize_xml_content(content);
+    if sanitized != content
+        && let Some(plan) = try_extract_task_plan_raw(&sanitized)
+    {
+        // Collect repair notes
+        let mut repairs = Vec::new();
+
+        if content.contains("&lt;") || content.contains("&gt;") {
+            repairs.push("fixed HTML entity escapes");
+        }
+        if content.contains("<taskplan>") || content.contains("<task-plan>") {
+            repairs.push("fixed task_plan tag typo");
+        }
+        if content.contains("<sub_task") || content.contains("<sub-task") {
+            repairs.push("fixed subtask tag typo");
+        }
+        // Check for unquoted id attribute
+        if regex::Regex::new(r#"(?i)<\s*subtask\s+id\s*=\s*\d+\s*>"#)
+            .unwrap()
+            .is_match(content)
+        {
+            repairs.push("fixed unquoted subtask id attribute");
+        }
+
+        let notes = if repairs.is_empty() {
+            "Content was sanitized".to_string()
+        } else {
+            repairs.join(", ")
+        };
+
+        return TaskPlanExtractionResult::repaired(plan, notes);
+    }
+
+    TaskPlanExtractionResult::failed()
+}
+
+/// Internal helper to extract task plan without sanitization.
+fn try_extract_task_plan_raw(content: &str) -> Option<TaskPlanRaw> {
+    // Extract the task_plan block
+    let plan_content = TASK_PLAN_PATTERN
+        .captures(content)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())?;
+
+    // Extract goal
+    let goal = GOAL_PATTERN
+        .captures(plan_content)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())?;
+
+    // Extract subtasks container
+    let subtasks_content = SUBTASKS_PATTERN
+        .captures(plan_content)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())?;
+
+    // Extract individual subtasks
+    let mut subtasks = Vec::new();
+    for cap in SUBTASK_PATTERN.captures_iter(subtasks_content) {
+        let id = cap.get(1)?.as_str().to_string();
+        let subtask_content = cap.get(2)?.as_str();
+
+        // Extract description
+        let description = DESCRIPTION_PATTERN
+            .captures(subtask_content)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default();
+
+        // Extract dependencies (comma or space separated)
+        let dependencies = DEPENDENCIES_PATTERN
+            .captures(subtask_content)
+            .and_then(|c| c.get(1))
+            .map(|m| {
+                m.as_str()
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Extract tools (comma or space separated)
+        let tools = TOOLS_PATTERN
+            .captures(subtask_content)
+            .and_then(|c| c.get(1))
+            .map(|m| {
+                m.as_str()
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        subtasks.push(SubTaskRaw {
+            id,
+            description,
+            dependencies,
+            tools,
+        });
+    }
+
+    if subtasks.is_empty() {
+        return None;
+    }
+
+    Some(TaskPlanRaw { goal, subtasks })
 }
 
 #[cfg(test)]
@@ -741,5 +953,243 @@ mod tests {
 "#;
         let plan = extract_task_plan(content).unwrap();
         assert_eq!(plan.subtasks[0].tools, vec!["search", "analyze", "report"]);
+    }
+
+    // Plan mode XML parsing enhancement tests
+
+    #[test]
+    fn test_fix_common_typos_task_plan() {
+        let content = "<taskplan><goal>test</goal></taskplan>";
+        let fixed = fix_common_typos(content);
+        assert_eq!(fixed, "<task_plan><goal>test</goal></task_plan>");
+    }
+
+    #[test]
+    fn test_fix_common_typos_task_plan_hyphen() {
+        let content = "<task-plan><goal>test</goal></task-plan>";
+        let fixed = fix_common_typos(content);
+        assert_eq!(fixed, "<task_plan><goal>test</goal></task_plan>");
+    }
+
+    #[test]
+    fn test_fix_common_typos_task_plan_camel_case() {
+        let content = "<TaskPlan><goal>test</goal></TaskPlan>";
+        let fixed = fix_common_typos(content);
+        assert_eq!(fixed, "<task_plan><goal>test</goal></task_plan>");
+    }
+
+    #[test]
+    fn test_fix_common_typos_subtask() {
+        let content = r#"<sub_task id="1">test</sub_task>"#;
+        let fixed = fix_common_typos(content);
+        assert!(fixed.contains("<subtask"));
+        assert!(fixed.contains("</subtask>"));
+    }
+
+    #[test]
+    fn test_fix_common_typos_subtask_hyphen() {
+        let content = r#"<sub-task id="1">test</sub-task>"#;
+        let fixed = fix_common_typos(content);
+        assert!(fixed.contains("<subtask"));
+        assert!(fixed.contains("</subtask>"));
+    }
+
+    #[test]
+    fn test_fix_unquoted_subtask_id() {
+        let content = "<subtask id=1><description>test</description></subtask>";
+        let fixed = fix_unquoted_subtask_id(content);
+        assert_eq!(
+            fixed,
+            r#"<subtask id="1"><description>test</description></subtask>"#
+        );
+    }
+
+    #[test]
+    fn test_fix_unquoted_subtask_id_multiple() {
+        let content = "<subtask id=1>first</subtask><subtask id=2>second</subtask>";
+        let fixed = fix_unquoted_subtask_id(content);
+        assert!(fixed.contains(r#"id="1""#));
+        assert!(fixed.contains(r#"id="2""#));
+    }
+
+    #[test]
+    fn test_sanitize_missing_closing_tag_task_plan() {
+        let content = "<task_plan><goal>test</goal><subtasks>";
+        let sanitized = sanitize_xml_content(content);
+        assert!(sanitized.contains("</task_plan>"));
+        assert!(sanitized.contains("</subtasks>"));
+    }
+
+    #[test]
+    fn test_extract_task_plan_with_typos() {
+        let content = r#"
+<taskplan>
+  <goal>Test goal</goal>
+  <subtasks>
+    <sub-task id=1>
+      <description>Test task</description>
+      <dependencies></dependencies>
+      <tools>test_tool</tools>
+    </sub-task>
+  </subtasks>
+</taskplan>
+"#;
+        let plan = extract_task_plan(content).unwrap();
+        assert_eq!(plan.goal, "Test goal");
+        assert_eq!(plan.subtasks.len(), 1);
+        assert_eq!(plan.subtasks[0].id, "1");
+    }
+
+    #[test]
+    fn test_extract_task_plan_detailed_success() {
+        let content = r#"
+<task_plan>
+  <goal>Test goal</goal>
+  <subtasks>
+    <subtask id="1">
+      <description>Test task</description>
+      <dependencies></dependencies>
+      <tools>test_tool</tools>
+    </subtask>
+  </subtasks>
+</task_plan>
+"#;
+        let result = extract_task_plan_detailed(content);
+        assert!(result.is_success());
+        assert!(!result.was_repaired);
+        assert!(result.repair_notes.is_none());
+        assert_eq!(result.plan.unwrap().goal, "Test goal");
+    }
+
+    #[test]
+    fn test_extract_task_plan_detailed_repaired_html_entities() {
+        let content = r#"
+&lt;task_plan&gt;
+  &lt;goal&gt;Test goal&lt;/goal&gt;
+  &lt;subtasks&gt;
+    &lt;subtask id="1"&gt;
+      &lt;description&gt;Test task&lt;/description&gt;
+      &lt;dependencies&gt;&lt;/dependencies&gt;
+      &lt;tools&gt;test_tool&lt;/tools&gt;
+    &lt;/subtask&gt;
+  &lt;/subtasks&gt;
+&lt;/task_plan&gt;
+"#;
+        let result = extract_task_plan_detailed(content);
+        assert!(result.is_success());
+        assert!(result.was_repaired);
+        assert!(
+            result
+                .repair_notes
+                .as_ref()
+                .unwrap()
+                .contains("HTML entity")
+        );
+    }
+
+    #[test]
+    fn test_extract_task_plan_detailed_repaired_typos() {
+        let content = r#"
+<taskplan>
+  <goal>Test goal</goal>
+  <subtasks>
+    <subtask id="1">
+      <description>Test task</description>
+      <dependencies></dependencies>
+      <tools>test_tool</tools>
+    </subtask>
+  </subtasks>
+</taskplan>
+"#;
+        let result = extract_task_plan_detailed(content);
+        assert!(result.is_success());
+        assert!(result.was_repaired);
+        assert!(
+            result
+                .repair_notes
+                .as_ref()
+                .unwrap()
+                .contains("task_plan tag typo")
+        );
+    }
+
+    #[test]
+    fn test_extract_task_plan_detailed_unquoted_id_direct_match() {
+        // Note: The regex pattern already supports unquoted id attributes with "?
+        // so this will match directly without needing repair
+        let content = r#"
+<task_plan>
+  <goal>Test goal</goal>
+  <subtasks>
+    <subtask id=1>
+      <description>Test task</description>
+      <dependencies></dependencies>
+      <tools>test_tool</tools>
+    </subtask>
+  </subtasks>
+</task_plan>
+"#;
+        let result = extract_task_plan_detailed(content);
+        assert!(result.is_success());
+        // Direct match - no repair needed because regex already handles unquoted id
+        assert!(!result.was_repaired);
+    }
+
+    #[test]
+    fn test_extract_task_plan_detailed_repaired_subtask_typo() {
+        // This tests a case that actually requires repair (sub-task -> subtask)
+        let content = r#"
+<task_plan>
+  <goal>Test goal</goal>
+  <subtasks>
+    <sub-task id="1">
+      <description>Test task</description>
+      <dependencies></dependencies>
+      <tools>test_tool</tools>
+    </sub-task>
+  </subtasks>
+</task_plan>
+"#;
+        let result = extract_task_plan_detailed(content);
+        assert!(result.is_success());
+        assert!(result.was_repaired);
+        assert!(
+            result
+                .repair_notes
+                .as_ref()
+                .unwrap()
+                .contains("subtask tag typo")
+        );
+    }
+
+    #[test]
+    fn test_extract_task_plan_detailed_failed() {
+        let content = "no task plan here";
+        let result = extract_task_plan_detailed(content);
+        assert!(!result.is_success());
+        assert!(result.plan.is_none());
+    }
+
+    #[test]
+    fn test_task_plan_extraction_result_methods() {
+        // Test success
+        let plan = TaskPlanRaw {
+            goal: "test".to_string(),
+            subtasks: vec![],
+        };
+        let result = TaskPlanExtractionResult::success(plan.clone());
+        assert!(result.is_success());
+        assert!(!result.was_repaired);
+
+        // Test repaired
+        let result = TaskPlanExtractionResult::repaired(plan, "fixed something".to_string());
+        assert!(result.is_success());
+        assert!(result.was_repaired);
+        assert_eq!(result.repair_notes, Some("fixed something".to_string()));
+
+        // Test failed
+        let result = TaskPlanExtractionResult::failed();
+        assert!(!result.is_success());
+        assert!(result.plan.is_none());
     }
 }
