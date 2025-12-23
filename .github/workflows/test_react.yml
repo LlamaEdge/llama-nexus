@@ -113,7 +113,7 @@ jobs:
 
       - name: Start LlamaEdge-Nexus
         run: |
-          nohup ./llama-nexus --config tests/react/config.toml --log-destination file --log-file llama-nexus.log > ./start-llama-nexus.log 2>&1 &
+          nohup ./llama-nexus --config tests/react/config.toml > ./start-llama-nexus.log 2>&1 &
 
           sleep 5
           cat start-llama-nexus.log
