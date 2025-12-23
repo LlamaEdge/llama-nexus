@@ -880,3 +880,193 @@ fn build_response(
             })
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::planner::SubTask;
+
+    #[test]
+    fn test_plan_trace_creation() {
+        let trace = PlanTrace::new("req-123".to_string(), Some("conv-456".to_string()));
+
+        assert_eq!(trace.request_id, "req-123");
+        assert_eq!(trace.conversation_id, Some("conv-456".to_string()));
+        assert!(trace.plan.is_none());
+        assert!(trace.subtask_traces.is_empty());
+        assert_eq!(trace.total_duration, Duration::ZERO);
+        assert_eq!(trace.final_status, TraceStatus::Success);
+    }
+
+    #[test]
+    fn test_plan_trace_set_plan() {
+        let mut trace = PlanTrace::new("req-123".to_string(), None);
+        let subtasks = vec![SubTask::new(0, "Test task".to_string())];
+        let plan = TaskPlan::new("Test goal".to_string(), subtasks).unwrap();
+
+        trace.set_plan(plan);
+
+        assert!(trace.plan.is_some());
+        assert_eq!(trace.plan.as_ref().unwrap().original_goal, "Test goal");
+    }
+
+    #[test]
+    fn test_plan_trace_add_subtask_trace() {
+        let mut trace = PlanTrace::new("req-123".to_string(), None);
+        let subtask_trace = SubtaskTrace::new(0, "Test subtask".to_string());
+
+        trace.add_subtask_trace(subtask_trace);
+
+        assert_eq!(trace.subtask_traces.len(), 1);
+        assert_eq!(trace.subtask_traces[0].subtask_id, 0);
+        assert_eq!(trace.subtask_traces[0].description, "Test subtask");
+    }
+
+    #[test]
+    fn test_plan_trace_finalize() {
+        let mut trace = PlanTrace::new("req-123".to_string(), None);
+        let duration = Duration::from_secs(5);
+
+        trace.finalize(duration, TraceStatus::Error("test error".to_string()));
+
+        assert_eq!(trace.total_duration, duration);
+        assert!(matches!(trace.final_status, TraceStatus::Error(_)));
+    }
+
+    #[test]
+    fn test_plan_trace_add_tokens() {
+        let mut trace = PlanTrace::new("req-123".to_string(), None);
+
+        trace.add_tokens(TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        });
+        trace.add_tokens(TokenUsage {
+            prompt_tokens: 200,
+            completion_tokens: 100,
+            total_tokens: 300,
+        });
+
+        assert_eq!(trace.total_tokens.prompt_tokens, 300);
+        assert_eq!(trace.total_tokens.completion_tokens, 150);
+        assert_eq!(trace.total_tokens.total_tokens, 450);
+    }
+
+    #[test]
+    fn test_plan_trace_summary() {
+        let mut trace = PlanTrace::new("req-123".to_string(), None);
+
+        let mut subtask_trace1 = SubtaskTrace::new(0, "Task 1".to_string());
+        subtask_trace1.status = SubtaskTraceStatus::Completed;
+        trace.add_subtask_trace(subtask_trace1);
+
+        let mut subtask_trace2 = SubtaskTrace::new(1, "Task 2".to_string());
+        subtask_trace2.status = SubtaskTraceStatus::Failed("error".to_string());
+        trace.add_subtask_trace(subtask_trace2);
+
+        let summary = trace.summary();
+
+        assert!(summary.contains("req-123"));
+        assert!(summary.contains("subtasks=2"));
+        assert!(summary.contains("completed=1"));
+        assert!(summary.contains("failed=1"));
+    }
+
+    #[test]
+    fn test_subtask_trace_creation() {
+        let trace = SubtaskTrace::new(5, "Test subtask".to_string());
+
+        assert_eq!(trace.subtask_id, 5);
+        assert_eq!(trace.description, "Test subtask");
+        assert!(trace.tool_call.is_none());
+        assert_eq!(trace.status, SubtaskTraceStatus::Pending);
+        assert_eq!(trace.duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_subtask_trace_status_equality() {
+        assert_eq!(SubtaskTraceStatus::Pending, SubtaskTraceStatus::Pending);
+        assert_eq!(SubtaskTraceStatus::Completed, SubtaskTraceStatus::Completed);
+        assert_ne!(SubtaskTraceStatus::Pending, SubtaskTraceStatus::Completed);
+        assert_ne!(
+            SubtaskTraceStatus::Failed("a".to_string()),
+            SubtaskTraceStatus::Failed("b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_tool_arguments_no_dependencies() {
+        let subtask = SubTask::new(0, "Query weather".to_string());
+        let previous_results: Vec<(usize, String)> = vec![];
+
+        let args = build_tool_arguments(&subtask, &previous_results);
+
+        assert_eq!(args["query"], "Query weather");
+        assert_eq!(args["context"], "");
+    }
+
+    #[test]
+    fn test_build_tool_arguments_with_dependencies() {
+        let subtask =
+            SubTask::new(2, "Summarize results".to_string()).with_dependencies(vec![0, 1]);
+        let previous_results = vec![
+            (0, "Beijing: Sunny".to_string()),
+            (1, "Shanghai: Rainy".to_string()),
+        ];
+
+        let args = build_tool_arguments(&subtask, &previous_results);
+
+        assert_eq!(args["query"], "Summarize results");
+        let context = args["context"].as_str().unwrap();
+        assert!(context.contains("Beijing: Sunny"));
+        assert!(context.contains("Shanghai: Rainy"));
+    }
+
+    #[test]
+    fn test_build_tool_arguments_partial_dependencies() {
+        let subtask = SubTask::new(2, "Task with deps".to_string()).with_dependencies(vec![0, 1]);
+        // Only dependency 0 is available
+        let previous_results = vec![(0, "Result from task 0".to_string())];
+
+        let args = build_tool_arguments(&subtask, &previous_results);
+
+        let context = args["context"].as_str().unwrap();
+        assert!(context.contains("Result from task 0"));
+        // Dependency 1 is not in results, so shouldn't appear
+    }
+
+    #[test]
+    fn test_duration_serialization() {
+        let trace = SubtaskTrace {
+            subtask_id: 0,
+            description: "Test".to_string(),
+            tool_call: None,
+            status: SubtaskTraceStatus::Completed,
+            duration: Duration::new(5, 500_000_000), // 5.5 seconds
+        };
+
+        let json = serde_json::to_string(&trace).unwrap();
+        let parsed: SubtaskTrace = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.duration.as_secs(), 5);
+        assert_eq!(parsed.duration.subsec_millis(), 500);
+    }
+
+    #[test]
+    fn test_plan_trace_serialization() {
+        let mut trace = PlanTrace::new("req-123".to_string(), Some("conv-456".to_string()));
+        trace.finalize(Duration::from_secs(10), TraceStatus::Success);
+
+        let json = serde_json::to_string(&trace).unwrap();
+        let parsed: PlanTrace = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.request_id, "req-123");
+        assert_eq!(parsed.conversation_id, Some("conv-456".to_string()));
+        assert_eq!(parsed.total_duration.as_secs(), 10);
+    }
+}

@@ -7,7 +7,7 @@
 [server]
 host = "127.0.0.1"   # The host to listen on.
 port = 3389          # The port to listen on.
-chat_mode = "normal" # Chat mode: "normal" or "react" (default: "normal")
+chat_mode = "normal" # Chat mode: "normal", "react", or "plan" (default: "normal")
 
 # React mode enhancement configuration (only effective when chat_mode = "react")
 # max_react_iterations = 10        # Maximum iterations for React loop (default: 10)
@@ -15,6 +15,13 @@ chat_mode = "normal" # Chat mode: "normal" or "react" (default: "normal")
 # max_tools_per_iteration = 5      # Maximum tool calls per iteration (default: 5)
 # tool_call_max_retries = 2        # Maximum retries for failed tool calls (default: 2)
 # tool_call_retry_delay_ms = 500   # Delay in milliseconds between retries (default: 500)
+
+# Plan mode enhancement configuration (only effective when chat_mode = "plan")
+# Plan mode decomposes complex user requests into structured subtasks with dependencies,
+# then executes them in topological order using available MCP tools.
+# max_plan_subtasks = 10           # Maximum number of subtasks in a plan (default: 10)
+# plan_timeout_secs = 600          # Total timeout in seconds for plan execution (default: 600)
+# subtask_max_retries = 2          # Maximum retries for failed subtask tool calls (default: 2)
 
 # Memory configuration
 [memory]

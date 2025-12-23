@@ -174,7 +174,7 @@ impl TokenUsage {
 }
 
 /// Final status of a React execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TraceStatus {
     /// Execution completed successfully with a final answer.
     Success,
