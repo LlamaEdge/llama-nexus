@@ -167,11 +167,15 @@ pub(crate) async fn chat_handler(
             .await
         }
         ChatMode::Plan => {
-            // TODO: Implement Plan mode handler
-            // For now, return an error indicating the feature is not yet implemented
-            let err_msg = "Plan mode is not yet implemented";
-            dual_error!("{} - request_id: {}", err_msg, request_id);
-            Err(ServerError::Operation(err_msg.to_string()))
+            crate::chat::plan::chat(
+                State(state.clone()),
+                Extension(cancel_token),
+                headers,
+                Json(request),
+                conv_id.clone(),
+                &request_id,
+            )
+            .await
         }
     };
 

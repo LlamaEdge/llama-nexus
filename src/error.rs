@@ -39,6 +39,23 @@ pub enum ServerError {
     InvalidXmlTag(String),
     #[error("Missing required XML tag: {0}")]
     MissingXmlTag(String),
+    // Plan mode errors
+    #[error("Failed to parse task plan: {0}")]
+    PlanParseError(String),
+    #[error("Cyclic dependency detected in task plan")]
+    CyclicDependency,
+    #[error("Invalid subtask reference: {0}")]
+    InvalidReference(String),
+    #[error("Task plan is empty")]
+    EmptyPlan,
+    #[error("Plan execution timeout after {0} seconds")]
+    PlanTimeout(u64),
+    #[error("Subtask '{subtask_id}' failed after {attempts} retries: {message}")]
+    SubtaskRetryExhausted {
+        subtask_id: usize,
+        attempts: u32,
+        message: String,
+    },
 }
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
@@ -125,6 +142,52 @@ impl IntoResponse for ServerError {
                 "internal_error".into(),
                 Some("xml_tag".into()),
                 Some("missing_xml_tag".into()),
+            ),
+            ServerError::PlanParseError(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to parse task plan: {e}"),
+                "internal_error".into(),
+                Some("task_plan".into()),
+                Some("plan_parse_error".into()),
+            ),
+            ServerError::CyclicDependency => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Cyclic dependency detected in task plan".into(),
+                "internal_error".into(),
+                Some("task_plan".into()),
+                Some("cyclic_dependency".into()),
+            ),
+            ServerError::InvalidReference(ref_info) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Invalid subtask reference: {ref_info}"),
+                "internal_error".into(),
+                Some("task_plan".into()),
+                Some("invalid_reference".into()),
+            ),
+            ServerError::EmptyPlan => (
+                StatusCode::BAD_REQUEST,
+                "Task plan is empty".into(),
+                "invalid_request_error".into(),
+                Some("task_plan".into()),
+                Some("empty_plan".into()),
+            ),
+            ServerError::PlanTimeout(secs) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("Plan execution timeout after {secs} seconds"),
+                "timeout_error".into(),
+                Some("plan_timeout_secs".into()),
+                Some("plan_timeout".into()),
+            ),
+            ServerError::SubtaskRetryExhausted {
+                subtask_id,
+                attempts,
+                message,
+            } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Subtask '{subtask_id}' failed after {attempts} retries: {message}"),
+                "internal_error".into(),
+                Some("subtask".into()),
+                Some("subtask_retry_exhausted".into()),
             ),
         };
 

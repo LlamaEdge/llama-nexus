@@ -1,10 +1,11 @@
-//! XML tag parsing utilities for React mode.
+//! XML tag parsing utilities for React mode and Plan mode.
 //!
 //! This module provides robust parsing of XML-like tags from LLM responses,
 //! with support for format variations and automatic repair of common issues.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 /// Regex patterns for flexible XML tag matching.
 /// These patterns support:
@@ -288,6 +289,158 @@ pub fn extract_final_answer_detailed(content: &str) -> ExtractionResult {
     ExtractionResult::failed()
 }
 
+// ============================================================================
+// Task Plan Parsing (Plan Mode)
+// ============================================================================
+
+/// Regex pattern for task_plan extraction.
+static TASK_PLAN_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?si)<\s*task_plan\s*>(.*?)<\s*/\s*task_plan\s*>").unwrap());
+
+/// Regex pattern for goal extraction within task_plan.
+static GOAL_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?si)<\s*goal\s*>(.*?)<\s*/\s*goal\s*>").unwrap());
+
+/// Regex pattern for subtasks container.
+static SUBTASKS_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?si)<\s*subtasks\s*>(.*?)<\s*/\s*subtasks\s*>").unwrap());
+
+/// Regex pattern for individual subtask with id attribute.
+static SUBTASK_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?si)<\s*subtask\s+id\s*=\s*"?(\d+)"?\s*>(.*?)<\s*/\s*subtask\s*>"#).unwrap()
+});
+
+/// Regex pattern for description within subtask.
+static DESCRIPTION_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?si)<\s*description\s*>(.*?)<\s*/\s*description\s*>").unwrap());
+
+/// Regex pattern for dependencies within subtask.
+static DEPENDENCIES_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?si)<\s*dependencies\s*>(.*?)<\s*/\s*dependencies\s*>").unwrap());
+
+/// Regex pattern for tools within subtask.
+static TOOLS_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?si)<\s*tools\s*>(.*?)<\s*/\s*tools\s*>").unwrap());
+
+/// Raw task plan structure (before validation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskPlanRaw {
+    /// The goal extracted from <goal> tag.
+    pub goal: String,
+    /// List of raw subtasks.
+    pub subtasks: Vec<SubTaskRaw>,
+}
+
+/// Raw subtask structure (before validation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubTaskRaw {
+    /// Subtask ID as string (will be validated later).
+    pub id: String,
+    /// Description of the subtask.
+    pub description: String,
+    /// Dependencies as string IDs.
+    pub dependencies: Vec<String>,
+    /// Tool names.
+    pub tools: Vec<String>,
+}
+
+/// Extracts a task plan from LLM response content.
+///
+/// Expected format:
+/// ```xml
+/// <task_plan>
+///   <goal>User's goal</goal>
+///   <subtasks>
+///     <subtask id="1">
+///       <description>Task description</description>
+///       <dependencies></dependencies>
+///       <tools>tool_name</tools>
+///     </subtask>
+///   </subtasks>
+/// </task_plan>
+/// ```
+pub fn extract_task_plan(content: &str) -> Option<TaskPlanRaw> {
+    // First sanitize the content
+    let sanitized = sanitize_xml_content(content);
+
+    // Extract the task_plan block
+    let plan_content = TASK_PLAN_PATTERN
+        .captures(&sanitized)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())?;
+
+    // Extract goal
+    let goal = GOAL_PATTERN
+        .captures(plan_content)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())?;
+
+    // Extract subtasks container
+    let subtasks_content = SUBTASKS_PATTERN
+        .captures(plan_content)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())?;
+
+    // Extract individual subtasks
+    let mut subtasks = Vec::new();
+    for cap in SUBTASK_PATTERN.captures_iter(subtasks_content) {
+        let id = cap.get(1)?.as_str().to_string();
+        let subtask_content = cap.get(2)?.as_str();
+
+        // Extract description
+        let description = DESCRIPTION_PATTERN
+            .captures(subtask_content)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default();
+
+        // Extract dependencies (comma or space separated)
+        let dependencies = DEPENDENCIES_PATTERN
+            .captures(subtask_content)
+            .and_then(|c| c.get(1))
+            .map(|m| {
+                m.as_str()
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Extract tools (comma or space separated)
+        let tools = TOOLS_PATTERN
+            .captures(subtask_content)
+            .and_then(|c| c.get(1))
+            .map(|m| {
+                m.as_str()
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        subtasks.push(SubTaskRaw {
+            id,
+            description,
+            dependencies,
+            tools,
+        });
+    }
+
+    if subtasks.is_empty() {
+        return None;
+    }
+
+    Some(TaskPlanRaw { goal, subtasks })
+}
+
+/// Checks if the content contains a task_plan tag.
+pub fn has_task_plan_tag(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    lower.contains("<task_plan") || lower.contains("< task_plan")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +604,142 @@ mod tests {
             result,
             Some("The user asked about <code>function()</code>".to_string())
         );
+    }
+
+    // Task Plan parsing tests
+
+    #[test]
+    fn test_extract_task_plan_basic() {
+        let content = r#"
+<task_plan>
+  <goal>Query weather for two cities</goal>
+  <subtasks>
+    <subtask id="1">
+      <description>Query Beijing weather</description>
+      <dependencies></dependencies>
+      <tools>weather_query</tools>
+    </subtask>
+    <subtask id="2">
+      <description>Query Shanghai weather</description>
+      <dependencies></dependencies>
+      <tools>weather_query</tools>
+    </subtask>
+  </subtasks>
+</task_plan>
+"#;
+        let plan = extract_task_plan(content).unwrap();
+        assert_eq!(plan.goal, "Query weather for two cities");
+        assert_eq!(plan.subtasks.len(), 2);
+        assert_eq!(plan.subtasks[0].id, "1");
+        assert_eq!(plan.subtasks[0].description, "Query Beijing weather");
+        assert!(plan.subtasks[0].dependencies.is_empty());
+        assert_eq!(plan.subtasks[0].tools, vec!["weather_query"]);
+    }
+
+    #[test]
+    fn test_extract_task_plan_with_dependencies() {
+        let content = r#"
+<task_plan>
+  <goal>Send weather summary email</goal>
+  <subtasks>
+    <subtask id="1">
+      <description>Query Beijing weather</description>
+      <dependencies></dependencies>
+      <tools>weather_query</tools>
+    </subtask>
+    <subtask id="2">
+      <description>Query Shanghai weather</description>
+      <dependencies></dependencies>
+      <tools>weather_query</tools>
+    </subtask>
+    <subtask id="3">
+      <description>Send summary email</description>
+      <dependencies>1, 2</dependencies>
+      <tools>send_email</tools>
+    </subtask>
+  </subtasks>
+</task_plan>
+"#;
+        let plan = extract_task_plan(content).unwrap();
+        assert_eq!(plan.subtasks.len(), 3);
+        assert_eq!(plan.subtasks[2].id, "3");
+        assert_eq!(plan.subtasks[2].dependencies, vec!["1", "2"]);
+    }
+
+    #[test]
+    fn test_extract_task_plan_case_insensitive() {
+        let content = r#"
+<TASK_PLAN>
+  <GOAL>Test goal</GOAL>
+  <SUBTASKS>
+    <SUBTASK id="1">
+      <DESCRIPTION>Test task</DESCRIPTION>
+      <DEPENDENCIES></DEPENDENCIES>
+      <TOOLS>test_tool</TOOLS>
+    </SUBTASK>
+  </SUBTASKS>
+</TASK_PLAN>
+"#;
+        let plan = extract_task_plan(content).unwrap();
+        assert_eq!(plan.goal, "Test goal");
+        assert_eq!(plan.subtasks.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_task_plan_with_spaces() {
+        let content = r#"
+< task_plan >
+  < goal >Test goal</ goal >
+  < subtasks >
+    < subtask id="1" >
+      < description >Test task</ description >
+      < dependencies ></ dependencies >
+      < tools >test_tool</ tools >
+    </ subtask >
+  </ subtasks >
+</ task_plan >
+"#;
+        let plan = extract_task_plan(content).unwrap();
+        assert_eq!(plan.goal, "Test goal");
+        assert_eq!(plan.subtasks.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_task_plan_empty_subtasks() {
+        let content = r#"
+<task_plan>
+  <goal>Test goal</goal>
+  <subtasks>
+  </subtasks>
+</task_plan>
+"#;
+        let plan = extract_task_plan(content);
+        assert!(plan.is_none());
+    }
+
+    #[test]
+    fn test_has_task_plan_tag() {
+        assert!(has_task_plan_tag("<task_plan>"));
+        assert!(has_task_plan_tag("< task_plan >"));
+        assert!(has_task_plan_tag("<TASK_PLAN>"));
+        assert!(!has_task_plan_tag("<thought>"));
+    }
+
+    #[test]
+    fn test_extract_task_plan_multiple_tools() {
+        let content = r#"
+<task_plan>
+  <goal>Complex task</goal>
+  <subtasks>
+    <subtask id="1">
+      <description>Multi-tool task</description>
+      <dependencies></dependencies>
+      <tools>search, analyze, report</tools>
+    </subtask>
+  </subtasks>
+</task_plan>
+"#;
+        let plan = extract_task_plan(content).unwrap();
+        assert_eq!(plan.subtasks[0].tools, vec!["search", "analyze", "report"]);
     }
 }
