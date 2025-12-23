@@ -97,6 +97,9 @@ impl Default for Config {
                 max_tools_per_iteration: default_max_tools_per_iteration(),
                 tool_call_max_retries: default_tool_call_max_retries(),
                 tool_call_retry_delay_ms: default_tool_call_retry_delay_ms(),
+                max_plan_subtasks: default_max_plan_subtasks(),
+                plan_timeout_secs: default_plan_timeout_secs(),
+                subtask_max_retries: default_subtask_max_retries(),
             },
             chat: None,
             embedding: None,
@@ -109,13 +112,15 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ChatMode {
     #[default]
     #[serde(rename = "normal")]
     Normal,
     #[serde(rename = "react")]
     React,
+    #[serde(rename = "plan")]
+    Plan,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -144,6 +149,18 @@ pub struct ServerConfig {
     /// Provides backoff time for transient failures to resolve.
     #[serde(default = "default_tool_call_retry_delay_ms")]
     pub tool_call_retry_delay_ms: u64,
+    /// Maximum number of subtasks allowed in a plan.
+    /// Prevents overly complex plans that could be difficult to execute.
+    #[serde(default = "default_max_plan_subtasks")]
+    pub max_plan_subtasks: usize,
+    /// Timeout in seconds for the entire plan execution.
+    /// Prevents long-running plans from blocking indefinitely.
+    #[serde(default = "default_plan_timeout_secs")]
+    pub plan_timeout_secs: u64,
+    /// Maximum number of retries for a failed subtask.
+    /// Allows automatic recovery from transient failures during plan execution.
+    #[serde(default = "default_subtask_max_retries")]
+    pub subtask_max_retries: u32,
 }
 
 fn default_max_react_iterations() -> u32 {
@@ -164,6 +181,18 @@ fn default_tool_call_max_retries() -> u32 {
 
 fn default_tool_call_retry_delay_ms() -> u64 {
     500 // Default 500ms delay between retries
+}
+
+fn default_max_plan_subtasks() -> usize {
+    10 // Default maximum 10 subtasks per plan
+}
+
+fn default_plan_timeout_secs() -> u64 {
+    600 // Default 10 minutes timeout for plan execution
+}
+
+fn default_subtask_max_retries() -> u32 {
+    2 // Default maximum 2 retries per subtask
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
