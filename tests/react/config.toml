@@ -1,0 +1,190 @@
+# ============================================================================
+# SECTION 1: CORE SERVER CONFIGURATION
+# ============================================================================
+# This section contains the fundamental server settings and memory management
+# configuration that define how LlamaNexus operates.
+
+[server]
+host = "127.0.0.1"   # The host to listen on.
+port = 3389          # The port to listen on.
+chat_mode = "react" # Chat mode: "normal", "react", or "plan" (default: "normal")
+
+# React mode enhancement configuration (only effective when chat_mode = "react")
+# max_react_iterations = 10        # Maximum iterations for React loop (default: 10)
+# react_timeout_secs = 300         # Total timeout in seconds for React loop (default: 300)
+# max_tools_per_iteration = 5      # Maximum tool calls per iteration (default: 5)
+# tool_call_max_retries = 2        # Maximum retries for failed tool calls (default: 2)
+# tool_call_retry_delay_ms = 500   # Delay in milliseconds between retries (default: 500)
+
+# Plan mode enhancement configuration (only effective when chat_mode = "plan")
+# Plan mode decomposes complex user requests into structured subtasks with dependencies,
+# then executes them in topological order using available MCP tools.
+# max_plan_subtasks = 10           # Maximum number of subtasks in a plan (default: 10)
+# plan_timeout_secs = 600          # Total timeout in seconds for plan execution (default: 600)
+# subtask_max_retries = 2          # Maximum retries for failed subtask tool calls (default: 2)
+
+# Memory configuration
+[memory]
+enable = false                                    # Enable/disable memory functionality
+database_path = "data/memory.db"                 # Path to SQLite database file or URL
+                                                 # Examples:
+                                                 #   - Simple path: "data/memory.db", "/tmp/app.db"
+                                                 #   - SQLite URL: "sqlite:data/memory.db?mode=rwc"
+                                                 #   - Memory DB: "sqlite::memory:" (temporary, lost on restart)
+context_window = 8192                            # Maximum context window for conversations
+auto_summarize = true                            # Enable automatic message summarization
+summary_service_base_url = "http://localhost:10086/v1"  # Base URL for summary service
+summary_service_api_key = ""                            # API key for summary service (leave empty if not required)
+
+# Summarization strategies:
+# - "Incremental": Use existing summary + new messages (default, more efficient)
+# - "FullHistory": Re-summarize all historical messages (better context, more expensive)
+summarization_strategy = "Incremental"
+
+# Message summarization configuration:
+# - When message count reaches 'max_stored_messages', summarization is triggered
+# - After summarization, at least 'summarize_threshold/2' recent messages are kept
+# - Relationship: max_stored_messages > summarize_threshold (recommended)
+# - Example: 20 messages trigger → keep 6 recent → summarize 14 old messages
+max_stored_messages = 20                         # Trigger summarization when message count reaches this limit
+summarize_threshold = 12                         # Base number for calculating minimum kept messages (kept = threshold/2)
+
+
+# ============================================================================
+# SECTION 2: AI SERVICE CONFIGURATION
+# ============================================================================
+# This section contains configuration for AI services including chat and
+# embedding models. These are optional services that can be enabled as needed.
+
+# [chat]
+# url = "https://api.openai.com/v1"  # Base URL for the model API
+# api_key = ""                       # API key for the model service (leave empty to use environment variable: DEFAULT_CHAT_SERVICE_API_KEY)
+
+# [embedding]
+# url = "https://api.openai.com/v1"  # Base URL for the model API
+# api_key = ""                       # API key for the model service (leave empty to use environment variable: DEFAULT_EMBEDDING_SERVICE_API_KEY)
+
+
+# ============================================================================
+# SECTION 3: MCP TOOL SERVER CONFIGURATION
+# ============================================================================
+# This section contains configuration for Model Context Protocol (MCP) tool
+# servers. These provide additional capabilities and integrations.
+#
+# Note: If any MCP tool servers are enabled, ensure the corresponding MCP
+# server is started before starting the LlamaNexus server.
+
+# Section 3.1: Third Party MCP Servers
+#
+# The following items are the configuration for the third party MCP tool servers:
+#
+# - name: The name of the MCP tool server.
+# - transport: The transport protocol to use. Possible values: "sse" and "stream-http".
+# - url: The URL of the MCP tool server. ONLY one of `url` and `oauth_url` should be set.
+# - oauth_url: The URL of the MCP tool server for OAuth authentication. ONLY one of `url` and `oauth_url` should be set.
+# - enable: Whether to enable the MCP tool server.
+
+# The following config is for the markitdown mcp server.
+# The details about the server are available at https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp
+[[mcp.server.tool]]
+name      = "markitdown"
+transport = "stream-http"
+url       = "http://127.0.0.1:8011/mcp"
+enable    = false
+
+# The following config is for the zapier-mcp server.
+# The details about the server are available at https://mcp.zapier.com/mcp/servers
+[[mcp.server.tool]]
+name      = "zapier-mcp"
+transport = "stream-http"
+oauth_url = "https://mcp.zapier.com/api/mcp/a/23683142/mcp?serverId=67bdebee-2595-4e58-bc11-62359d74a8ef"
+enable    = false
+
+
+# Section 3.2: Cardea MCP Servers
+#
+# The following items are the configuration for the MCP tool servers:
+#
+# - name: The name of the MCP tool server.
+# - transport: The transport protocol to use. Possible values: "sse" and "stream-http".
+# - url: The URL of the MCP tool server.
+# - enable: Whether to enable the MCP tool server.
+# - fallback_message (Optional): The fallback message to use if the MCP tool server returns an empty response.
+
+
+# The following config is for the cardea-agentic-search mcp server.
+# The details about the server are available at https://github.com/cardea-mcp/gaia-mcp-servers/tree/main/cardea-agentic-search
+[[mcp.server.tool]]
+name             = "cardea-agentic-search"
+transport        = "stream-http"
+url              = "http://127.0.0.1:8009/mcp"
+enable           = false
+fallback_message = "Hmm, I couldn’t find enough info to answer that one just yet. Want to try asking in a different way?"
+
+# The following config is for the cardea-web-search mcp server.
+# The details about the server are available at https://github.com/cardea-mcp/gaia-mcp-servers/tree/main/cardea-web-search
+[[mcp.server.tool]]
+name      = "cardea-web-search"
+transport = "stream-http"
+url       = "http://127.0.0.1:8010/mcp"
+enable    = false
+
+# The following config is for the cardea-calculator mcp server.
+# The details about the server are available at https://github.com/cardea-mcp/gaia-mcp-servers/tree/main/cardea-calculator
+[[mcp.server.tool]]
+name      = "cardea-calculator"
+transport = "stream-http"
+url       = "http://127.0.0.1:8001/mcp"
+enable    = true
+
+# The following config is for the cardea-weather mcp server.
+# The details about the server are available at https://github.com/cardea-mcp/gaia-mcp-servers/tree/main/cardea-weather
+[[mcp.server.tool]]
+name      = "cardea-weather"
+transport = "stream-http"
+url       = "http://127.0.0.1:8002/mcp"
+enable    = false
+
+# The following config is for the cardea-qdrant mcp server.
+# The details about the server are available at https://github.com/cardea-mcp/gaia-mcp-servers/tree/main/cardea-qdrant
+[[mcp.server.tool]]
+name      = "cardea-qdrant"
+transport = "stream-http"
+url       = "http://127.0.0.1:8003/mcp"
+enable    = false
+
+# Section 3.3: Keyword Search MCP Servers
+#
+# The following items are the keyword search mcp server configurations:
+#
+# - name: The name of the mcp server.
+# - transport: The transport protocol to use. Possible values: "sse" and "stream-http".
+# - url: The URL of the mcp server.
+# - enable: Whether to enable the mcp server.
+#
+# If you want to use keyword search in the retrieval phase, please enable ONLY one of the following
+# three keyword search mcp servers.
+
+# The following config is for the cardea-keyword-search mcp server.
+# The details about the server are available at https://github.com/cardea-mcp/gaia-mcp-servers/tree/main/cardea-kwsearch
+[[mcp.server.tool]]
+name      = "cardea-keyword-search"
+transport = "stream-http"
+url       = "http://127.0.0.1:8005/mcp"
+enable    = false
+
+# The following config is for the cardea-elastic-search mcp server.
+# The details about the server are available at https://github.com/cardea-mcp/gaia-mcp-servers/tree/main/cardea-elastic
+[[mcp.server.tool]]
+name      = "cardea-elastic-search"
+transport = "stream-http"
+url       = "http://127.0.0.1:8006/mcp"
+enable    = false
+
+# The following config is for the cardea-tidb-search mcp server.
+# The details about the server are available at https://github.com/cardea-m
+[[mcp.server.tool]]
+name      = "cardea-tidb-search"
+transport = "stream-http"
+url       = "http://127.0.0.1:8007/mcp"
+enable    = false
