@@ -131,7 +131,7 @@ jobs:
 
       - name: Run test_chat.hurl
         run: |
-          hurl --test --jobs 1 ./tests/react/test_chat.hurl
+          hurl --timeout 300s --test --jobs 1 ./tests/react/test_chat.hurl
 
       - name: Print chat-server.log
         if: failure()
