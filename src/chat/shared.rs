@@ -102,6 +102,7 @@ impl TimeBudget {
     }
 
     /// Returns the total budget duration.
+    #[allow(dead_code)] // Used in tests and as public API
     pub fn total(&self) -> Duration {
         self.total_budget
     }

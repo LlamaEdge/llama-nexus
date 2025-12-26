@@ -248,6 +248,7 @@ pub(crate) async fn chat(
             );
             subtask.skip();
             subtask_trace.status = crate::chat::planner::SubTaskStatus::Skipped;
+            dual_info!("Subtask trace: {}", subtask_trace.summary());
             trace.add_subtask_trace(subtask_trace);
             pending_count = pending_count.saturating_sub(1);
             continue;
@@ -257,68 +258,136 @@ pub(crate) async fn chat(
         subtask.start();
         subtask_trace.start();
 
-        // Allocate time budget for this subtask
+        // Allocate time budget for this subtask (including potential retries)
         let subtask_time_budget = time_budget.allocate(pending_count);
         // Ensure we don't exceed the configured subtask timeout
         let effective_timeout =
             subtask_time_budget.min(Duration::from_secs(subtask_react_timeout_secs));
 
         dual_debug!(
-            "Allocated {:?} for subtask {} (pending: {}) - request_id: {}",
+            "Allocated {:?} for subtask {} (pending: {}, max_retries: {}) - request_id: {}",
             effective_timeout,
             subtask.id,
             pending_count,
+            subtask_max_retries,
             request_id
         );
 
-        // Execute the subtask with React loop
-        let result = execute_subtask_with_react(
-            &state,
-            &chat_server,
-            &headers,
-            subtask,
-            &subtask_results,
-            &available_tools,
-            effective_timeout,
-            subtask_react_max_iterations,
-            max_tools_per_iteration,
-            tool_call_max_retries,
-            tool_call_retry_delay_ms,
-            subtask_max_retries,
-            &cancel_token,
-            request_id,
-            &mut subtask_trace,
-        )
-        .await;
+        // Execute the subtask with retry loop
+        let mut last_error: Option<ServerError> = None;
+        let subtask_start_time = Instant::now();
 
-        match result {
-            Ok(result_text) => {
-                dual_info!(
-                    "✅ Subtask {} completed - request_id: {}",
-                    subtask.id,
-                    request_id
-                );
-
-                subtask.complete(result_text.clone());
-                completed_subtasks.insert(subtask.id);
-                subtask_results.push((subtask.id, result_text.clone()));
-                subtask_trace.complete(result_text);
-            }
-            Err(e) => {
+        for attempt in 0..=subtask_max_retries {
+            // Check if we've exceeded the total time budget for this subtask
+            let elapsed = subtask_start_time.elapsed();
+            if elapsed >= subtask_time_budget {
                 dual_warn!(
-                    "❌ Subtask {} failed: {} - request_id: {}",
+                    "Subtask {} time budget exhausted after {:?} - request_id: {}",
                     subtask.id,
-                    e,
+                    elapsed,
                     request_id
                 );
+                last_error = Some(ServerError::SubtaskTimeout {
+                    subtask_id: subtask.id,
+                    timeout_secs: subtask_time_budget.as_secs(),
+                });
+                break;
+            }
 
-                subtask.fail(e.to_string());
-                subtask_trace.fail(e.to_string());
+            // Calculate remaining time for this attempt
+            let remaining_time = subtask_time_budget.saturating_sub(elapsed);
+            let attempt_timeout = remaining_time.min(effective_timeout);
 
-                // Continue execution (don't fail the entire plan)
+            if attempt > 0 {
+                dual_info!(
+                    "🔄 Retrying subtask {} (attempt {}/{}) - request_id: {}",
+                    subtask.id,
+                    attempt + 1,
+                    subtask_max_retries + 1,
+                    request_id
+                );
+            }
+
+            let result = execute_subtask_with_react(
+                &state,
+                &chat_server,
+                &headers,
+                subtask,
+                &subtask_results,
+                &available_tools,
+                attempt_timeout,
+                subtask_react_max_iterations,
+                max_tools_per_iteration,
+                tool_call_max_retries,
+                tool_call_retry_delay_ms,
+                &cancel_token,
+                request_id,
+                &mut subtask_trace,
+            )
+            .await;
+
+            match result {
+                Ok(result_text) => {
+                    dual_info!(
+                        "✅ Subtask {} completed (attempt {}) - request_id: {}",
+                        subtask.id,
+                        attempt + 1,
+                        request_id
+                    );
+
+                    subtask.complete(result_text.clone());
+                    completed_subtasks.insert(subtask.id);
+                    subtask_results.push((subtask.id, result_text.clone()));
+                    subtask_trace.complete(result_text);
+                    last_error = None;
+                    break;
+                }
+                Err(e) => {
+                    // Check if this error is retryable
+                    if is_retryable_error(&e) && attempt < subtask_max_retries {
+                        dual_warn!(
+                            "⚠️ Subtask {} failed with retryable error: {} - request_id: {}",
+                            subtask.id,
+                            e,
+                            request_id
+                        );
+                        subtask_trace.record_retry(e.to_string());
+                        last_error = Some(e);
+                        // Continue to next retry attempt
+                    } else {
+                        // Non-retryable error or max retries exceeded
+                        dual_warn!(
+                            "❌ Subtask {} failed: {} - request_id: {}",
+                            subtask.id,
+                            e,
+                            request_id
+                        );
+                        last_error = Some(e);
+                        break;
+                    }
+                }
             }
         }
 
+        // Handle final result after retry loop
+        if let Some(error) = last_error {
+            // Check if we exhausted all retries
+            if subtask_trace.retry_count >= subtask_max_retries && subtask_max_retries > 0 {
+                let retry_exhausted_error = ServerError::SubtaskRetryExhausted {
+                    subtask_id: subtask.id,
+                    attempts: subtask_trace.retry_count + 1,
+                    message: error.to_string(),
+                };
+                subtask.fail(retry_exhausted_error.to_string());
+                subtask_trace.fail(retry_exhausted_error.to_string());
+            } else {
+                subtask.fail(error.to_string());
+                subtask_trace.fail(error.to_string());
+            }
+            // Continue execution (don't fail the entire plan)
+        }
+
+        dual_info!("Subtask trace: {}", subtask_trace.summary());
         trace.add_subtask_trace(subtask_trace);
         pending_count = pending_count.saturating_sub(1);
     }
@@ -441,7 +510,6 @@ async fn execute_subtask_with_react(
     max_tools_per_iteration: usize,
     tool_call_max_retries: u32,
     tool_call_retry_delay_ms: u64,
-    _subtask_max_retries: u32,
     cancel_token: &CancellationToken,
     request_id: &str,
     subtask_trace: &mut SubtaskTrace,
@@ -789,6 +857,30 @@ async fn execute_tool_call(
     })
 }
 
+/// Determines if an error is retryable for subtask execution.
+///
+/// Retryable errors include:
+/// - Tool call failures (including retry exhausted)
+/// - Maximum iterations exceeded
+/// - Timeout errors
+/// - MCP operation errors
+///
+/// Non-retryable errors include:
+/// - Client cancellation
+/// - Configuration errors
+/// - Parse errors
+fn is_retryable_error(error: &ServerError) -> bool {
+    matches!(
+        error,
+        ServerError::ToolCallRetryExhausted { .. }
+            | ServerError::MaxIterationsExceeded(_)
+            | ServerError::SubtaskTimeout { .. }
+            | ServerError::McpOperation(_)
+            | ServerError::McpEmptyContent
+            | ServerError::ReactTimeout(_)
+    )
+}
+
 /// Builds the initial context messages for React loop execution.
 fn build_context_for_react(
     subtask: &SubTask,
@@ -896,30 +988,6 @@ fn build_tools_json(available_tools: &[ToolDescription]) -> serde_json::Value {
         .collect();
 
     serde_json::Value::Array(tools)
-}
-
-/// Builds tool arguments from subtask context.
-fn build_tool_arguments(
-    subtask: &crate::chat::planner::SubTask,
-    previous_results: &[(usize, String)],
-) -> serde_json::Value {
-    // Build context from dependencies
-    let context: Vec<String> = subtask
-        .dependencies
-        .iter()
-        .filter_map(|dep_id| {
-            previous_results
-                .iter()
-                .find(|(id, _)| id == dep_id)
-                .map(|(_, result)| result.clone())
-        })
-        .collect();
-
-    // Create arguments JSON
-    serde_json::json!({
-        "query": subtask.description,
-        "context": context.join("\n"),
-    })
 }
 
 /// Generates the final response by asking LLM to summarize results.
@@ -1100,47 +1168,6 @@ fn build_response(
 mod tests {
     use super::*;
     use crate::chat::planner::{SubTask, SubTaskStatus};
-
-    #[test]
-    fn test_build_tool_arguments_no_dependencies() {
-        let subtask = SubTask::new(0, "Query weather".to_string());
-        let previous_results: Vec<(usize, String)> = vec![];
-
-        let args = build_tool_arguments(&subtask, &previous_results);
-
-        assert_eq!(args["query"], "Query weather");
-        assert_eq!(args["context"], "");
-    }
-
-    #[test]
-    fn test_build_tool_arguments_with_dependencies() {
-        let subtask =
-            SubTask::new(2, "Summarize results".to_string()).with_dependencies(vec![0, 1]);
-        let previous_results = vec![
-            (0, "Beijing: Sunny".to_string()),
-            (1, "Shanghai: Rainy".to_string()),
-        ];
-
-        let args = build_tool_arguments(&subtask, &previous_results);
-
-        assert_eq!(args["query"], "Summarize results");
-        let context = args["context"].as_str().unwrap();
-        assert!(context.contains("Beijing: Sunny"));
-        assert!(context.contains("Shanghai: Rainy"));
-    }
-
-    #[test]
-    fn test_build_tool_arguments_partial_dependencies() {
-        let subtask = SubTask::new(2, "Task with deps".to_string()).with_dependencies(vec![0, 1]);
-        // Only dependency 0 is available
-        let previous_results = vec![(0, "Result from task 0".to_string())];
-
-        let args = build_tool_arguments(&subtask, &previous_results);
-
-        let context = args["context"].as_str().unwrap();
-        assert!(context.contains("Result from task 0"));
-        // Dependency 1 is not in results, so shouldn't appear
-    }
 
     #[test]
     fn test_build_context_for_react_no_dependencies() {

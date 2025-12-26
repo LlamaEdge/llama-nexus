@@ -221,6 +221,24 @@ pub struct SubtaskTrace {
     pub react_status: TraceStatus,
     /// Result of the subtask execution (if successful).
     pub result: Option<String>,
+    /// Number of retry attempts made for this subtask.
+    pub retry_count: u32,
+    /// History of retry attempts with their error messages.
+    pub retry_history: Vec<RetryAttempt>,
+}
+
+/// Information about a single retry attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryAttempt {
+    /// Retry attempt number (1-indexed).
+    pub attempt: u32,
+    /// Error that triggered this retry.
+    pub error: String,
+    /// When this retry attempt occurred.
+    #[serde(with = "datetime_serde")]
+    pub timestamp: DateTime<Utc>,
+    /// React iterations from this attempt (preserved for debugging).
+    pub iterations: Vec<IterationTrace>,
 }
 
 impl SubtaskTrace {
@@ -236,6 +254,8 @@ impl SubtaskTrace {
             react_iterations: Vec::new(),
             react_status: TraceStatus::Success,
             result: None,
+            retry_count: 0,
+            retry_history: Vec::new(),
         }
     }
 
@@ -307,13 +327,59 @@ impl SubtaskTrace {
     pub fn summary(&self) -> String {
         let tokens = self.total_tokens();
         format!(
-            "SubtaskTrace[id={}, iterations={}, tokens={}, duration={:?}, status={:?}]",
+            "SubtaskTrace[id={}, iterations={}, tokens={}, retries={}, duration={:?}, status={:?}]",
             self.subtask_id,
             self.react_iterations.len(),
             tokens.total_tokens,
+            self.retry_count,
             self.duration,
             self.status
         )
+    }
+
+    /// Records a retry attempt with the error message.
+    /// Preserves the current React iterations in the retry history.
+    pub fn record_retry(&mut self, error: String) {
+        self.retry_count += 1;
+        let attempt = RetryAttempt {
+            attempt: self.retry_count,
+            error,
+            timestamp: Utc::now(),
+            iterations: std::mem::take(&mut self.react_iterations),
+        };
+        self.retry_history.push(attempt);
+        // Reset React status for the next attempt
+        self.react_status = TraceStatus::Success;
+    }
+
+    /// Calculates total token usage across all React iterations including retry history.
+    pub fn total_tokens_with_retries(&self) -> TokenUsage {
+        let mut prompt_tokens: u64 = self
+            .react_iterations
+            .iter()
+            .map(|i| i.llm_tokens.prompt_tokens)
+            .sum();
+        let mut completion_tokens: u64 = self
+            .react_iterations
+            .iter()
+            .map(|i| i.llm_tokens.completion_tokens)
+            .sum();
+
+        // Add tokens from retry attempts
+        for retry in &self.retry_history {
+            prompt_tokens += retry
+                .iterations
+                .iter()
+                .map(|i| i.llm_tokens.prompt_tokens)
+                .sum::<u64>();
+            completion_tokens += retry
+                .iterations
+                .iter()
+                .map(|i| i.llm_tokens.completion_tokens)
+                .sum::<u64>();
+        }
+
+        TokenUsage::new(prompt_tokens, completion_tokens)
     }
 }
 
@@ -329,6 +395,8 @@ impl Default for SubtaskTrace {
             react_iterations: Vec::new(),
             react_status: TraceStatus::Success,
             result: None,
+            retry_count: 0,
+            retry_history: Vec::new(),
         }
     }
 }
@@ -388,8 +456,9 @@ impl PlanTrace {
     }
 
     /// Adds a subtask trace and accumulates token usage.
+    /// Uses `total_tokens_with_retries()` to include tokens from all retry attempts.
     pub fn add_subtask_trace(&mut self, trace: SubtaskTrace) {
-        let tokens = trace.total_tokens();
+        let tokens = trace.total_tokens_with_retries();
         self.total_tokens.prompt_tokens += tokens.prompt_tokens;
         self.total_tokens.completion_tokens += tokens.completion_tokens;
         self.total_tokens.total_tokens += tokens.total_tokens;
@@ -425,10 +494,11 @@ impl PlanTrace {
     /// Returns a summary of the plan trace for logging.
     pub fn summary(&self) -> String {
         format!(
-            "PlanTrace[plan_id={}, subtasks={}/{} completed, tokens={}, duration={:?}, status={:?}]",
+            "PlanTrace[plan_id={}, subtasks={}/{} completed, failed={}, tokens={}, duration={:?}, status={:?}]",
             self.plan_id,
             self.completed_count(),
             self.subtask_count,
+            self.failed_count(),
             self.total_tokens.total_tokens,
             self.total_duration,
             self.plan_status
@@ -548,6 +618,29 @@ mod option_datetime_serde {
                 .map_err(serde::de::Error::custom),
             None => Ok(None),
         }
+    }
+}
+
+/// Custom serialization for DateTime<Utc> to make it JSON-friendly.
+mod datetime_serde {
+    use chrono::{DateTime, Utc};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(datetime: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        datetime.to_rfc3339().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: String = String::deserialize(deserializer)?;
+        DateTime::parse_from_rfc3339(&s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(serde::de::Error::custom)
     }
 }
 

@@ -48,8 +48,6 @@ pub enum ServerError {
     InvalidReference(String),
     #[error("Task plan is empty")]
     EmptyPlan,
-    #[error("Plan execution timeout after {0} seconds")]
-    PlanTimeout(u64),
     #[error("Subtask '{subtask_id}' failed after {attempts} retries: {message}")]
     SubtaskRetryExhausted {
         subtask_id: usize,
@@ -177,13 +175,6 @@ impl IntoResponse for ServerError {
                 "invalid_request_error".into(),
                 Some("task_plan".into()),
                 Some("empty_plan".into()),
-            ),
-            ServerError::PlanTimeout(secs) => (
-                StatusCode::GATEWAY_TIMEOUT,
-                format!("Plan execution timeout after {secs} seconds"),
-                "timeout_error".into(),
-                Some("plan_timeout_secs".into()),
-                Some("plan_timeout".into()),
             ),
             ServerError::SubtaskRetryExhausted {
                 subtask_id,
