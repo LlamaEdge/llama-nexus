@@ -18,10 +18,24 @@ chat_mode = "normal" # Chat mode: "normal", "react", or "plan" (default: "normal
 
 # Plan mode enhancement configuration (only effective when chat_mode = "plan")
 # Plan mode decomposes complex user requests into structured subtasks with dependencies,
-# then executes them in topological order using available MCP tools.
+# then executes them in topological order using React loops for each subtask.
+#
+# Task Planning Configuration:
 # max_plan_subtasks = 10           # Maximum number of subtasks in a plan (default: 10)
 # plan_timeout_secs = 600          # Total timeout in seconds for plan execution (default: 600)
-# subtask_max_retries = 2          # Maximum retries for failed subtask tool calls (default: 2)
+#
+# Subtask Retry Configuration:
+# subtask_max_retries = 2          # Maximum retries for failed subtasks (default: 2)
+#                                  # Retryable errors: tool failures, timeouts, max iterations exceeded
+#
+# Subtask React Loop Configuration:
+# subtask_react_max_iterations = 5 # Maximum React iterations per subtask (default: 5)
+# subtask_react_timeout_secs = 60  # Timeout in seconds for each subtask (default: 60)
+#
+# Tool Call Configuration (shared with React mode):
+# max_tools_per_iteration = 5      # Maximum tool calls per iteration (default: 5)
+# tool_call_max_retries = 2        # Maximum retries for failed tool calls (default: 2)
+# tool_call_retry_delay_ms = 500   # Delay in milliseconds between retries (default: 500)
 
 # Memory configuration
 [memory]
