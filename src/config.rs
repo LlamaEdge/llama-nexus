@@ -100,6 +100,8 @@ impl Default for Config {
                 max_plan_subtasks: default_max_plan_subtasks(),
                 plan_timeout_secs: default_plan_timeout_secs(),
                 subtask_max_retries: default_subtask_max_retries(),
+                subtask_react_max_iterations: default_subtask_react_max_iterations(),
+                subtask_react_timeout_secs: default_subtask_react_timeout_secs(),
             },
             chat: None,
             embedding: None,
@@ -161,6 +163,14 @@ pub struct ServerConfig {
     /// Allows automatic recovery from transient failures during plan execution.
     #[serde(default = "default_subtask_max_retries")]
     pub subtask_max_retries: u32,
+    /// Maximum number of React iterations allowed per subtask in Plan mode.
+    /// Controls how many reasoning loops a subtask can perform before completing.
+    #[serde(default = "default_subtask_react_max_iterations")]
+    pub subtask_react_max_iterations: u32,
+    /// Timeout in seconds for each subtask's React loop in Plan mode.
+    /// Prevents individual subtasks from blocking the entire plan execution.
+    #[serde(default = "default_subtask_react_timeout_secs")]
+    pub subtask_react_timeout_secs: u64,
 }
 
 fn default_max_react_iterations() -> u32 {
@@ -193,6 +203,14 @@ fn default_plan_timeout_secs() -> u64 {
 
 fn default_subtask_max_retries() -> u32 {
     2 // Default maximum 2 retries per subtask
+}
+
+fn default_subtask_react_max_iterations() -> u32 {
+    5 // Default maximum 5 React iterations per subtask
+}
+
+fn default_subtask_react_timeout_secs() -> u64 {
+    60 // Default 60 seconds timeout per subtask
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

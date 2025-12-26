@@ -56,6 +56,10 @@ pub enum ServerError {
         attempts: u32,
         message: String,
     },
+    #[error("Subtask '{subtask_id}' timeout after {timeout_secs} seconds")]
+    SubtaskTimeout { subtask_id: usize, timeout_secs: u64 },
+    #[error("Plan time budget exhausted after {elapsed_secs} seconds")]
+    TimeBudgetExhausted { elapsed_secs: u64 },
 }
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
@@ -188,6 +192,23 @@ impl IntoResponse for ServerError {
                 "internal_error".into(),
                 Some("subtask".into()),
                 Some("subtask_retry_exhausted".into()),
+            ),
+            ServerError::SubtaskTimeout {
+                subtask_id,
+                timeout_secs,
+            } => (
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("Subtask '{subtask_id}' timeout after {timeout_secs} seconds"),
+                "timeout_error".into(),
+                Some("subtask_react_timeout_secs".into()),
+                Some("subtask_timeout".into()),
+            ),
+            ServerError::TimeBudgetExhausted { elapsed_secs } => (
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("Plan time budget exhausted after {elapsed_secs} seconds"),
+                "timeout_error".into(),
+                Some("plan_timeout_secs".into()),
+                Some("time_budget_exhausted".into()),
             ),
         };
 
