@@ -109,8 +109,9 @@ impl TimeBudget {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::thread::sleep;
+
+    use super::*;
 
     #[test]
     fn test_new_budget() {

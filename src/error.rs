@@ -57,7 +57,10 @@ pub enum ServerError {
         message: String,
     },
     #[error("Subtask '{subtask_id}' timeout after {timeout_secs} seconds")]
-    SubtaskTimeout { subtask_id: usize, timeout_secs: u64 },
+    SubtaskTimeout {
+        subtask_id: usize,
+        timeout_secs: u64,
+    },
     #[error("Plan time budget exhausted after {elapsed_secs} seconds")]
     TimeBudgetExhausted { elapsed_secs: u64 },
 }
