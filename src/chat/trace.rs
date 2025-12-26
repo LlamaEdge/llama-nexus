@@ -862,4 +862,207 @@ mod tests {
         assert_eq!(deserialized.subtask_count, 1);
         assert_eq!(deserialized.subtask_traces.len(), 1);
     }
+
+    // ========================================================================
+    // Subtask retry mechanism tests
+    // ========================================================================
+
+    #[test]
+    fn test_subtask_trace_record_retry() {
+        let mut trace = SubtaskTrace::new(1, "Test subtask".to_string());
+        trace.start();
+
+        // Add initial iteration
+        let mut iter1 = IterationTrace::new(1);
+        iter1.llm_tokens = TokenUsage::new(100, 50);
+        trace.add_iteration(iter1);
+
+        // Record first retry
+        trace.record_retry("First error".to_string());
+
+        assert_eq!(trace.retry_count, 1);
+        assert_eq!(trace.retry_history.len(), 1);
+        assert_eq!(trace.retry_history[0].attempt, 1);
+        assert_eq!(trace.retry_history[0].error, "First error");
+        assert_eq!(trace.retry_history[0].iterations.len(), 1);
+        // Current iterations should be cleared
+        assert!(trace.react_iterations.is_empty());
+        // React status should be reset
+        assert!(matches!(trace.react_status, TraceStatus::Success));
+    }
+
+    #[test]
+    fn test_subtask_trace_multiple_retries() {
+        let mut trace = SubtaskTrace::new(1, "Test subtask".to_string());
+        trace.start();
+
+        // First attempt
+        let mut iter1 = IterationTrace::new(1);
+        iter1.llm_tokens = TokenUsage::new(100, 50);
+        trace.add_iteration(iter1);
+        trace.record_retry("Error 1".to_string());
+
+        // Second attempt
+        let mut iter2 = IterationTrace::new(1);
+        iter2.llm_tokens = TokenUsage::new(80, 40);
+        trace.add_iteration(iter2);
+        trace.record_retry("Error 2".to_string());
+
+        // Third attempt (successful, no retry needed)
+        let mut iter3 = IterationTrace::new(1);
+        iter3.llm_tokens = TokenUsage::new(60, 30);
+        trace.add_iteration(iter3);
+        trace.complete("Finally done".to_string());
+
+        assert_eq!(trace.retry_count, 2);
+        assert_eq!(trace.retry_history.len(), 2);
+        assert_eq!(trace.retry_history[0].attempt, 1);
+        assert_eq!(trace.retry_history[1].attempt, 2);
+        assert_eq!(trace.react_iterations.len(), 1);
+    }
+
+    #[test]
+    fn test_subtask_trace_total_tokens_with_retries() {
+        let mut trace = SubtaskTrace::new(1, "Test subtask".to_string());
+        trace.start();
+
+        // First attempt: 100 + 50 = 150 tokens
+        let mut iter1 = IterationTrace::new(1);
+        iter1.llm_tokens = TokenUsage::new(100, 50);
+        trace.add_iteration(iter1);
+        trace.record_retry("Error 1".to_string());
+
+        // Second attempt: 80 + 40 = 120 tokens
+        let mut iter2 = IterationTrace::new(1);
+        iter2.llm_tokens = TokenUsage::new(80, 40);
+        trace.add_iteration(iter2);
+        trace.complete("Done".to_string());
+
+        // Total should include both attempts
+        let tokens = trace.total_tokens_with_retries();
+        assert_eq!(tokens.prompt_tokens, 180); // 100 + 80
+        assert_eq!(tokens.completion_tokens, 90); // 50 + 40
+        assert_eq!(tokens.total_tokens, 270);
+    }
+
+    #[test]
+    fn test_subtask_trace_total_tokens_no_retries() {
+        let mut trace = SubtaskTrace::new(1, "Test subtask".to_string());
+        trace.start();
+
+        let mut iter = IterationTrace::new(1);
+        iter.llm_tokens = TokenUsage::new(100, 50);
+        trace.add_iteration(iter);
+        trace.complete("Done".to_string());
+
+        // Should be same as total_tokens when no retries
+        let tokens_with_retries = trace.total_tokens_with_retries();
+        let tokens = trace.total_tokens();
+
+        assert_eq!(tokens_with_retries.prompt_tokens, tokens.prompt_tokens);
+        assert_eq!(
+            tokens_with_retries.completion_tokens,
+            tokens.completion_tokens
+        );
+        assert_eq!(tokens_with_retries.total_tokens, tokens.total_tokens);
+    }
+
+    #[test]
+    fn test_subtask_trace_summary_with_retries() {
+        let mut trace = SubtaskTrace::new(1, "Test subtask".to_string());
+        trace.start();
+
+        let mut iter = IterationTrace::new(1);
+        iter.llm_tokens = TokenUsage::new(100, 50);
+        trace.add_iteration(iter);
+        trace.record_retry("Error".to_string());
+
+        let mut iter2 = IterationTrace::new(1);
+        iter2.llm_tokens = TokenUsage::new(80, 40);
+        trace.add_iteration(iter2);
+        trace.complete("Done".to_string());
+
+        let summary = trace.summary();
+        assert!(summary.contains("retries=1"));
+        assert!(summary.contains("id=1"));
+    }
+
+    #[test]
+    fn test_plan_trace_add_subtask_with_retries() {
+        let mut plan_trace =
+            PlanTrace::new("plan-123".to_string(), "User goal".to_string(), vec![0]);
+        plan_trace.start();
+
+        // Create subtask with retries
+        let mut subtask = SubtaskTrace::new(0, "Subtask".to_string());
+        subtask.start();
+
+        // First attempt
+        let mut iter1 = IterationTrace::new(1);
+        iter1.llm_tokens = TokenUsage::new(100, 50);
+        subtask.add_iteration(iter1);
+        subtask.record_retry("Error".to_string());
+
+        // Second attempt
+        let mut iter2 = IterationTrace::new(1);
+        iter2.llm_tokens = TokenUsage::new(80, 40);
+        subtask.add_iteration(iter2);
+        subtask.complete("Result".to_string());
+
+        // Add to plan - should count all tokens including retries
+        plan_trace.add_subtask_trace(subtask);
+
+        // Total should include tokens from retry history
+        assert_eq!(plan_trace.total_tokens.prompt_tokens, 180); // 100 + 80
+        assert_eq!(plan_trace.total_tokens.completion_tokens, 90); // 50 + 40
+    }
+
+    #[test]
+    fn test_retry_attempt_serialization() {
+        let mut trace = SubtaskTrace::new(1, "Test".to_string());
+        trace.start();
+
+        let mut iter = IterationTrace::new(1);
+        iter.llm_tokens = TokenUsage::new(100, 50);
+        trace.add_iteration(iter);
+        trace.record_retry("Test error".to_string());
+
+        // Serialize
+        let json = serde_json::to_string(&trace).expect("Failed to serialize");
+
+        // Deserialize
+        let deserialized: SubtaskTrace =
+            serde_json::from_str(&json).expect("Failed to deserialize");
+
+        assert_eq!(deserialized.retry_count, 1);
+        assert_eq!(deserialized.retry_history.len(), 1);
+        assert_eq!(deserialized.retry_history[0].error, "Test error");
+        assert_eq!(deserialized.retry_history[0].iterations.len(), 1);
+    }
+
+    #[test]
+    fn test_plan_trace_summary_with_failures() {
+        let mut plan_trace =
+            PlanTrace::new("plan-123".to_string(), "User goal".to_string(), vec![0, 1]);
+        plan_trace.start();
+
+        // Add successful subtask
+        let mut subtask1 = SubtaskTrace::new(0, "Subtask 1".to_string());
+        subtask1.start();
+        subtask1.complete("Result".to_string());
+        plan_trace.add_subtask_trace(subtask1);
+
+        // Add failed subtask
+        let mut subtask2 = SubtaskTrace::new(1, "Subtask 2".to_string());
+        subtask2.start();
+        subtask2.fail("Error occurred".to_string());
+        plan_trace.add_subtask_trace(subtask2);
+
+        plan_trace.finalize(TraceStatus::Error("Partial failure".to_string()));
+
+        let summary = plan_trace.summary();
+        // Format: "subtasks=1/2 completed, failed=1"
+        assert!(summary.contains("subtasks=1/2 completed"));
+        assert!(summary.contains("failed=1"));
+    }
 }

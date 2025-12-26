@@ -1290,4 +1290,159 @@ mod tests {
         assert!(matches!(trace.plan_status, TraceStatus::Success));
         assert!(trace.end_time.is_some());
     }
+
+    // ========================================================================
+    // is_retryable_error tests
+    // ========================================================================
+
+    #[test]
+    fn test_is_retryable_error_tool_call_retry_exhausted() {
+        let error = ServerError::ToolCallRetryExhausted {
+            tool_name: "test_tool".to_string(),
+            attempts: 3,
+            message: "Failed".to_string(),
+        };
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_max_iterations_exceeded() {
+        let error = ServerError::MaxIterationsExceeded(10);
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_subtask_timeout() {
+        let error = ServerError::SubtaskTimeout {
+            subtask_id: 1,
+            timeout_secs: 60,
+        };
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_mcp_operation() {
+        let error = ServerError::McpOperation("Connection failed".to_string());
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_mcp_empty_content() {
+        let error = ServerError::McpEmptyContent;
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_react_timeout() {
+        let error = ServerError::ReactTimeout(300);
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_error_operation() {
+        let error = ServerError::Operation("Client cancelled".to_string());
+        assert!(!is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_error_plan_parse_error() {
+        let error = ServerError::PlanParseError("Invalid XML".to_string());
+        assert!(!is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_error_cyclic_dependency() {
+        let error = ServerError::CyclicDependency;
+        assert!(!is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_error_empty_plan() {
+        let error = ServerError::EmptyPlan;
+        assert!(!is_retryable_error(&error));
+    }
+
+    // ========================================================================
+    // build_context_for_react additional tests
+    // ========================================================================
+
+    #[test]
+    fn test_build_context_for_react_partial_dependencies() {
+        // Subtask depends on 0 and 1, but only 0 is available
+        let subtask =
+            SubTask::new(2, "Summarize results".to_string()).with_dependencies(vec![0, 1]);
+        let previous_results = vec![(0, "Beijing: Sunny".to_string())];
+        let available_tools = vec![];
+
+        let messages = build_context_for_react(&subtask, &previous_results, &available_tools);
+
+        // Should have system message + context message (with partial deps) + task message
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn test_build_context_for_react_system_message_contains_task() {
+        let subtask = SubTask::new(0, "Query weather for Beijing".to_string());
+        let previous_results: Vec<(usize, String)> = vec![];
+        let available_tools = vec![ToolDescription {
+            name: "weather---weather-server".to_string(),
+            description: "Get weather information".to_string(),
+        }];
+
+        let messages = build_context_for_react(&subtask, &previous_results, &available_tools);
+
+        // Check system message contains task description
+        if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
+            assert!(sys_msg.content().contains("Query weather for Beijing"));
+            assert!(sys_msg.content().contains("weather---weather-server"));
+        } else {
+            panic!("First message should be system message");
+        }
+    }
+
+    #[test]
+    fn test_build_context_for_react_empty_tools() {
+        let subtask = SubTask::new(0, "Simple task".to_string());
+        let previous_results: Vec<(usize, String)> = vec![];
+        let available_tools: Vec<ToolDescription> = vec![];
+
+        let messages = build_context_for_react(&subtask, &previous_results, &available_tools);
+
+        assert_eq!(messages.len(), 2);
+        // System message should still exist even without tools
+        assert!(matches!(
+            &messages[0],
+            ChatCompletionRequestMessage::System(_)
+        ));
+    }
+
+    // ========================================================================
+    // build_tools_json additional tests
+    // ========================================================================
+
+    #[test]
+    fn test_build_tools_json_empty() {
+        let tools: Vec<ToolDescription> = vec![];
+        let tools_json = build_tools_json(&tools);
+
+        assert!(tools_json.is_array());
+        assert_eq!(tools_json.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_build_tools_json_structure() {
+        let tools = vec![ToolDescription {
+            name: "test-tool---test-server".to_string(),
+            description: "A test tool".to_string(),
+        }];
+
+        let tools_json = build_tools_json(&tools);
+
+        let tool = &tools_json[0];
+        assert_eq!(tool["type"], "function");
+        assert_eq!(tool["function"]["name"], "test-tool---test-server");
+        assert_eq!(tool["function"]["description"], "A test tool");
+        assert!(tool["function"]["parameters"]["properties"]["query"].is_object());
+        assert_eq!(tool["function"]["parameters"]["required"][0], "query");
+    }
 }
