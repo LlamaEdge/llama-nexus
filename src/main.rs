@@ -7,6 +7,7 @@ mod mcp;
 mod memory;
 mod responses;
 mod server;
+mod skills;
 mod utils;
 
 use std::{
