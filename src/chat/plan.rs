@@ -45,6 +45,7 @@ use crate::{
     error::{ServerError, ServerResult},
     mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SEPARATOR, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES},
     server::{RoutingPolicy, ServerKind},
+    skills::SkillRegistry,
 };
 
 // ============================================================================
@@ -140,13 +141,34 @@ pub(crate) async fn chat(
     // Get available tools from MCP services
     let available_tools = get_available_tools().await;
 
+    // Get available Skills summaries from global registry
+    let skills_summaries = match SkillRegistry::global() {
+        Ok(registry) => {
+            let summaries = registry.get_summaries().await;
+            if !summaries.is_empty() {
+                dual_info!(
+                    "📚 Loaded {} skills for planning - request_id: {}",
+                    summaries.len(),
+                    request_id
+                );
+            }
+            summaries
+        }
+        Err(_) => {
+            // Skills registry not initialized, continue without skills
+            dual_debug!("Skills registry not available - request_id: {}", request_id);
+            vec![]
+        }
+    };
+
     // Create task planner
     let planner = TaskPlanner::with_chat_llm(
         format!("{}/chat/completions", chat_server.url.trim_end_matches('/')),
         chat_server.api_key.clone(),
         max_plan_subtasks,
     )
-    .with_tools(available_tools.clone());
+    .with_tools(available_tools.clone())
+    .with_skills(skills_summaries);
 
     // Generate task plan
     let mut plan = match planner.plan(&user_request).await {
@@ -169,12 +191,18 @@ pub(crate) async fn chat(
 
     // Log the plan
     for (i, subtask) in plan.subtasks.iter().enumerate() {
+        let skill_info = subtask
+            .recommended_skill
+            .as_ref()
+            .map(|s| format!(", skill: {}", s))
+            .unwrap_or_default();
         dual_debug!(
-            "  Subtask {}: {} (deps: {:?}, tools: {:?})",
+            "  Subtask {}: {} (deps: {:?}, tools: {:?}{})",
             subtask.id,
             subtask.description,
             subtask.dependencies,
-            subtask.required_tools
+            subtask.required_tools,
+            skill_info
         );
         if i < plan.execution_order.len() {
             dual_debug!("  Execution order[{}]: {}", i, plan.execution_order[i]);

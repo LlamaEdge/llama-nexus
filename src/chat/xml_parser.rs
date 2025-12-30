@@ -365,6 +365,11 @@ static DEPENDENCIES_PATTERN: Lazy<Regex> =
 static TOOLS_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?si)<\s*tools\s*>(.*?)<\s*/\s*tools\s*>").unwrap());
 
+/// Regex pattern for recommended_skill within subtask.
+static RECOMMENDED_SKILL_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?si)<\s*recommended_skill\s*>(.*?)<\s*/\s*recommended_skill\s*>").unwrap()
+});
+
 /// Raw task plan structure (before validation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskPlanRaw {
@@ -385,6 +390,8 @@ pub struct SubTaskRaw {
     pub dependencies: Vec<String>,
     /// Tool names.
     pub tools: Vec<String>,
+    /// Recommended skill name (optional).
+    pub recommended_skill: Option<String>,
 }
 
 /// Extracts a task plan from LLM response content.
@@ -463,11 +470,19 @@ pub fn extract_task_plan(content: &str) -> Option<TaskPlanRaw> {
             })
             .unwrap_or_default();
 
+        // Extract recommended skill (optional)
+        let recommended_skill = RECOMMENDED_SKILL_PATTERN
+            .captures(subtask_content)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string())
+            .filter(|s| !s.is_empty());
+
         subtasks.push(SubTaskRaw {
             id,
             description,
             dependencies,
             tools,
+            recommended_skill,
         });
     }
 
@@ -638,11 +653,19 @@ fn try_extract_task_plan_raw(content: &str) -> Option<TaskPlanRaw> {
             })
             .unwrap_or_default();
 
+        // Extract recommended skill (optional)
+        let recommended_skill = RECOMMENDED_SKILL_PATTERN
+            .captures(subtask_content)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string())
+            .filter(|s| !s.is_empty());
+
         subtasks.push(SubTaskRaw {
             id,
             description,
             dependencies,
             tools,
+            recommended_skill,
         });
     }
 
@@ -953,6 +976,59 @@ mod tests {
 "#;
         let plan = extract_task_plan(content).unwrap();
         assert_eq!(plan.subtasks[0].tools, vec!["search", "analyze", "report"]);
+    }
+
+    #[test]
+    fn test_extract_task_plan_with_recommended_skill() {
+        let content = r#"
+<task_plan>
+  <goal>Query weather and send email</goal>
+  <subtasks>
+    <subtask id="1">
+      <description>Query weather for Beijing</description>
+      <dependencies></dependencies>
+      <tools>weather_query</tools>
+      <recommended_skill>weather-query</recommended_skill>
+    </subtask>
+    <subtask id="2">
+      <description>Send email with results</description>
+      <dependencies>1</dependencies>
+      <tools>send_email</tools>
+    </subtask>
+  </subtasks>
+</task_plan>
+"#;
+        let plan = extract_task_plan(content).unwrap();
+        assert_eq!(plan.subtasks.len(), 2);
+
+        // First subtask has recommended_skill
+        assert_eq!(
+            plan.subtasks[0].recommended_skill,
+            Some("weather-query".to_string())
+        );
+
+        // Second subtask has no recommended_skill
+        assert_eq!(plan.subtasks[1].recommended_skill, None);
+    }
+
+    #[test]
+    fn test_extract_task_plan_recommended_skill_empty() {
+        let content = r#"
+<task_plan>
+  <goal>Simple task</goal>
+  <subtasks>
+    <subtask id="1">
+      <description>Task description</description>
+      <dependencies></dependencies>
+      <tools>tool1</tools>
+      <recommended_skill></recommended_skill>
+    </subtask>
+  </subtasks>
+</task_plan>
+"#;
+        let plan = extract_task_plan(content).unwrap();
+        // Empty recommended_skill should be treated as None
+        assert_eq!(plan.subtasks[0].recommended_skill, None);
     }
 
     // Plan mode XML parsing enhancement tests

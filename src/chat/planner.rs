@@ -11,7 +11,7 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::error::ServerError;
+use crate::{error::ServerError, skills::SkillSummary};
 
 // ============================================================================
 // Data Structures
@@ -89,6 +89,10 @@ pub struct SubTask {
     pub dependencies: Vec<usize>,
     /// Names of tools that may be needed for this subtask.
     pub required_tools: Vec<String>,
+    /// Recommended skill for this subtask (optional).
+    /// When set, the execution phase will use this skill's context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_skill: Option<String>,
     /// Current execution status.
     pub status: SubTaskStatus,
     /// Result of execution, if completed.
@@ -103,6 +107,7 @@ impl SubTask {
             description,
             dependencies: vec![],
             required_tools: vec![],
+            recommended_skill: None,
             status: SubTaskStatus::Pending,
             result: None,
         }
@@ -117,6 +122,12 @@ impl SubTask {
     /// Sets the required tools for this subtask.
     pub fn with_tools(mut self, tools: Vec<String>) -> Self {
         self.required_tools = tools;
+        self
+    }
+
+    /// Sets the recommended skill for this subtask.
+    pub fn with_skill(mut self, skill: Option<String>) -> Self {
+        self.recommended_skill = skill;
         self
     }
 
@@ -318,6 +329,8 @@ pub struct TaskPlanner {
     available_tools: Vec<ToolDescription>,
     /// Maximum number of subtasks allowed.
     max_subtasks: usize,
+    /// Available skills summaries for Plan Mode.
+    skills_summaries: Vec<SkillSummary>,
 }
 
 impl TaskPlanner {
@@ -327,6 +340,7 @@ impl TaskPlanner {
             llm_provider: Arc::new(ChatLlmProvider::new(chat_url, api_key)),
             available_tools: vec![],
             max_subtasks,
+            skills_summaries: vec![],
         }
     }
 
@@ -337,12 +351,22 @@ impl TaskPlanner {
             llm_provider: provider,
             available_tools: vec![],
             max_subtasks,
+            skills_summaries: vec![],
         }
     }
 
     /// Sets the available tools for planning.
     pub fn with_tools(mut self, tools: Vec<ToolDescription>) -> Self {
         self.available_tools = tools;
+        self
+    }
+
+    /// Sets the available skills for planning.
+    ///
+    /// Skills will be included in the system prompt to help the planner
+    /// recommend appropriate skills for subtasks.
+    pub fn with_skills(mut self, skills: Vec<SkillSummary>) -> Self {
+        self.skills_summaries = skills;
         self
     }
 
@@ -394,13 +418,56 @@ impl TaskPlanner {
                 .join("\n")
         };
 
-        format!(
-            r#"你是一个任务规划专家。请分析用户的请求，将其分解为可执行的子任务。
+        // Build skills section if available
+        let skills_section = if self.skills_summaries.is_empty() {
+            String::new()
+        } else {
+            let skills_table = self
+                .skills_summaries
+                .iter()
+                .map(|s| format!("| {} | {} |", s.name, s.description))
+                .collect::<Vec<_>>()
+                .join("\n");
 
+            format!(
+                r#"
+## 可用 Skills
+
+以下是可用的专业技能，可以在子任务中推荐使用：
+
+| Skill | 描述 |
+|-------|------|
+{skills_table}
+
+"#,
+                skills_table = skills_table
+            )
+        };
+
+        // Build recommended_skill tag hint for output format
+        let recommended_skill_tag = if self.skills_summaries.is_empty() {
+            String::new()
+        } else {
+            "\n      <recommended_skill>推荐的 Skill 名称（可选）</recommended_skill>".to_string()
+        };
+
+        // Build skill recommendation rule if skills are available
+        let skill_rule = if self.skills_summaries.is_empty() {
+            String::new()
+        } else {
+            "\n7. 如果某个子任务适合使用特定的 Skill，请在 `<recommended_skill>` 标签中指定"
+                .to_string()
+        };
+
+        format!(
+            r#"你是一个专业的任务规划专家。你的任务是将用户的复杂请求分解为可执行的子任务。
+{skills_section}
 ## 可用工具
+
 {tools_desc}
 
 ## 输出格式
+
 请使用以下 XML 格式输出任务计划：
 
 <task_plan>
@@ -409,25 +476,29 @@ impl TaskPlanner {
     <subtask id="1">
       <description>子任务描述</description>
       <dependencies></dependencies>
-      <tools>可能需要的工具名称</tools>
+      <tools>可能需要的工具名称</tools>{recommended_skill_tag}
     </subtask>
     <subtask id="2">
       <description>子任务描述</description>
       <dependencies>1</dependencies>
-      <tools>可能需要的工具名称</tools>
+      <tools>可能需要的工具名称</tools>{recommended_skill_tag}
     </subtask>
   </subtasks>
 </task_plan>
 
 ## 规划原则
+
 1. 每个子任务应该是原子性的、可独立执行的
 2. 每个子任务对应一次工具调用（细粒度规划）
 3. 明确标注子任务之间的依赖关系
 4. 依赖关系中的 ID 必须是已定义的子任务 ID
 5. 如果任务简单，可以只有一个子任务
-6. 子任务数量不应超过 {max_subtasks} 个"#,
+6. 子任务数量不应超过 {max_subtasks} 个{skill_rule}"#,
+            skills_section = skills_section,
             tools_desc = tools_desc,
-            max_subtasks = self.max_subtasks
+            recommended_skill_tag = recommended_skill_tag,
+            max_subtasks = self.max_subtasks,
+            skill_rule = skill_rule
         )
     }
 
@@ -486,7 +557,8 @@ impl TaskPlanner {
 
             let subtask = SubTask::new(id, raw_subtask.description.clone())
                 .with_dependencies(dependencies)
-                .with_tools(raw_subtask.tools.clone());
+                .with_tools(raw_subtask.tools.clone())
+                .with_skill(raw_subtask.recommended_skill.clone());
 
             subtasks.push(subtask);
         }
