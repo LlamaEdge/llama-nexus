@@ -39,8 +39,10 @@ use tracing::Level;
 use uuid::Uuid;
 
 use crate::{
+    config::ChatMode,
     info::ServerInfo,
     server::{Server, ServerGroup, ServerId, ServerKind},
+    skills::SkillRegistry,
 };
 
 // Global health check interval for downstream servers in seconds
@@ -148,6 +150,65 @@ async fn main() -> ServerResult<()> {
         dual_info!("Memory system is not configured");
         None
     };
+
+    // Initialize Skills system if in Plan Mode and Skills are enabled
+    if config.server.chat_mode == ChatMode::Plan {
+        // Get skill config or use defaults
+        let skill_config = config.skill.clone().unwrap_or_default();
+
+        if skill_config.enabled {
+            dual_info!("Skills system is enabled for Plan Mode");
+
+            // Find the first valid skills directory
+            let mut skills_dir = None;
+            for dir in &skill_config.directories {
+                let expanded_dir = shellexpand::tilde(dir).to_string();
+                let path = std::path::Path::new(&expanded_dir);
+                if path.exists() && path.is_dir() {
+                    skills_dir = Some(expanded_dir);
+                    break;
+                }
+            }
+
+            if let Some(dir) = skills_dir {
+                match SkillRegistry::init_global(PathBuf::from(&dir)) {
+                    Ok(registry) => {
+                        // Load all skills from the directory
+                        match registry.load_all().await {
+                            Ok(count) => {
+                                dual_info!(
+                                    "Skills system initialized: loaded {} skills from {}",
+                                    count,
+                                    dir
+                                );
+                            }
+                            Err(e) => {
+                                dual_warn!(
+                                    "Failed to load skills: {}. Continuing without skills.",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        dual_warn!(
+                            "Failed to initialize skills registry: {}. Continuing without skills.",
+                            e
+                        );
+                    }
+                }
+            } else {
+                dual_info!(
+                    "No skills directories found. Searched: {:?}",
+                    skill_config.directories
+                );
+            }
+        } else {
+            dual_info!("Skills system is disabled in config");
+        }
+    } else {
+        dual_debug!("Skills system is only available in Plan Mode");
+    }
 
     // Initialize application state
     let mut state = AppState::new(config, ServerInfo::default());

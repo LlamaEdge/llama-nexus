@@ -52,6 +52,9 @@ pub struct Config {
     pub server_health_push_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfig>,
+    /// Skills configuration (only effective in Plan Mode)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill: Option<SkillConfig>,
 }
 impl Config {
     pub async fn load(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
@@ -110,6 +113,7 @@ impl Default for Config {
             server_info_push_url: None,
             server_health_push_url: None,
             mcp: None,
+            skill: None,
         }
     }
 }
@@ -1061,4 +1065,37 @@ async fn callback_handler(
     }
     // Return success page
     Html(CALLBACK_HTML.to_string())
+}
+
+/// Skills configuration for Plan Mode
+///
+/// Controls the behavior of Agent Skills support in Plan Mode.
+/// Skills are only active when `chat_mode = "plan"`.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SkillConfig {
+    /// Enable or disable Skills functionality (only effective in Plan Mode)
+    #[serde(default = "default_skills_enabled")]
+    pub enabled: bool,
+
+    /// List of directories to scan for Skills
+    /// Each directory should contain skill subdirectories with SKILL.md files
+    #[serde(default = "default_skills_directories")]
+    pub directories: Vec<String>,
+}
+
+fn default_skills_enabled() -> bool {
+    true
+}
+
+fn default_skills_directories() -> Vec<String> {
+    vec![".skills".to_string(), "~/.llama-nexus/skills".to_string()]
+}
+
+impl Default for SkillConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_skills_enabled(),
+            directories: default_skills_directories(),
+        }
+    }
 }
