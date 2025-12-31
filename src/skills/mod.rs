@@ -21,10 +21,18 @@ pub mod validator;
 mod e2e_tests;
 
 pub use detector::SkillDetector;
+#[allow(unused_imports)]
 pub use error::SkillError;
 pub use injector::SkillInjector;
+#[allow(unused_imports)]
 pub use loader::SkillLoader;
+#[allow(unused_imports)]
 pub use parser::SkillParser;
-pub use registry::{SKILLS_REGISTRY, SkillRegistry};
-pub use types::{LoadedSkill, ScriptInfo, SkillMetadata, SkillSummary};
+#[allow(unused_imports)]
+pub use registry::SKILLS_REGISTRY;
+pub use registry::SkillRegistry;
+pub use types::{LoadedSkill, SkillSummary};
+#[allow(unused_imports)]
+pub use types::{ScriptInfo, SkillMetadata};
+#[allow(unused_imports)]
 pub use validator::validate_skill_name;

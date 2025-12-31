@@ -15,8 +15,12 @@ static USE_SKILL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Skill detector for identifying skill activation requests
+///
+/// Public API for detecting skill requests in LLM responses.
+/// Methods are available for future API endpoints and integrations.
 pub struct SkillDetector;
 
+#[allow(dead_code)]
 impl SkillDetector {
     /// Detect all skill names requested in the text
     ///

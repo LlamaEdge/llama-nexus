@@ -69,18 +69,22 @@ pub struct LoadedSkill {
     pub content: String,
 
     /// Raw file content (for debugging)
+    #[allow(dead_code)]
     pub raw_content: String,
 
     /// Directory containing the skill
+    #[allow(dead_code)]
     pub skill_dir: PathBuf,
 
     /// Path to SKILL.md file
+    #[allow(dead_code)]
     pub file_path: String,
 
     /// Whether this skill is enabled
     pub enabled: bool,
 
     /// When this skill was loaded
+    #[allow(dead_code)]
     pub loaded_at: DateTime<Utc>,
 }
 
@@ -116,6 +120,7 @@ impl From<&SkillMetadata> for SkillSummary {
 
 /// Script information from the scripts/ directory
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ScriptInfo {
     /// Script filename
     pub name: String,

@@ -45,7 +45,7 @@ use crate::{
     error::{ServerError, ServerResult},
     mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SEPARATOR, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES},
     server::{RoutingPolicy, ServerKind},
-    skills::{LoadedSkill, SkillDetector, SkillRegistry, SkillSummary},
+    skills::{LoadedSkill, SkillDetector, SkillInjector, SkillRegistry, SkillSummary},
 };
 
 // ============================================================================
@@ -735,57 +735,57 @@ async fn execute_subtask_with_react(
                 }
 
                 // Check for skill request (Phase 1 -> Phase 2 transition)
-                if active_skill.is_none() {
-                    if let Some(skill_name) = SkillDetector::detect_first(content) {
-                        dual_info!(
-                            "🎯 Subtask {} requested skill: {} - request_id: {}",
-                            subtask.id,
-                            skill_name,
-                            request_id
-                        );
+                if active_skill.is_none()
+                    && let Some(skill_name) = SkillDetector::detect_first(content)
+                {
+                    dual_info!(
+                        "🎯 Subtask {} requested skill: {} - request_id: {}",
+                        subtask.id,
+                        skill_name,
+                        request_id
+                    );
 
-                        // Try to load the requested skill
-                        if let Ok(registry) = SkillRegistry::global() {
-                            if let Some(loaded_skill) = registry.get(&skill_name).await {
-                                dual_info!(
-                                    "📖 Loaded skill '{}' for subtask {} - request_id: {}",
-                                    skill_name,
-                                    subtask.id,
-                                    request_id
-                                );
+                    // Try to load the requested skill
+                    if let Ok(registry) = SkillRegistry::global() {
+                        if let Some(loaded_skill) = registry.get(&skill_name).await {
+                            dual_info!(
+                                "📖 Loaded skill '{}' for subtask {} - request_id: {}",
+                                skill_name,
+                                subtask.id,
+                                request_id
+                            );
 
-                                // Record skill request in iteration trace (successful load)
-                                iter_trace.set_skill_request(skill_name.clone(), true);
+                            // Record skill request in iteration trace (successful load)
+                            iter_trace.set_skill_request(skill_name.clone(), true);
 
-                                // Record skill activation in subtask trace
-                                subtask_trace.set_active_skill(skill_name.clone());
+                            // Record skill activation in subtask trace
+                            subtask_trace.set_active_skill(skill_name.clone());
 
-                                // Store the active skill
-                                active_skill = Some(loaded_skill.clone());
+                            // Store the active skill
+                            active_skill = Some(loaded_skill.clone());
 
-                                // Rebuild context with the active skill (Phase 2)
-                                messages = build_context_for_react(
-                                    subtask,
-                                    previous_results,
-                                    available_tools,
-                                    None, // No need for summaries in Phase 2
-                                    Some(&loaded_skill),
-                                );
+                            // Rebuild context with the active skill (Phase 2)
+                            messages = build_context_for_react(
+                                subtask,
+                                previous_results,
+                                available_tools,
+                                None, // No need for summaries in Phase 2
+                                Some(&loaded_skill),
+                            );
 
-                                // Finalize iteration trace and continue loop
-                                iter_trace.duration = iter_start.elapsed();
-                                subtask_trace.add_iteration(iter_trace);
-                                continue;
-                            } else {
-                                // Record skill request in iteration trace (failed to load)
-                                iter_trace.set_skill_request(skill_name.clone(), false);
+                            // Finalize iteration trace and continue loop
+                            iter_trace.duration = iter_start.elapsed();
+                            subtask_trace.add_iteration(iter_trace);
+                            continue;
+                        } else {
+                            // Record skill request in iteration trace (failed to load)
+                            iter_trace.set_skill_request(skill_name.clone(), false);
 
-                                dual_warn!(
-                                    "⚠️ Skill '{}' not found, continuing without skill - request_id: {}",
-                                    skill_name,
-                                    request_id
-                                );
-                            }
+                            dual_warn!(
+                                "⚠️ Skill '{}' not found, continuing without skill - request_id: {}",
+                                skill_name,
+                                request_id
+                            );
                         }
                     }
                 }
@@ -1010,21 +1010,16 @@ fn build_context_for_react(
 
     // Build the system prompt based on whether we have an active skill
     let system_prompt = match active_skill {
-        // Phase 2: Active skill - inject full skill content
+        // Phase 2: Active skill - inject full skill content using SkillInjector
         Some(skill) => {
+            let skill_section = SkillInjector::phase2_injection(skill);
             format!(
                 r#"You are an AI assistant executing a specific subtask as part of a larger plan.
 
 ## Your Task
 {}
 
-## Active Skill: {}
-
-The following skill instructions guide how to complete this task:
-
----
 {}
----
 
 ## Available Tools
 {}
@@ -1041,39 +1036,15 @@ The following skill instructions guide how to complete this task:
 - When done, use <final_answer></final_answer> tags for your final response
 
 Remember: Focus only on this specific subtask. Follow the skill instructions carefully."#,
-                subtask.description, skill.metadata.name, skill.content, tools_desc
+                subtask.description, skill_section, tools_desc
             )
         }
-        // Phase 1: No active skill - show skills summaries if available
+        // Phase 1: No active skill - show skills summaries if available using SkillInjector
         None => {
-            // Build skills section if summaries are provided
+            // Build skills section using SkillInjector
             let skills_section = match skills_summaries {
-                Some(summaries) if !summaries.is_empty() => {
-                    let skills_table = summaries
-                        .iter()
-                        .map(|s| format!("| {} | {} |", s.name, s.description))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    format!(
-                        r#"
-
-## Available Skills
-
-The following skills are available to help you complete this task:
-
-| Skill | Description |
-|-------|-------------|
-{}
-
-If you need to use a skill, wrap the skill name in <use_skill></use_skill> tags at the beginning of your response.
-Example: <use_skill>skill-name</use_skill>
-
-"#,
-                        skills_table
-                    )
-                }
-                _ => String::new(),
+                Some(summaries) => SkillInjector::phase1_injection(summaries),
+                None => String::new(),
             };
 
             format!(
@@ -1159,8 +1130,7 @@ fn filter_tools_by_patterns<'a>(
     allowed_patterns: Option<&[String]>,
 ) -> Vec<&'a ToolDescription> {
     match allowed_patterns {
-        None => tools.iter().collect(),
-        Some(patterns) if patterns.is_empty() => tools.iter().collect(),
+        None | Some([]) => tools.iter().collect(),
         Some(patterns) => tools
             .iter()
             .filter(|tool| {

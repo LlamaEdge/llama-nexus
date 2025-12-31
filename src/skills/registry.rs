@@ -133,6 +133,7 @@ impl SkillRegistry {
     ///
     /// # Arguments
     /// * `name` - The skill name
+    #[allow(dead_code)]
     pub async fn exists(&self, name: &str) -> bool {
         self.skills.read().await.contains_key(name)
     }
@@ -151,11 +152,13 @@ impl SkillRegistry {
     }
 
     /// Get all skill names
+    #[allow(dead_code)]
     pub async fn list_names(&self) -> Vec<String> {
         self.skills.read().await.keys().cloned().collect()
     }
 
     /// Get the number of loaded skills
+    #[allow(dead_code)]
     pub async fn count(&self) -> usize {
         self.skills.read().await.len()
     }
@@ -165,6 +168,7 @@ impl SkillRegistry {
     /// # Arguments
     /// * `name` - The skill name
     /// * `enabled` - Whether to enable or disable
+    #[allow(dead_code)]
     pub async fn set_enabled(&self, name: &str, enabled: bool) -> SkillResult<()> {
         let mut skills = self.skills.write().await;
 
@@ -180,6 +184,7 @@ impl SkillRegistry {
     ///
     /// # Arguments
     /// * `name` - The skill name to reload
+    #[allow(dead_code)]
     pub async fn reload(&self, name: &str) -> SkillResult<()> {
         let skill_dir = self.skills_dir.join(name);
 
@@ -194,6 +199,7 @@ impl SkillRegistry {
     }
 
     /// Reload all skills
+    #[allow(dead_code)]
     pub async fn reload_all(&self) -> SkillResult<usize> {
         self.skills.write().await.clear();
         self.load_all().await

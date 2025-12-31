@@ -1,42 +1,56 @@
 //! Skill Injector for prompt enhancement
 //!
 //! Injects skill information into system prompts:
-//! - Phase 1: Skill summaries (name + description)
+//! - Phase 1: Skill summaries (name + description) in table format
 //! - Phase 2: Full skill content when activated
 
 use crate::skills::types::{LoadedSkill, SkillSummary};
 
 /// Skill injector for enhancing system prompts
+///
+/// Provides methods for injecting skill information into prompts.
+/// Used by plan.rs for two-phase skill loading.
 pub struct SkillInjector;
 
 impl SkillInjector {
     /// Generate Phase 1 injection text with skill summaries
     ///
-    /// Creates a formatted list of available skills with their descriptions
+    /// Creates a formatted table of available skills with their descriptions
     /// for the LLM to consider when planning.
     ///
     /// # Arguments
     /// * `summaries` - List of skill summaries to inject
     ///
     /// # Returns
-    /// Formatted markdown text for system prompt injection
+    /// Formatted markdown text for system prompt injection (empty if no summaries)
     pub fn phase1_injection(summaries: &[SkillSummary]) -> String {
         if summaries.is_empty() {
             return String::new();
         }
 
-        let mut output = String::from("\n## Available Skills\n\n");
-        output.push_str("The following skills are available. To use a skill, output `<use_skill>skill-name</use_skill>`.\n\n");
+        let skills_table = summaries
+            .iter()
+            .map(|s| format!("| {} | {} |", s.name, s.description))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        for summary in summaries {
-            output.push_str(&format!(
-                "- **{}**: {}\n",
-                summary.name, summary.description
-            ));
-        }
+        format!(
+            r#"
 
-        output.push('\n');
-        output
+## Available Skills
+
+The following skills are available to help you complete this task:
+
+| Skill | Description |
+|-------|-------------|
+{}
+
+If you need to use a skill, wrap the skill name in <use_skill></use_skill> tags at the beginning of your response.
+Example: <use_skill>skill-name</use_skill>
+
+"#,
+            skills_table
+        )
     }
 
     /// Generate Phase 2 injection text with full skill content
@@ -47,41 +61,18 @@ impl SkillInjector {
     /// * `skill` - The fully loaded skill to inject
     ///
     /// # Returns
-    /// Formatted text for system prompt injection
+    /// Formatted text with skill name and full content
     pub fn phase2_injection(skill: &LoadedSkill) -> String {
-        let mut output = format!("\n## Skill: {}\n\n", skill.metadata.name);
+        format!(
+            r#"## Active Skill: {}
 
-        // Add metadata section if there are additional fields
-        if skill.metadata.license.is_some()
-            || skill.metadata.compatibility.is_some()
-            || skill.metadata.allowed_tools.is_some()
-        {
-            output.push_str("### Metadata\n\n");
+The following skill instructions guide how to complete this task:
 
-            if let Some(license) = &skill.metadata.license {
-                output.push_str(&format!("- **License**: {}\n", license));
-            }
-
-            if let Some(compatibility) = &skill.metadata.compatibility {
-                output.push_str(&format!("- **Compatibility**: {}\n", compatibility));
-            }
-
-            if let Some(allowed_tools) = &skill.metadata.allowed_tools {
-                output.push_str(&format!("- **Allowed Tools**: {}\n", allowed_tools));
-            }
-
-            output.push('\n');
-        }
-
-        // Add the main content
-        output.push_str("### Instructions\n\n");
-        output.push_str(&skill.content);
-
-        if !skill.content.ends_with('\n') {
-            output.push('\n');
-        }
-
-        output
+---
+{}
+---"#,
+            skill.metadata.name, skill.content
+        )
     }
 
     /// Generate injection text for multiple skills
@@ -91,6 +82,7 @@ impl SkillInjector {
     ///
     /// # Returns
     /// Combined injection text for all skills
+    #[allow(dead_code)]
     pub fn multi_skill_injection(skills: &[LoadedSkill]) -> String {
         if skills.is_empty() {
             return String::new();
@@ -100,6 +92,7 @@ impl SkillInjector {
 
         for skill in skills {
             output.push_str(&Self::phase2_injection(skill));
+            output.push_str("\n\n");
         }
 
         output
@@ -113,6 +106,7 @@ impl SkillInjector {
     ///
     /// # Returns
     /// Enhanced system prompt with skill information
+    #[allow(dead_code)]
     pub fn inject_summaries(system_prompt: &str, summaries: &[SkillSummary]) -> String {
         let injection = Self::phase1_injection(summaries);
 
@@ -131,6 +125,7 @@ impl SkillInjector {
     ///
     /// # Returns
     /// Enhanced system prompt with full skill content
+    #[allow(dead_code)]
     pub fn inject_skill(system_prompt: &str, skill: &LoadedSkill) -> String {
         let injection = Self::phase2_injection(skill);
         format!("{}\n{}", system_prompt, injection)
@@ -215,14 +210,16 @@ mod tests {
 
         let result = SkillInjector::phase2_injection(&skill);
 
-        assert!(result.contains("## Skill: test-skill"));
-        assert!(result.contains("### Instructions"));
+        assert!(result.contains("## Active Skill: test-skill"));
+        assert!(result.contains("The following skill instructions"));
         assert!(result.contains("# Test Content"));
         assert!(result.contains("Do this and that."));
+        assert!(result.contains("---")); // Content wrapped in ---
     }
 
     #[test]
     fn test_phase2_injection_with_metadata() {
+        // Metadata is now part of the skill content, not injected separately
         let mut skill = create_test_skill("test-skill", "Content here");
         skill.metadata.license = Some("MIT".to_string());
         skill.metadata.compatibility = Some("Requires Python 3.8+".to_string());
@@ -230,10 +227,10 @@ mod tests {
 
         let result = SkillInjector::phase2_injection(&skill);
 
-        assert!(result.contains("### Metadata"));
-        assert!(result.contains("**License**: MIT"));
-        assert!(result.contains("**Compatibility**: Requires Python 3.8+"));
-        assert!(result.contains("**Allowed Tools**: Bash Read"));
+        // New format just wraps content in --- delimiters
+        assert!(result.contains("## Active Skill: test-skill"));
+        assert!(result.contains("Content here"));
+        assert!(result.contains("---"));
     }
 
     #[test]
@@ -286,7 +283,7 @@ mod tests {
         let result = SkillInjector::inject_skill(system_prompt, &skill);
 
         assert!(result.starts_with("You are a helpful assistant."));
-        assert!(result.contains("## Skill: my-skill"));
+        assert!(result.contains("## Active Skill: my-skill"));
         assert!(result.contains("Do the thing."));
     }
 
@@ -309,8 +306,8 @@ mod tests {
 
         let result = SkillInjector::phase2_injection(&skill);
 
-        assert!(result.contains("## Skill: empty-skill"));
-        assert!(result.contains("### Instructions"));
+        assert!(result.contains("## Active Skill: empty-skill"));
+        assert!(result.contains("---")); // Empty content between delimiters
     }
 
     #[test]
@@ -346,8 +343,8 @@ fn main() {
 
         let result = SkillInjector::phase2_injection(&skill);
 
-        // Should add trailing newline
-        assert!(result.ends_with('\n'));
+        // New format ends with ---
+        assert!(result.ends_with("---"));
     }
 
     #[test]
@@ -356,27 +353,27 @@ fn main() {
 
         let result = SkillInjector::phase2_injection(&skill);
 
-        // Should not add double newline
-        assert!(!result.ends_with("\n\n"));
+        // New format wraps content in ---
+        assert!(result.contains("Content with trailing newline"));
+        assert!(result.ends_with("---"));
     }
 
     #[test]
     fn test_phase2_injection_partial_metadata() {
-        // Only license
+        // In the new simplified format, metadata is not separately injected
+        // The skill content is wrapped as-is
         let mut skill1 = create_test_skill("license-only", "Content");
         skill1.metadata.license = Some("Apache-2.0".to_string());
         let result1 = SkillInjector::phase2_injection(&skill1);
-        assert!(result1.contains("### Metadata"));
-        assert!(result1.contains("**License**: Apache-2.0"));
-        assert!(!result1.contains("**Compatibility**"));
+        assert!(result1.contains("## Active Skill: license-only"));
+        assert!(result1.contains("Content"));
 
         // Only compatibility
         let mut skill2 = create_test_skill("compat-only", "Content");
         skill2.metadata.compatibility = Some("Linux only".to_string());
         let result2 = SkillInjector::phase2_injection(&skill2);
-        assert!(result2.contains("### Metadata"));
-        assert!(result2.contains("**Compatibility**: Linux only"));
-        assert!(!result2.contains("**License**"));
+        assert!(result2.contains("## Active Skill: compat-only"));
+        assert!(result2.contains("Content"));
     }
 
     #[test]
@@ -393,7 +390,7 @@ fn main() {
         let skill = create_test_skill("test", "Content");
         let result = SkillInjector::inject_skill("", &skill);
 
-        assert!(result.contains("## Skill: test"));
+        assert!(result.contains("## Active Skill: test"));
         assert!(result.contains("Content"));
     }
 
@@ -450,14 +447,15 @@ fn main() {
 
         // Should not panic
         let result = SkillInjector::phase2_injection(&skill);
-        assert!(result.contains("## Skill: long-desc"));
+        assert!(result.contains("## Active Skill: long-desc"));
     }
 
     #[test]
     fn test_phase1_injection_markdown_formatting() {
         let result = SkillInjector::phase1_injection(&[create_test_summary("test", "desc")]);
 
-        // Check markdown formatting
-        assert!(result.contains("- **test**: desc"));
+        // Check table formatting (new format uses tables)
+        assert!(result.contains("| test | desc |"));
+        assert!(result.contains("| Skill | Description |"));
     }
 }

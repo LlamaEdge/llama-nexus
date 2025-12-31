@@ -10,8 +10,12 @@ use std::path::Path;
 use crate::skills::types::ScriptInfo;
 
 /// Loader for skill resources
+///
+/// Provides methods for loading skill resources (scripts, references, assets).
+/// Public API for future API endpoints and integrations.
 pub struct SkillLoader;
 
+#[allow(dead_code)]
 impl SkillLoader {
     /// Load reference documents from the references/ directory
     ///

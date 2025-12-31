@@ -6,7 +6,7 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-use super::{SkillDetector, SkillInjector, SkillRegistry, SkillSummary};
+use super::{SkillDetector, SkillInjector, SkillRegistry};
 
 // ============================================================================
 // Test Fixtures
@@ -80,7 +80,11 @@ description: {}
     if config.with_references {
         let refs_dir = skill_dir.join("references");
         std::fs::create_dir_all(&refs_dir).unwrap();
-        std::fs::write(refs_dir.join("api-docs.md"), "# API Documentation\n\nSome docs.").unwrap();
+        std::fs::write(
+            refs_dir.join("api-docs.md"),
+            "# API Documentation\n\nSome docs.",
+        )
+        .unwrap();
     }
 
     if config.with_assets {
@@ -203,8 +207,8 @@ async fn test_e2e_two_phase_loading_workflow() {
     let phase2_prompt = SkillInjector::phase2_injection(&skill);
 
     // Verify Phase 2 prompt content
-    assert!(phase2_prompt.contains("## Skill: data-analysis"));
-    assert!(phase2_prompt.contains("### Instructions"));
+    assert!(phase2_prompt.contains("## Active Skill: data-analysis"));
+    assert!(phase2_prompt.contains("---")); // Content wrapped in delimiters
     assert!(phase2_prompt.contains("# Data Analysis"));
     assert!(phase2_prompt.contains("1. Load data"));
 }
@@ -307,19 +311,19 @@ async fn test_e2e_multi_skill_subtask_execution() {
     // Subtask 1: Research phase
     let research_skill = registry.get("research").await.unwrap();
     let research_prompt = SkillInjector::phase2_injection(&research_skill);
-    assert!(research_prompt.contains("## Skill: research"));
+    assert!(research_prompt.contains("## Active Skill: research"));
     assert!(research_prompt.contains("Gather information"));
 
     // Subtask 2: Summarize phase
     let summarize_skill = registry.get("summarize").await.unwrap();
     let summarize_prompt = SkillInjector::phase2_injection(&summarize_skill);
-    assert!(summarize_prompt.contains("## Skill: summarize"));
+    assert!(summarize_prompt.contains("## Active Skill: summarize"));
     assert!(summarize_prompt.contains("Extract key points"));
 
     // Subtask 3: Report phase
     let report_skill = registry.get("report").await.unwrap();
     let report_prompt = SkillInjector::phase2_injection(&report_skill);
-    assert!(report_prompt.contains("## Skill: report"));
+    assert!(report_prompt.contains("## Active Skill: report"));
     assert!(report_prompt.contains("well-formatted reports"));
 }
 
@@ -516,8 +520,8 @@ Let me proceed with the search."#;
 
     // Step 7: Generate Phase 2 prompt with full skill content
     let phase2_prompt = SkillInjector::inject_skill(base_prompt, &skill);
-    assert!(phase2_prompt.contains("## Skill: web-search"));
-    assert!(phase2_prompt.contains("### Instructions"));
+    assert!(phase2_prompt.contains("## Active Skill: web-search"));
+    assert!(phase2_prompt.contains("---")); // Content wrapped in delimiters
     assert!(phase2_prompt.contains("# Web Search Skill"));
     assert!(phase2_prompt.contains("Formulate search query"));
 
@@ -826,11 +830,7 @@ async fn test_e2e_resource_loading() {
     assert!(SkillLoader::has_resources(&skill_dir));
 
     // Test skill without resources
-    create_complete_skill(
-        temp_dir.path(),
-        "minimal-skill",
-        TestSkillConfig::default(),
-    );
+    create_complete_skill(temp_dir.path(), "minimal-skill", TestSkillConfig::default());
     let minimal_dir = temp_dir.path().join("minimal-skill");
     assert!(!SkillLoader::has_resources(&minimal_dir));
 }
