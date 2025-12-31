@@ -89,6 +89,12 @@ pub struct IterationTrace {
     pub duration: Duration,
     /// Token usage for LLM calls in this iteration.
     pub llm_tokens: TokenUsage,
+    /// Skill requested via <use_skill> tag in this iteration (if any).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_requested: Option<String>,
+    /// Whether the requested skill was successfully loaded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skill_loaded: bool,
 }
 
 impl IterationTrace {
@@ -102,12 +108,20 @@ impl IterationTrace {
             observation: None,
             duration: Duration::ZERO,
             llm_tokens: TokenUsage::default(),
+            skill_requested: None,
+            skill_loaded: false,
         }
     }
 
     /// Adds a tool call trace to this iteration.
     pub fn add_tool_call(&mut self, tool_call: ToolCallTrace) {
         self.tool_calls.push(tool_call);
+    }
+
+    /// Records a skill request in this iteration.
+    pub fn set_skill_request(&mut self, skill_name: String, loaded: bool) {
+        self.skill_requested = Some(skill_name);
+        self.skill_loaded = loaded;
     }
 }
 
@@ -335,14 +349,20 @@ impl SubtaskTrace {
     /// Returns a summary of the subtask trace for logging.
     pub fn summary(&self) -> String {
         let tokens = self.total_tokens();
+        let skill_info = self
+            .active_skill
+            .as_ref()
+            .map(|s| format!(", skill={}", s))
+            .unwrap_or_default();
         format!(
-            "SubtaskTrace[id={}, iterations={}, tokens={}, retries={}, duration={:?}, status={:?}]",
+            "SubtaskTrace[id={}, iterations={}, tokens={}, retries={}, duration={:?}, status={:?}{}]",
             self.subtask_id,
             self.react_iterations.len(),
             tokens.total_tokens,
             self.retry_count,
             self.duration,
-            self.status
+            self.status,
+            skill_info
         )
     }
 

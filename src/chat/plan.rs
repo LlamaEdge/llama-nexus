@@ -635,8 +635,11 @@ async fn execute_subtask_with_react(
             client = client.header(AUTHORIZATION, auth_str);
         }
 
-        // Build request with tools
-        let tools_json = build_tools_json(available_tools);
+        // Build request with tools (filtered by active skill if any)
+        let allowed_patterns = active_skill
+            .as_ref()
+            .map(|skill| skill.metadata.get_allowed_tools());
+        let tools_json = build_tools_json(available_tools, allowed_patterns.as_deref());
         let request_json = serde_json::json!({
             "model": "default",
             "messages": messages,
@@ -751,7 +754,10 @@ async fn execute_subtask_with_react(
                                     request_id
                                 );
 
-                                // Record skill activation in trace
+                                // Record skill request in iteration trace (successful load)
+                                iter_trace.set_skill_request(skill_name.clone(), true);
+
+                                // Record skill activation in subtask trace
                                 subtask_trace.set_active_skill(skill_name.clone());
 
                                 // Store the active skill
@@ -771,6 +777,9 @@ async fn execute_subtask_with_react(
                                 subtask_trace.add_iteration(iter_trace);
                                 continue;
                             } else {
+                                // Record skill request in iteration trace (failed to load)
+                                iter_trace.set_skill_request(skill_name.clone(), false);
+
                                 dual_warn!(
                                     "⚠️ Skill '{}' not found, continuing without skill - request_id: {}",
                                     skill_name,
@@ -1137,9 +1146,81 @@ Remember: Focus only on this specific subtask. Use the context from previous res
     messages
 }
 
+/// Filters tools based on allowed patterns from a Skill's allowed-tools field.
+///
+/// Pattern formats supported:
+/// - Exact match: "tool-name" matches "tool-name---server"
+/// - Wildcard: "Bash(git:*)" matches "Bash(git:status)---server", "Bash(git:commit)---server"
+/// - Simple wildcard: "Bash*" matches any tool starting with "Bash"
+///
+/// If allowed_patterns is None or empty, all tools are allowed.
+fn filter_tools_by_patterns<'a>(
+    tools: &'a [ToolDescription],
+    allowed_patterns: Option<&[String]>,
+) -> Vec<&'a ToolDescription> {
+    match allowed_patterns {
+        None => tools.iter().collect(),
+        Some(patterns) if patterns.is_empty() => tools.iter().collect(),
+        Some(patterns) => tools
+            .iter()
+            .filter(|tool| {
+                // Extract the tool name part (before the MCP separator)
+                let tool_name = tool.name.split(MCP_SEPARATOR).next().unwrap_or(&tool.name);
+
+                patterns.iter().any(|pattern| {
+                    if pattern.contains('*') {
+                        // Wildcard pattern matching
+                        match_wildcard_pattern(pattern, tool_name)
+                    } else {
+                        // Exact match (case-insensitive)
+                        tool_name.eq_ignore_ascii_case(pattern)
+                    }
+                })
+            })
+            .collect(),
+    }
+}
+
+/// Matches a tool name against a wildcard pattern.
+///
+/// Supports:
+/// - "*" at the end: "Bash*" matches "Bash", "Bash(git:status)", etc.
+/// - "*" within parentheses: "Bash(git:*)" matches "Bash(git:status)", "Bash(git:commit)"
+fn match_wildcard_pattern(pattern: &str, tool_name: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+
+    // Handle "prefix*" pattern
+    if pattern.ends_with('*') && !pattern.contains('(') {
+        let prefix = &pattern[..pattern.len() - 1];
+        return tool_name.starts_with(prefix);
+    }
+
+    // Handle "Name(prefix:*)" pattern - e.g., "Bash(git:*)"
+    if let Some(star_pos) = pattern.find('*') {
+        let pattern_prefix = &pattern[..star_pos];
+        let pattern_suffix = &pattern[star_pos + 1..];
+
+        // Tool name must start with pattern_prefix and end with pattern_suffix
+        if tool_name.starts_with(pattern_prefix) && tool_name.ends_with(pattern_suffix) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Builds the tools JSON for the LLM request.
-fn build_tools_json(available_tools: &[ToolDescription]) -> serde_json::Value {
-    let tools: Vec<serde_json::Value> = available_tools
+///
+/// If `allowed_patterns` is provided, only tools matching the patterns are included.
+fn build_tools_json(
+    available_tools: &[ToolDescription],
+    allowed_patterns: Option<&[String]>,
+) -> serde_json::Value {
+    let filtered_tools = filter_tools_by_patterns(available_tools, allowed_patterns);
+
+    let tools: Vec<serde_json::Value> = filtered_tools
         .iter()
         .map(|tool| {
             serde_json::json!({
@@ -1476,7 +1557,7 @@ mod tests {
             },
         ];
 
-        let tools_json = build_tools_json(&tools);
+        let tools_json = build_tools_json(&tools, None);
 
         assert!(tools_json.is_array());
         assert_eq!(tools_json.as_array().unwrap().len(), 2);
@@ -1485,6 +1566,117 @@ mod tests {
             "weather---weather-server"
         );
         assert_eq!(tools_json[1]["function"]["name"], "search---search-server");
+    }
+
+    #[test]
+    fn test_build_tools_json_with_filter() {
+        let tools = vec![
+            ToolDescription {
+                name: "weather---weather-server".to_string(),
+                description: "Get weather information".to_string(),
+            },
+            ToolDescription {
+                name: "search---search-server".to_string(),
+                description: "Search the web".to_string(),
+            },
+            ToolDescription {
+                name: "Bash(git:status)---mcp-server".to_string(),
+                description: "Git status".to_string(),
+            },
+        ];
+
+        // Filter to only weather tool
+        let patterns = vec!["weather".to_string()];
+        let tools_json = build_tools_json(&tools, Some(&patterns));
+
+        assert!(tools_json.is_array());
+        assert_eq!(tools_json.as_array().unwrap().len(), 1);
+        assert_eq!(
+            tools_json[0]["function"]["name"],
+            "weather---weather-server"
+        );
+    }
+
+    #[test]
+    fn test_filter_tools_by_patterns_wildcard() {
+        let tools = vec![
+            ToolDescription {
+                name: "Bash(git:status)---mcp-server".to_string(),
+                description: "Git status".to_string(),
+            },
+            ToolDescription {
+                name: "Bash(git:commit)---mcp-server".to_string(),
+                description: "Git commit".to_string(),
+            },
+            ToolDescription {
+                name: "Bash(npm:install)---mcp-server".to_string(),
+                description: "NPM install".to_string(),
+            },
+            ToolDescription {
+                name: "weather---weather-server".to_string(),
+                description: "Get weather".to_string(),
+            },
+        ];
+
+        // Filter with wildcard pattern "Bash(git:*)"
+        let patterns = vec!["Bash(git:*)".to_string()];
+        let filtered = filter_tools_by_patterns(&tools, Some(&patterns));
+
+        assert_eq!(filtered.len(), 2);
+        assert!(
+            filtered
+                .iter()
+                .any(|t| t.name == "Bash(git:status)---mcp-server")
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|t| t.name == "Bash(git:commit)---mcp-server")
+        );
+    }
+
+    #[test]
+    fn test_filter_tools_by_patterns_prefix_wildcard() {
+        let tools = vec![
+            ToolDescription {
+                name: "Bash(git:status)---mcp-server".to_string(),
+                description: "Git status".to_string(),
+            },
+            ToolDescription {
+                name: "BashScript---mcp-server".to_string(),
+                description: "Bash script".to_string(),
+            },
+            ToolDescription {
+                name: "weather---weather-server".to_string(),
+                description: "Get weather".to_string(),
+            },
+        ];
+
+        // Filter with prefix wildcard "Bash*"
+        let patterns = vec!["Bash*".to_string()];
+        let filtered = filter_tools_by_patterns(&tools, Some(&patterns));
+
+        assert_eq!(filtered.len(), 2);
+        assert!(
+            filtered
+                .iter()
+                .any(|t| t.name == "Bash(git:status)---mcp-server")
+        );
+        assert!(filtered.iter().any(|t| t.name == "BashScript---mcp-server"));
+    }
+
+    #[test]
+    fn test_filter_tools_empty_patterns() {
+        let tools = vec![ToolDescription {
+            name: "weather---weather-server".to_string(),
+            description: "Get weather".to_string(),
+        }];
+
+        // Empty patterns should return all tools
+        let patterns: Vec<String> = vec![];
+        let filtered = filter_tools_by_patterns(&tools, Some(&patterns));
+
+        assert_eq!(filtered.len(), 1);
     }
 
     #[test]
@@ -1689,7 +1881,7 @@ mod tests {
     #[test]
     fn test_build_tools_json_empty() {
         let tools: Vec<ToolDescription> = vec![];
-        let tools_json = build_tools_json(&tools);
+        let tools_json = build_tools_json(&tools, None);
 
         assert!(tools_json.is_array());
         assert_eq!(tools_json.as_array().unwrap().len(), 0);
@@ -1702,7 +1894,7 @@ mod tests {
             description: "A test tool".to_string(),
         }];
 
-        let tools_json = build_tools_json(&tools);
+        let tools_json = build_tools_json(&tools, None);
 
         let tool = &tools_json[0];
         assert_eq!(tool["type"], "function");
@@ -1710,5 +1902,23 @@ mod tests {
         assert_eq!(tool["function"]["description"], "A test tool");
         assert!(tool["function"]["parameters"]["properties"]["query"].is_object());
         assert_eq!(tool["function"]["parameters"]["required"][0], "query");
+    }
+
+    #[test]
+    fn test_match_wildcard_pattern() {
+        // Universal wildcard
+        assert!(match_wildcard_pattern("*", "anything"));
+
+        // Prefix wildcard
+        assert!(match_wildcard_pattern("Bash*", "Bash"));
+        assert!(match_wildcard_pattern("Bash*", "Bash(git:status)"));
+        assert!(match_wildcard_pattern("Bash*", "BashScript"));
+        assert!(!match_wildcard_pattern("Bash*", "NotBash"));
+
+        // Pattern with wildcard in parentheses
+        assert!(match_wildcard_pattern("Bash(git:*)", "Bash(git:status)"));
+        assert!(match_wildcard_pattern("Bash(git:*)", "Bash(git:commit)"));
+        assert!(!match_wildcard_pattern("Bash(git:*)", "Bash(npm:install)"));
+        assert!(!match_wildcard_pattern("Bash(git:*)", "Bash"));
     }
 }
