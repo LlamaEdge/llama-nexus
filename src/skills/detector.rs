@@ -308,7 +308,8 @@ mod tests {
 
     #[test]
     fn test_strip_tags_preserves_other_xml() {
-        let text = "<thought>thinking</thought> <use_skill>my-skill</use_skill> <action>do</action>";
+        let text =
+            "<thought>thinking</thought> <use_skill>my-skill</use_skill> <action>do</action>";
         let cleaned = SkillDetector::strip_tags(text);
         assert!(cleaned.contains("<thought>thinking</thought>"));
         assert!(cleaned.contains("<action>do</action>"));

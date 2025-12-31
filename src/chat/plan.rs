@@ -1921,4 +1921,528 @@ mod tests {
         assert!(!match_wildcard_pattern("Bash(git:*)", "Bash(npm:install)"));
         assert!(!match_wildcard_pattern("Bash(git:*)", "Bash"));
     }
+
+    // ==========================================================================
+    // Integration Tests: Planning Phase + Skills
+    // ==========================================================================
+
+    /// Test that skills summaries are properly injected into the planning context
+    #[test]
+    fn test_integration_planning_with_skills_summaries() {
+        let subtask = SubTask::new(0, "Search for information".to_string());
+        let previous_results: Vec<(usize, String)> = vec![];
+        let tools = vec![
+            ToolDescription {
+                name: "search---search-server".to_string(),
+                description: "Search the web".to_string(),
+            },
+            ToolDescription {
+                name: "Bash(git:status)---mcp-server".to_string(),
+                description: "Git status".to_string(),
+            },
+        ];
+        let skills = vec![
+            SkillSummary {
+                name: "web-search".to_string(),
+                description: "Perform web searches with advanced filtering".to_string(),
+            },
+            SkillSummary {
+                name: "git-workflow".to_string(),
+                description: "Help with git operations and workflows".to_string(),
+            },
+        ];
+
+        let messages =
+            build_context_for_react(&subtask, &previous_results, &tools, Some(&skills), None);
+
+        // Verify system message contains skills information
+        if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
+            let content = sys_msg.content();
+            // Should contain skills section
+            assert!(content.contains("Available Skills"));
+            // Should list both skills
+            assert!(content.contains("web-search"));
+            assert!(content.contains("git-workflow"));
+            // Should contain usage instruction
+            assert!(content.contains("<use_skill>"));
+            // Should contain skill descriptions
+            assert!(content.contains("Perform web searches"));
+            assert!(content.contains("git operations"));
+        } else {
+            panic!("Expected system message as first message");
+        }
+    }
+
+    /// Test that empty skills list doesn't add skills table section
+    #[test]
+    fn test_integration_planning_without_skills() {
+        let subtask = SubTask::new(0, "Simple task".to_string());
+        let previous_results: Vec<(usize, String)> = vec![];
+        let tools = vec![ToolDescription {
+            name: "tool---server".to_string(),
+            description: "A tool".to_string(),
+        }];
+        let empty_skills: Vec<SkillSummary> = vec![];
+
+        let messages = build_context_for_react(
+            &subtask,
+            &previous_results,
+            &tools,
+            Some(&empty_skills),
+            None,
+        );
+
+        // Verify system message does NOT contain skills table section
+        // Note: The base template still contains <use_skill> instruction,
+        // but no "Available Skills" table should be present
+        if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
+            let content = sys_msg.content();
+            // Should NOT have the skills table
+            assert!(!content.contains("Available Skills"));
+            // Should NOT list any skill names
+            assert!(!content.contains("| Name |"));
+        } else {
+            panic!("Expected system message");
+        }
+    }
+
+    // ==========================================================================
+    // Integration Tests: Two-Phase Skill Loading
+    // ==========================================================================
+
+    /// Test phase 1: Skills summaries injection without active skill
+    #[test]
+    fn test_integration_two_phase_loading_phase1() {
+        let subtask = SubTask::new(0, "Task requiring skill".to_string());
+        let previous_results: Vec<(usize, String)> = vec![];
+        let tools = vec![
+            ToolDescription {
+                name: "Bash(git:status)---mcp".to_string(),
+                description: "Git status".to_string(),
+            },
+            ToolDescription {
+                name: "Bash(git:commit)---mcp".to_string(),
+                description: "Git commit".to_string(),
+            },
+            ToolDescription {
+                name: "Read---mcp".to_string(),
+                description: "Read file".to_string(),
+            },
+        ];
+        let skills = vec![SkillSummary {
+            name: "git-workflow".to_string(),
+            description: "Git workflow assistance".to_string(),
+        }];
+
+        // Phase 1: no active skill
+        let messages =
+            build_context_for_react(&subtask, &previous_results, &tools, Some(&skills), None);
+
+        if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
+            let content = sys_msg.content();
+            // Should show available skills
+            assert!(content.contains("Available Skills"));
+            assert!(content.contains("git-workflow"));
+            // Should NOT show active skill section
+            assert!(!content.contains("Active Skill:"));
+        } else {
+            panic!("Expected system message");
+        }
+    }
+
+    /// Test phase 2: Active skill injection with full content
+    #[test]
+    fn test_integration_two_phase_loading_phase2() {
+        use std::path::PathBuf;
+
+        use chrono::Utc;
+
+        let subtask = SubTask::new(0, "Git commit task".to_string());
+        let previous_results: Vec<(usize, String)> = vec![];
+        let tools = vec![
+            ToolDescription {
+                name: "Bash(git:status)---mcp".to_string(),
+                description: "Git status".to_string(),
+            },
+            ToolDescription {
+                name: "Bash(git:commit)---mcp".to_string(),
+                description: "Git commit".to_string(),
+            },
+            ToolDescription {
+                name: "Read---mcp".to_string(),
+                description: "Read file".to_string(),
+            },
+        ];
+
+        let active_skill = LoadedSkill {
+            metadata: crate::skills::SkillMetadata {
+                name: "git-workflow".to_string(),
+                description: "Git workflow assistance".to_string(),
+                license: Some("MIT".to_string()),
+                compatibility: Some("Requires git".to_string()),
+                metadata: None,
+                allowed_tools: Some("Bash(git:*) Read".to_string()),
+                model: None,
+            },
+            content: r#"# Git Workflow
+
+## Commit Guidelines
+1. Use descriptive commit messages
+2. Keep commits atomic
+
+## Example
+```bash
+git add .
+git commit -m "feat: add new feature"
+```
+"#
+            .to_string(),
+            raw_content: String::new(),
+            skill_dir: PathBuf::new(),
+            file_path: String::new(),
+            enabled: true,
+            loaded_at: Utc::now(),
+        };
+
+        // Phase 2: with active skill
+        let messages = build_context_for_react(
+            &subtask,
+            &previous_results,
+            &tools,
+            None, // No summaries needed in phase 2
+            Some(&active_skill),
+        );
+
+        if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
+            let content = sys_msg.content();
+            // Should show active skill section
+            assert!(content.contains("Active Skill: git-workflow"));
+            // Should contain skill content
+            assert!(content.contains("Git Workflow"));
+            assert!(content.contains("Commit Guidelines"));
+            assert!(content.contains("Keep commits atomic"));
+            // Should NOT show "Available Skills" section
+            assert!(!content.contains("Available Skills"));
+        } else {
+            panic!("Expected system message");
+        }
+    }
+
+    // ==========================================================================
+    // Integration Tests: Tool Filtering with Skills
+    // ==========================================================================
+
+    /// Test tool filtering with skill's allowed-tools
+    #[test]
+    fn test_integration_tool_filtering_with_skill() {
+        use std::path::PathBuf;
+
+        use chrono::Utc;
+
+        let tools = vec![
+            ToolDescription {
+                name: "Bash(git:status)---mcp".to_string(),
+                description: "Git status".to_string(),
+            },
+            ToolDescription {
+                name: "Bash(git:commit)---mcp".to_string(),
+                description: "Git commit".to_string(),
+            },
+            ToolDescription {
+                name: "Bash(npm:install)---mcp".to_string(),
+                description: "NPM install".to_string(),
+            },
+            ToolDescription {
+                name: "Read---mcp".to_string(),
+                description: "Read file".to_string(),
+            },
+            ToolDescription {
+                name: "Write---mcp".to_string(),
+                description: "Write file".to_string(),
+            },
+        ];
+
+        let skill = LoadedSkill {
+            metadata: crate::skills::SkillMetadata {
+                name: "git-skill".to_string(),
+                description: "Git operations".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: Some("Bash(git:*) Read".to_string()),
+                model: None,
+            },
+            content: "Git skill content".to_string(),
+            raw_content: String::new(),
+            skill_dir: PathBuf::new(),
+            file_path: String::new(),
+            enabled: true,
+            loaded_at: Utc::now(),
+        };
+
+        let allowed_patterns = skill.metadata.get_allowed_tools();
+        let tools_json = build_tools_json(&tools, Some(&allowed_patterns));
+
+        let tool_array = tools_json.as_array().unwrap();
+        // Should only include Bash(git:*) and Read
+        assert_eq!(tool_array.len(), 3);
+
+        let tool_names: Vec<&str> = tool_array
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+
+        assert!(tool_names.contains(&"Bash(git:status)---mcp"));
+        assert!(tool_names.contains(&"Bash(git:commit)---mcp"));
+        assert!(tool_names.contains(&"Read---mcp"));
+        // Should NOT include npm or Write
+        assert!(!tool_names.contains(&"Bash(npm:install)---mcp"));
+        assert!(!tool_names.contains(&"Write---mcp"));
+    }
+
+    /// Test tool filtering with multiple patterns
+    #[test]
+    fn test_integration_tool_filtering_multiple_patterns() {
+        let tools = vec![
+            ToolDescription {
+                name: "Bash(git:status)---mcp".to_string(),
+                description: "Git status".to_string(),
+            },
+            ToolDescription {
+                name: "Bash(npm:install)---mcp".to_string(),
+                description: "NPM install".to_string(),
+            },
+            ToolDescription {
+                name: "Read---mcp".to_string(),
+                description: "Read file".to_string(),
+            },
+            ToolDescription {
+                name: "Write---mcp".to_string(),
+                description: "Write file".to_string(),
+            },
+            ToolDescription {
+                name: "Search---mcp".to_string(),
+                description: "Search".to_string(),
+            },
+        ];
+
+        // Multiple patterns: git commands + Read + Write
+        let patterns = vec![
+            "Bash(git:*)".to_string(),
+            "Read".to_string(),
+            "Write".to_string(),
+        ];
+
+        let filtered = filter_tools_by_patterns(&tools, Some(&patterns));
+
+        assert_eq!(filtered.len(), 3);
+        let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"Bash(git:status)---mcp"));
+        assert!(names.contains(&"Read---mcp"));
+        assert!(names.contains(&"Write---mcp"));
+    }
+
+    /// Test tool filtering with no restrictions (None patterns)
+    #[test]
+    fn test_integration_tool_filtering_no_restrictions() {
+        let tools = vec![
+            ToolDescription {
+                name: "tool1---server".to_string(),
+                description: "Tool 1".to_string(),
+            },
+            ToolDescription {
+                name: "tool2---server".to_string(),
+                description: "Tool 2".to_string(),
+            },
+            ToolDescription {
+                name: "tool3---server".to_string(),
+                description: "Tool 3".to_string(),
+            },
+        ];
+
+        // No patterns = all tools allowed
+        let filtered = filter_tools_by_patterns(&tools, None);
+        assert_eq!(filtered.len(), 3);
+
+        let tools_json = build_tools_json(&tools, None);
+        assert_eq!(tools_json.as_array().unwrap().len(), 3);
+    }
+
+    // ==========================================================================
+    // Integration Tests: Error Handling
+    // ==========================================================================
+
+    /// Test that is_retryable_error correctly identifies retryable errors
+    #[test]
+    fn test_integration_error_handling_retryable() {
+        // MCP operation errors are retryable
+        let mcp_error = ServerError::McpOperation("Connection timeout".to_string());
+        assert!(is_retryable_error(&mcp_error));
+
+        // Tool call retry exhausted is retryable (at subtask level)
+        let retry_error = ServerError::ToolCallRetryExhausted {
+            tool_name: "test-tool".to_string(),
+            attempts: 3,
+            message: "Failed after retries".to_string(),
+        };
+        assert!(is_retryable_error(&retry_error));
+
+        // Empty MCP content is retryable
+        let empty_content = ServerError::McpEmptyContent;
+        assert!(is_retryable_error(&empty_content));
+    }
+
+    /// Test that is_retryable_error correctly identifies non-retryable errors
+    #[test]
+    fn test_integration_error_handling_non_retryable() {
+        // Cyclic dependency is not retryable
+        let cyclic_error = ServerError::CyclicDependency;
+        assert!(!is_retryable_error(&cyclic_error));
+
+        // Empty plan is not retryable
+        let empty_plan = ServerError::EmptyPlan;
+        assert!(!is_retryable_error(&empty_plan));
+
+        // Plan parse error is not retryable
+        let parse_error = ServerError::PlanParseError("Invalid format".to_string());
+        assert!(!is_retryable_error(&parse_error));
+    }
+
+    /// Test iteration trace records skill requests
+    #[test]
+    fn test_integration_iteration_trace_skill_request() {
+        let mut iter_trace = IterationTrace::new(1);
+
+        // Record a successful skill request
+        iter_trace.set_skill_request("git-workflow".to_string(), true);
+
+        assert_eq!(iter_trace.skill_requested, Some("git-workflow".to_string()));
+        assert!(iter_trace.skill_loaded);
+
+        // Test failed skill request
+        let mut iter_trace2 = IterationTrace::new(2);
+        iter_trace2.set_skill_request("nonexistent-skill".to_string(), false);
+
+        assert_eq!(
+            iter_trace2.skill_requested,
+            Some("nonexistent-skill".to_string())
+        );
+        assert!(!iter_trace2.skill_loaded);
+    }
+
+    /// Test subtask trace records active skill
+    #[test]
+    fn test_integration_subtask_trace_active_skill() {
+        let mut subtask_trace = SubtaskTrace::new(0, "Test task".to_string());
+
+        // Initially no active skill
+        assert!(subtask_trace.active_skill.is_none());
+
+        // Set active skill
+        subtask_trace.set_active_skill("git-workflow".to_string());
+        assert_eq!(subtask_trace.active_skill, Some("git-workflow".to_string()));
+
+        // Verify summary includes skill info
+        let summary = subtask_trace.summary();
+        assert!(summary.contains("skill=git-workflow"));
+    }
+
+    /// Test complete workflow: planning -> skill detection -> tool filtering
+    #[test]
+    fn test_integration_complete_skill_workflow() {
+        use std::path::PathBuf;
+
+        use chrono::Utc;
+
+        use crate::skills::SkillDetector;
+
+        // Step 1: Simulate LLM response with skill request
+        let llm_response = r#"
+            I need to help with git operations.
+            <use_skill>git-workflow</use_skill>
+            Let me check the status first.
+        "#;
+
+        // Step 2: Detect skill request
+        let detected_skill = SkillDetector::detect_first(llm_response);
+        assert_eq!(detected_skill, Some("git-workflow".to_string()));
+
+        // Step 3: Load skill (simulated)
+        let loaded_skill = LoadedSkill {
+            metadata: crate::skills::SkillMetadata {
+                name: "git-workflow".to_string(),
+                description: "Git workflow assistance".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: Some("Bash(git:*) Read".to_string()),
+                model: None,
+            },
+            content: "Git workflow instructions".to_string(),
+            raw_content: String::new(),
+            skill_dir: PathBuf::new(),
+            file_path: String::new(),
+            enabled: true,
+            loaded_at: Utc::now(),
+        };
+
+        // Step 4: Get allowed tools from skill
+        let allowed_tools = loaded_skill.metadata.get_allowed_tools();
+        assert_eq!(allowed_tools, vec!["Bash(git:*)", "Read"]);
+
+        // Step 5: Filter tools
+        let all_tools = vec![
+            ToolDescription {
+                name: "Bash(git:status)---mcp".to_string(),
+                description: "Git status".to_string(),
+            },
+            ToolDescription {
+                name: "Bash(npm:install)---mcp".to_string(),
+                description: "NPM install".to_string(),
+            },
+            ToolDescription {
+                name: "Read---mcp".to_string(),
+                description: "Read".to_string(),
+            },
+        ];
+
+        let filtered = filter_tools_by_patterns(&all_tools, Some(&allowed_tools));
+        assert_eq!(filtered.len(), 2);
+
+        // Step 6: Build context with active skill
+        let subtask = SubTask::new(0, "Git task".to_string());
+        let messages =
+            build_context_for_react(&subtask, &[], &all_tools, None, Some(&loaded_skill));
+
+        // Verify context includes skill
+        if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
+            assert!(sys_msg.content().contains("Active Skill: git-workflow"));
+        }
+
+        // Step 7: Record in trace
+        let mut subtask_trace = SubtaskTrace::new(0, "Git task".to_string());
+        subtask_trace.set_active_skill("git-workflow".to_string());
+
+        let mut iter_trace = IterationTrace::new(1);
+        iter_trace.set_skill_request("git-workflow".to_string(), true);
+
+        subtask_trace.add_iteration(iter_trace);
+
+        assert!(subtask_trace.summary().contains("skill=git-workflow"));
+    }
+
+    /// Test skill detection with strip_tags for clean response
+    #[test]
+    fn test_integration_skill_detection_and_cleanup() {
+        use crate::skills::SkillDetector;
+
+        let response_with_skill = "I will use <use_skill>code-review</use_skill> to help you.";
+
+        // Extract skill and clean response
+        let (skills, cleaned) = SkillDetector::extract_and_clean(response_with_skill);
+
+        assert_eq!(skills, vec!["code-review"]);
+        assert_eq!(cleaned, "I will use  to help you.");
+        assert!(!cleaned.contains("<use_skill>"));
+    }
 }
