@@ -237,4 +237,236 @@ Body content here.
         assert_eq!(front, "key: value");
         assert_eq!(body, "Body content here.");
     }
+
+    #[test]
+    fn test_parse_empty_front_matter() {
+        let content = r#"---
+---
+Body content
+"#;
+        let skill_dir = PathBuf::from("/skills/test");
+        let result = SkillParser::parse(content, &skill_dir);
+
+        assert!(matches!(result, Err(SkillError::ParseError(_))));
+        if let Err(SkillError::ParseError(msg)) = result {
+            assert!(msg.contains("empty"));
+        }
+    }
+
+    #[test]
+    fn test_parse_yaml_syntax_error() {
+        let content = r#"---
+name: test
+description: "unclosed quote
+---
+"#;
+        let skill_dir = PathBuf::from("/skills/test");
+        let result = SkillParser::parse(content, &skill_dir);
+
+        assert!(matches!(result, Err(SkillError::YamlError(_))));
+    }
+
+    #[test]
+    fn test_parse_missing_required_fields() {
+        let content = r#"---
+name: test
+---
+"#;
+        let skill_dir = PathBuf::from("/skills/test");
+        let result = SkillParser::parse(content, &skill_dir);
+
+        assert!(matches!(result, Err(SkillError::YamlError(_))));
+    }
+
+    #[test]
+    fn test_parse_description_too_long() {
+        let long_desc = "x".repeat(1025);
+        let content = format!(
+            r#"---
+name: test
+description: "{}"
+---
+"#,
+            long_desc
+        );
+        let skill_dir = PathBuf::from("/skills/test");
+        let result = SkillParser::parse(&content, &skill_dir);
+
+        assert!(matches!(result, Err(SkillError::InvalidDescription(_))));
+    }
+
+    #[test]
+    fn test_parse_compatibility_too_long() {
+        let long_compat = "x".repeat(501);
+        let content = format!(
+            r#"---
+name: test
+description: Valid description
+compatibility: "{}"
+---
+"#,
+            long_compat
+        );
+        let skill_dir = PathBuf::from("/skills/test");
+        let result = SkillParser::parse(&content, &skill_dir);
+
+        assert!(matches!(result, Err(SkillError::InvalidCompatibility(_))));
+    }
+
+    #[test]
+    fn test_parse_with_whitespace_around_front_matter() {
+        let content = r#"
+
+---
+name: test-skill
+description: A test skill
+---
+
+# Content
+
+"#;
+        let skill_dir = PathBuf::from("/skills/test-skill");
+        let result = SkillParser::parse(content, &skill_dir);
+
+        assert!(result.is_ok());
+        let skill = result.unwrap();
+        assert_eq!(skill.metadata.name, "test-skill");
+    }
+
+    #[test]
+    fn test_parse_markdown_with_triple_dashes() {
+        let content = r#"---
+name: test
+description: A test skill
+---
+
+# Content
+
+Some text here.
+
+---
+
+More content after horizontal rule.
+"#;
+        let skill_dir = PathBuf::from("/skills/test");
+        let result = SkillParser::parse(content, &skill_dir);
+
+        assert!(result.is_ok());
+        let skill = result.unwrap();
+        // The markdown content should preserve --- as horizontal rules
+        assert!(skill.content.contains("---"));
+        assert!(skill.content.contains("More content after horizontal rule"));
+    }
+
+    #[test]
+    fn test_parse_empty_markdown_body() {
+        let content = r#"---
+name: test
+description: A test skill
+---
+"#;
+        let skill_dir = PathBuf::from("/skills/test");
+        let result = SkillParser::parse(content, &skill_dir);
+
+        assert!(result.is_ok());
+        let skill = result.unwrap();
+        assert!(skill.content.is_empty());
+    }
+
+    #[test]
+    fn test_parse_name_too_long() {
+        let long_name = "a".repeat(65);
+        let content = format!(
+            r#"---
+name: {}
+description: A test skill
+---
+"#,
+            long_name
+        );
+        let skill_dir = PathBuf::from(format!("/skills/{}", long_name));
+        let result = SkillParser::parse(&content, &skill_dir);
+
+        assert!(matches!(result, Err(SkillError::InvalidName { .. })));
+    }
+
+    #[test]
+    fn test_parse_preserves_raw_content() {
+        let content = r#"---
+name: test
+description: A test skill
+---
+
+# Content here
+"#;
+        let skill_dir = PathBuf::from("/skills/test");
+        let result = SkillParser::parse(content, &skill_dir);
+
+        assert!(result.is_ok());
+        let skill = result.unwrap();
+        assert_eq!(skill.raw_content, content);
+    }
+
+    #[test]
+    fn test_parse_sets_file_path() {
+        let content = r#"---
+name: my-skill
+description: A test skill
+---
+"#;
+        let skill_dir = PathBuf::from("/custom/path/my-skill");
+        let result = SkillParser::parse(content, &skill_dir);
+
+        assert!(result.is_ok());
+        let skill = result.unwrap();
+        assert!(skill.file_path.ends_with("SKILL.md"));
+        assert!(skill.file_path.contains("my-skill"));
+    }
+
+    #[test]
+    fn test_parse_enabled_by_default() {
+        let content = r#"---
+name: test
+description: A test skill
+---
+"#;
+        let skill_dir = PathBuf::from("/skills/test");
+        let result = SkillParser::parse(content, &skill_dir);
+
+        assert!(result.is_ok());
+        let skill = result.unwrap();
+        assert!(skill.enabled);
+    }
+
+    #[test]
+    fn test_split_front_matter_no_body() {
+        let content = r#"---
+key: value
+---"#;
+
+        let (front, body) = SkillParser::split_front_matter(content).unwrap();
+        assert_eq!(front, "key: value");
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn test_split_front_matter_multiline_yaml() {
+        let content = r#"---
+name: test
+description: |
+  Multi-line
+  description here
+metadata:
+  key1: value1
+  key2: value2
+---
+
+Body
+"#;
+
+        let (front, body) = SkillParser::split_front_matter(content).unwrap();
+        assert!(front.contains("Multi-line"));
+        assert!(front.contains("key2: value2"));
+        assert_eq!(body, "Body");
+    }
 }

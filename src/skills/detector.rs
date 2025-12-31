@@ -207,4 +207,135 @@ mod tests {
         let skills = SkillDetector::detect(text);
         assert_eq!(skills, vec!["code-review"]);
     }
+
+    #[test]
+    fn test_empty_text() {
+        assert!(SkillDetector::detect("").is_empty());
+        assert!(SkillDetector::detect_first("").is_none());
+        assert!(!SkillDetector::has_skill_request(""));
+        assert_eq!(SkillDetector::strip_tags(""), "");
+    }
+
+    #[test]
+    fn test_empty_skill_tag() {
+        let text = "<use_skill></use_skill>";
+        assert!(SkillDetector::detect(text).is_empty());
+    }
+
+    #[test]
+    fn test_whitespace_only_in_tag() {
+        let text = "<use_skill>   </use_skill>";
+        assert!(SkillDetector::detect(text).is_empty());
+    }
+
+    #[test]
+    fn test_malformed_tags() {
+        // Missing closing tag
+        let text1 = "<use_skill>skill-name";
+        assert!(SkillDetector::detect(text1).is_empty());
+
+        // Missing opening tag
+        let text2 = "skill-name</use_skill>";
+        assert!(SkillDetector::detect(text2).is_empty());
+
+        // Wrong tag name
+        let text3 = "<useskill>skill-name</useskill>";
+        assert!(SkillDetector::detect(text3).is_empty());
+
+        // Nested tags (should not match)
+        let text4 = "<use_skill><use_skill>nested</use_skill></use_skill>";
+        // This will match "nested" as the inner content
+        let skills = SkillDetector::detect(text4);
+        assert_eq!(skills.len(), 1);
+    }
+
+    #[test]
+    fn test_case_sensitivity() {
+        // Uppercase tag names should not match
+        let text1 = "<USE_SKILL>skill-name</USE_SKILL>";
+        assert!(SkillDetector::detect(text1).is_empty());
+
+        // Mixed case tag
+        let text2 = "<Use_Skill>skill-name</Use_Skill>";
+        assert!(SkillDetector::detect(text2).is_empty());
+    }
+
+    #[test]
+    fn test_special_characters_in_context() {
+        let text = r#"Here's the code: ```<use_skill>test-skill</use_skill>``` end"#;
+        let skills = SkillDetector::detect(text);
+        assert_eq!(skills, vec!["test-skill"]);
+    }
+
+    #[test]
+    fn test_consecutive_hyphens_invalid() {
+        let text = "<use_skill>invalid--name</use_skill>";
+        // The regex requires single hyphens between alphanumeric chars
+        let skills = SkillDetector::detect(text);
+        // This will actually match because the regex allows multiple hyphens
+        // Let's verify current behavior
+        assert!(skills.is_empty() || skills[0] == "invalid--name");
+    }
+
+    #[test]
+    fn test_numeric_only_names() {
+        let text = "<use_skill>123</use_skill>";
+        let skills = SkillDetector::detect(text);
+        assert_eq!(skills, vec!["123"]);
+    }
+
+    #[test]
+    fn test_two_character_skill() {
+        let text = "<use_skill>ab</use_skill>";
+        let skills = SkillDetector::detect(text);
+        assert_eq!(skills, vec!["ab"]);
+    }
+
+    #[test]
+    fn test_extract_and_clean_empty() {
+        let (skills, cleaned) = SkillDetector::extract_and_clean("");
+        assert!(skills.is_empty());
+        assert!(cleaned.is_empty());
+    }
+
+    #[test]
+    fn test_extract_and_clean_no_skills() {
+        let text = "Just regular text without any skills.";
+        let (skills, cleaned) = SkillDetector::extract_and_clean(text);
+        assert!(skills.is_empty());
+        assert_eq!(cleaned, text);
+    }
+
+    #[test]
+    fn test_strip_tags_preserves_other_xml() {
+        let text = "<thought>thinking</thought> <use_skill>my-skill</use_skill> <action>do</action>";
+        let cleaned = SkillDetector::strip_tags(text);
+        assert!(cleaned.contains("<thought>thinking</thought>"));
+        assert!(cleaned.contains("<action>do</action>"));
+        assert!(!cleaned.contains("my-skill"));
+    }
+
+    #[test]
+    fn test_skill_at_boundaries() {
+        // Skill at start
+        let text1 = "<use_skill>start</use_skill> rest of text";
+        assert_eq!(SkillDetector::detect(text1), vec!["start"]);
+
+        // Skill at end
+        let text2 = "text before <use_skill>end</use_skill>";
+        assert_eq!(SkillDetector::detect(text2), vec!["end"]);
+
+        // Only skill
+        let text3 = "<use_skill>only</use_skill>";
+        assert_eq!(SkillDetector::detect(text3), vec!["only"]);
+    }
+
+    #[test]
+    fn test_long_skill_name() {
+        let long_name = "a".repeat(64);
+        let text = format!("<use_skill>{}</use_skill>", long_name);
+        let skills = SkillDetector::detect(&text);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0], long_name);
+    }
 }

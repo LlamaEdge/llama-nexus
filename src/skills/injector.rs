@@ -289,4 +289,175 @@ mod tests {
         assert!(result.contains("## Skill: my-skill"));
         assert!(result.contains("Do the thing."));
     }
+
+    #[test]
+    fn test_phase1_injection_special_characters() {
+        let summaries = vec![create_test_summary(
+            "code-review",
+            "Review code with `markdown` and **bold** text",
+        )];
+
+        let result = SkillInjector::phase1_injection(&summaries);
+
+        assert!(result.contains("code-review"));
+        assert!(result.contains("Review code with `markdown` and **bold** text"));
+    }
+
+    #[test]
+    fn test_phase2_injection_empty_content() {
+        let skill = create_test_skill("empty-skill", "");
+
+        let result = SkillInjector::phase2_injection(&skill);
+
+        assert!(result.contains("## Skill: empty-skill"));
+        assert!(result.contains("### Instructions"));
+    }
+
+    #[test]
+    fn test_phase2_injection_multiline_content() {
+        let content = r#"# Header
+
+This is a paragraph.
+
+## Subheader
+
+- List item 1
+- List item 2
+
+```rust
+fn main() {
+    println!("Hello");
+}
+```
+"#;
+        let skill = create_test_skill("multiline-skill", content);
+
+        let result = SkillInjector::phase2_injection(&skill);
+
+        assert!(result.contains("# Header"));
+        assert!(result.contains("## Subheader"));
+        assert!(result.contains("- List item 1"));
+        assert!(result.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_phase2_injection_content_without_newline() {
+        let skill = create_test_skill("no-newline", "Content without trailing newline");
+
+        let result = SkillInjector::phase2_injection(&skill);
+
+        // Should add trailing newline
+        assert!(result.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_phase2_injection_content_with_newline() {
+        let skill = create_test_skill("has-newline", "Content with trailing newline\n");
+
+        let result = SkillInjector::phase2_injection(&skill);
+
+        // Should not add double newline
+        assert!(!result.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn test_phase2_injection_partial_metadata() {
+        // Only license
+        let mut skill1 = create_test_skill("license-only", "Content");
+        skill1.metadata.license = Some("Apache-2.0".to_string());
+        let result1 = SkillInjector::phase2_injection(&skill1);
+        assert!(result1.contains("### Metadata"));
+        assert!(result1.contains("**License**: Apache-2.0"));
+        assert!(!result1.contains("**Compatibility**"));
+
+        // Only compatibility
+        let mut skill2 = create_test_skill("compat-only", "Content");
+        skill2.metadata.compatibility = Some("Linux only".to_string());
+        let result2 = SkillInjector::phase2_injection(&skill2);
+        assert!(result2.contains("### Metadata"));
+        assert!(result2.contains("**Compatibility**: Linux only"));
+        assert!(!result2.contains("**License**"));
+    }
+
+    #[test]
+    fn test_inject_summaries_empty_prompt() {
+        let summaries = vec![create_test_summary("skill", "Description")];
+        let result = SkillInjector::inject_summaries("", &summaries);
+
+        assert!(result.contains("## Available Skills"));
+        assert!(result.contains("skill"));
+    }
+
+    #[test]
+    fn test_inject_skill_empty_prompt() {
+        let skill = create_test_skill("test", "Content");
+        let result = SkillInjector::inject_skill("", &skill);
+
+        assert!(result.contains("## Skill: test"));
+        assert!(result.contains("Content"));
+    }
+
+    #[test]
+    fn test_multi_skill_injection_order_preserved() {
+        let skills = vec![
+            create_test_skill("first", "First content"),
+            create_test_skill("second", "Second content"),
+            create_test_skill("third", "Third content"),
+        ];
+
+        let result = SkillInjector::multi_skill_injection(&skills);
+
+        let first_pos = result.find("First content").unwrap();
+        let second_pos = result.find("Second content").unwrap();
+        let third_pos = result.find("Third content").unwrap();
+
+        assert!(first_pos < second_pos);
+        assert!(second_pos < third_pos);
+    }
+
+    #[test]
+    fn test_phase1_injection_order_preserved() {
+        let summaries = vec![
+            create_test_summary("alpha", "Alpha skill"),
+            create_test_summary("beta", "Beta skill"),
+            create_test_summary("gamma", "Gamma skill"),
+        ];
+
+        let result = SkillInjector::phase1_injection(&summaries);
+
+        let alpha_pos = result.find("alpha").unwrap();
+        let beta_pos = result.find("beta").unwrap();
+        let gamma_pos = result.find("gamma").unwrap();
+
+        assert!(alpha_pos < beta_pos);
+        assert!(beta_pos < gamma_pos);
+    }
+
+    #[test]
+    fn test_inject_skill_preserves_prompt_structure() {
+        let system_prompt = "Line 1\nLine 2\nLine 3";
+        let skill = create_test_skill("test", "Skill content");
+
+        let result = SkillInjector::inject_skill(system_prompt, &skill);
+
+        assert!(result.starts_with("Line 1\nLine 2\nLine 3\n"));
+    }
+
+    #[test]
+    fn test_phase2_injection_long_description() {
+        let mut skill = create_test_skill("long-desc", "Content");
+        skill.metadata.description = "A".repeat(1024);
+
+        // Should not panic
+        let result = SkillInjector::phase2_injection(&skill);
+        assert!(result.contains("## Skill: long-desc"));
+    }
+
+    #[test]
+    fn test_phase1_injection_markdown_formatting() {
+        let result = SkillInjector::phase1_injection(&[create_test_summary("test", "desc")]);
+
+        // Check markdown formatting
+        assert!(result.contains("- **test**: desc"));
+    }
 }

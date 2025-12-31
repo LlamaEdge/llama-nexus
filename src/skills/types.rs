@@ -203,4 +203,151 @@ mod tests {
         assert_eq!(summary.name, "weather-query");
         assert_eq!(summary.description, "Query weather information");
     }
+
+    #[test]
+    fn test_skill_summary_from_metadata() {
+        let metadata = SkillMetadata {
+            name: "code-review".to_string(),
+            description: "Review code for best practices".to_string(),
+            license: Some("MIT".to_string()),
+            compatibility: None,
+            metadata: None,
+            allowed_tools: None,
+            model: None,
+        };
+
+        let summary = SkillSummary::from(&metadata);
+        assert_eq!(summary.name, "code-review");
+        assert_eq!(summary.description, "Review code for best practices");
+    }
+
+    #[test]
+    fn test_skill_metadata_serialization() {
+        let metadata = SkillMetadata {
+            name: "test-skill".to_string(),
+            description: "A test skill".to_string(),
+            license: Some("Apache-2.0".to_string()),
+            compatibility: Some("Requires network access".to_string()),
+            metadata: Some(HashMap::from([
+                ("author".to_string(), "test".to_string()),
+                ("version".to_string(), "1.0".to_string()),
+            ])),
+            allowed_tools: Some("Bash Read Write".to_string()),
+            model: Some("claude-sonnet".to_string()),
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        let deserialized: SkillMetadata = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.name, "test-skill");
+        assert_eq!(deserialized.description, "A test skill");
+        assert_eq!(deserialized.license, Some("Apache-2.0".to_string()));
+        assert_eq!(
+            deserialized.compatibility,
+            Some("Requires network access".to_string())
+        );
+        assert_eq!(
+            deserialized.metadata.as_ref().unwrap().get("author"),
+            Some(&"test".to_string())
+        );
+        assert_eq!(
+            deserialized.allowed_tools,
+            Some("Bash Read Write".to_string())
+        );
+        assert_eq!(deserialized.model, Some("claude-sonnet".to_string()));
+    }
+
+    #[test]
+    fn test_skill_metadata_deserialization_with_defaults() {
+        let json = r#"{"name": "minimal", "description": "Minimal skill"}"#;
+        let metadata: SkillMetadata = serde_json::from_str(json).unwrap();
+
+        assert_eq!(metadata.name, "minimal");
+        assert_eq!(metadata.description, "Minimal skill");
+        assert!(metadata.license.is_none());
+        assert!(metadata.compatibility.is_none());
+        assert!(metadata.metadata.is_none());
+        assert!(metadata.allowed_tools.is_none());
+        assert!(metadata.model.is_none());
+    }
+
+    #[test]
+    fn test_skill_summary_serialization() {
+        let summary = SkillSummary {
+            name: "git-commit".to_string(),
+            description: "Create git commits".to_string(),
+        };
+
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("git-commit"));
+        assert!(json.contains("Create git commits"));
+
+        let deserialized: SkillSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "git-commit");
+        assert_eq!(deserialized.description, "Create git commits");
+    }
+
+    #[test]
+    fn test_get_allowed_tools_single_tool() {
+        let metadata = SkillMetadata {
+            name: "test".to_string(),
+            description: "test".to_string(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: Some("Bash".to_string()),
+            model: None,
+        };
+
+        let tools = metadata.get_allowed_tools();
+        assert_eq!(tools, vec!["Bash"]);
+    }
+
+    #[test]
+    fn test_get_allowed_tools_with_wildcards() {
+        let metadata = SkillMetadata {
+            name: "test".to_string(),
+            description: "test".to_string(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: Some("Bash(git:*) Read Write".to_string()),
+            model: None,
+        };
+
+        let tools = metadata.get_allowed_tools();
+        assert_eq!(tools, vec!["Bash(git:*)", "Read", "Write"]);
+    }
+
+    #[test]
+    fn test_get_allowed_tools_empty_string() {
+        let metadata = SkillMetadata {
+            name: "test".to_string(),
+            description: "test".to_string(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: Some("".to_string()),
+            model: None,
+        };
+
+        let tools = metadata.get_allowed_tools();
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_get_allowed_tools_whitespace_only() {
+        let metadata = SkillMetadata {
+            name: "test".to_string(),
+            description: "test".to_string(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: Some("   \t\n  ".to_string()),
+            model: None,
+        };
+
+        let tools = metadata.get_allowed_tools();
+        assert!(tools.is_empty());
+    }
 }

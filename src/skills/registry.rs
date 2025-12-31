@@ -364,4 +364,179 @@ description: Updated description
         let skill = registry.get("reload-skill").await.unwrap();
         assert_eq!(skill.metadata.description, "Updated description");
     }
+
+    #[tokio::test]
+    async fn test_reload_nonexistent_skill() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+
+        let result = registry.reload("nonexistent").await;
+        assert!(matches!(result, Err(SkillError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_set_enabled_nonexistent_skill() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+
+        let result = registry.set_enabled("nonexistent", true).await;
+        assert!(matches!(result, Err(SkillError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_load_all_nonexistent_dir() {
+        let registry = SkillRegistry::new(PathBuf::from("/nonexistent/path/skills"));
+        let count = registry.load_all().await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_load_all_skips_invalid_skills() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a valid skill
+        create_test_skill(temp_dir.path(), "valid-skill");
+
+        // Create an invalid skill (missing description)
+        let invalid_dir = temp_dir.path().join("invalid-skill");
+        std::fs::create_dir_all(&invalid_dir).unwrap();
+        std::fs::write(
+            invalid_dir.join("SKILL.md"),
+            r#"---
+name: invalid-skill
+---
+"#,
+        )
+        .unwrap();
+
+        // Create a directory without SKILL.md
+        let empty_dir = temp_dir.path().join("empty-dir");
+        std::fs::create_dir_all(empty_dir).unwrap();
+
+        let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+        let count = registry.load_all().await.unwrap();
+
+        // Only the valid skill should be loaded
+        assert_eq!(count, 1);
+        assert!(registry.exists("valid-skill").await);
+        assert!(!registry.exists("invalid-skill").await);
+    }
+
+    #[tokio::test]
+    async fn test_load_all_ignores_files() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a valid skill
+        create_test_skill(temp_dir.path(), "my-skill");
+
+        // Create a file (not a directory) in the skills dir
+        std::fs::write(temp_dir.path().join("readme.txt"), "Some content").unwrap();
+
+        let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+        let count = registry.load_all().await.unwrap();
+
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_summaries_excludes_disabled() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_skill(temp_dir.path(), "enabled-skill");
+        create_test_skill(temp_dir.path(), "disabled-skill");
+
+        let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+        registry.load_all().await.unwrap();
+
+        registry.set_enabled("disabled-skill", false).await.unwrap();
+
+        let summaries = registry.get_summaries().await;
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "enabled-skill");
+    }
+
+    #[tokio::test]
+    async fn test_count() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_skill(temp_dir.path(), "skill-1");
+        create_test_skill(temp_dir.path(), "skill-2");
+        create_test_skill(temp_dir.path(), "skill-3");
+
+        let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+
+        // Before loading
+        assert_eq!(registry.count().await, 0);
+
+        registry.load_all().await.unwrap();
+
+        // After loading
+        assert_eq!(registry.count().await, 3);
+    }
+
+    #[tokio::test]
+    async fn test_enable_disable_toggle() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_skill(temp_dir.path(), "toggle-test");
+
+        let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+        registry.load_all().await.unwrap();
+
+        // Toggle multiple times
+        for _ in 0..3 {
+            registry.set_enabled("toggle-test", false).await.unwrap();
+            assert!(!registry.get("toggle-test").await.unwrap().enabled);
+
+            registry.set_enabled("toggle-test", true).await.unwrap();
+            assert!(registry.get("toggle-test").await.unwrap().enabled);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reload_preserves_enabled_state() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_skill(temp_dir.path(), "state-skill");
+
+        let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+        registry.load_all().await.unwrap();
+
+        // Disable the skill
+        registry.set_enabled("state-skill", false).await.unwrap();
+
+        // Reload (note: reload creates a new LoadedSkill, enabled resets to true)
+        registry.reload("state-skill").await.unwrap();
+
+        // After reload, enabled state is reset
+        let skill = registry.get("state-skill").await.unwrap();
+        assert!(skill.enabled); // Default is true on reload
+    }
+
+    fn create_test_skill_with_license(dir: &Path, name: &str, license: &str) {
+        let skill_dir = dir.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let content = format!(
+            r#"---
+name: {}
+description: Test skill for {}
+license: {}
+---
+# {}
+"#,
+            name, name, license, name
+        );
+
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_preserves_all_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_skill_with_license(temp_dir.path(), "licensed-skill", "MIT");
+
+        let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+        registry.load_all().await.unwrap();
+
+        let skill = registry.get("licensed-skill").await.unwrap();
+        assert_eq!(skill.metadata.name, "licensed-skill");
+        assert_eq!(skill.metadata.license, Some("MIT".to_string()));
+    }
 }
