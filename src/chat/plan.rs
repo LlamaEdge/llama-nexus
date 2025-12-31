@@ -45,7 +45,7 @@ use crate::{
     error::{ServerError, ServerResult},
     mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SEPARATOR, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES},
     server::{RoutingPolicy, ServerKind},
-    skills::SkillRegistry,
+    skills::{LoadedSkill, SkillDetector, SkillRegistry, SkillSummary},
 };
 
 // ============================================================================
@@ -168,7 +168,7 @@ pub(crate) async fn chat(
         max_plan_subtasks,
     )
     .with_tools(available_tools.clone())
-    .with_skills(skills_summaries);
+    .with_skills(skills_summaries.clone());
 
     // Generate task plan
     let mut plan = match planner.plan(&user_request).await {
@@ -343,6 +343,7 @@ pub(crate) async fn chat(
                 subtask,
                 &subtask_results,
                 &available_tools,
+                Some(&skills_summaries),
                 attempt_timeout,
                 subtask_react_max_iterations,
                 max_tools_per_iteration,
@@ -525,6 +526,10 @@ async fn get_available_tools() -> Vec<ToolDescription> {
 /// This function implements a React (Reason + Act) loop for executing subtasks,
 /// allowing the LLM to iteratively think, call tools, observe results, and
 /// produce a final answer.
+///
+/// Supports two-phase skill loading:
+/// - Phase 1: Skills summaries are shown, LLM can request a skill via `<use_skill>` tag
+/// - Phase 2: Full skill content is loaded and injected into context
 #[allow(clippy::too_many_arguments)]
 async fn execute_subtask_with_react(
     state: &Arc<AppState>,
@@ -533,6 +538,7 @@ async fn execute_subtask_with_react(
     subtask: &SubTask,
     previous_results: &[(usize, String)],
     available_tools: &[ToolDescription],
+    skills_summaries: Option<&[SkillSummary]>,
     timeout: Duration,
     max_iterations: u32,
     max_tools_per_iteration: usize,
@@ -545,8 +551,17 @@ async fn execute_subtask_with_react(
     let start_time = Instant::now();
     let tool_call_retry_delay = Duration::from_millis(tool_call_retry_delay_ms);
 
-    // Build initial messages for React loop
-    let mut messages = build_context_for_react(subtask, previous_results, available_tools);
+    // Track the active skill for Phase 2
+    let mut active_skill: Option<LoadedSkill> = None;
+
+    // Build initial messages for React loop (Phase 1: no active skill yet)
+    let mut messages = build_context_for_react(
+        subtask,
+        previous_results,
+        available_tools,
+        skills_summaries,
+        None, // No active skill in initial context
+    );
 
     // React loop
     let mut iteration_count: u32 = 0;
@@ -708,12 +723,62 @@ async fn execute_subtask_with_react(
             iter_trace.duration = iter_start.elapsed();
             subtask_trace.add_iteration(iter_trace);
         } else {
-            // No tool calls - check for final answer
+            // No tool calls - check for skill request or final answer
             if let Some(content) = chat_completion.choices[0].message.content.as_ref() {
                 // Extract thought if present
                 if let Some(thought) = extract_thought(content) {
                     dual_info!("💭 Subtask {} Thought: {}", subtask.id, thought);
                     iter_trace.thought = Some(thought);
+                }
+
+                // Check for skill request (Phase 1 -> Phase 2 transition)
+                if active_skill.is_none() {
+                    if let Some(skill_name) = SkillDetector::detect_first(content) {
+                        dual_info!(
+                            "🎯 Subtask {} requested skill: {} - request_id: {}",
+                            subtask.id,
+                            skill_name,
+                            request_id
+                        );
+
+                        // Try to load the requested skill
+                        if let Ok(registry) = SkillRegistry::global() {
+                            if let Some(loaded_skill) = registry.get(&skill_name).await {
+                                dual_info!(
+                                    "📖 Loaded skill '{}' for subtask {} - request_id: {}",
+                                    skill_name,
+                                    subtask.id,
+                                    request_id
+                                );
+
+                                // Record skill activation in trace
+                                subtask_trace.set_active_skill(skill_name.clone());
+
+                                // Store the active skill
+                                active_skill = Some(loaded_skill.clone());
+
+                                // Rebuild context with the active skill (Phase 2)
+                                messages = build_context_for_react(
+                                    subtask,
+                                    previous_results,
+                                    available_tools,
+                                    None, // No need for summaries in Phase 2
+                                    Some(&loaded_skill),
+                                );
+
+                                // Finalize iteration trace and continue loop
+                                iter_trace.duration = iter_start.elapsed();
+                                subtask_trace.add_iteration(iter_trace);
+                                continue;
+                            } else {
+                                dual_warn!(
+                                    "⚠️ Skill '{}' not found, continuing without skill - request_id: {}",
+                                    skill_name,
+                                    request_id
+                                );
+                            }
+                        }
+                    }
                 }
 
                 // Check for final answer
@@ -910,42 +975,124 @@ fn is_retryable_error(error: &ServerError) -> bool {
 }
 
 /// Builds the initial context messages for React loop execution.
+///
+/// This function supports two-phase skill loading:
+/// - Phase 1 (no active_skill): Injects skills summaries, allows LLM to request a skill
+/// - Phase 2 (with active_skill): Injects full skill content and filtered tools
 fn build_context_for_react(
     subtask: &SubTask,
     previous_results: &[(usize, String)],
     available_tools: &[ToolDescription],
+    skills_summaries: Option<&[SkillSummary]>,
+    active_skill: Option<&LoadedSkill>,
 ) -> Vec<ChatCompletionRequestMessage> {
     let mut messages = Vec::new();
 
-    // Build system prompt
-    let tools_desc = available_tools
-        .iter()
-        .map(|t| format!("- {}: {}", t.name, t.description))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Build tools description
+    let tools_desc = if available_tools.is_empty() {
+        "No tools are currently available.".to_string()
+    } else {
+        available_tools
+            .iter()
+            .map(|t| format!("- {}: {}", t.name, t.description))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
-    let system_prompt = format!(
-        r#"You are an AI assistant executing a specific subtask as part of a larger plan.
+    // Build the system prompt based on whether we have an active skill
+    let system_prompt = match active_skill {
+        // Phase 2: Active skill - inject full skill content
+        Some(skill) => {
+            format!(
+                r#"You are an AI assistant executing a specific subtask as part of a larger plan.
 
 ## Your Task
 {}
+
+## Active Skill: {}
+
+The following skill instructions guide how to complete this task:
+
+---
+{}
+---
 
 ## Available Tools
 {}
 
 ## Instructions
-1. Analyze the task and think about how to accomplish it
-2. Use the available tools as needed to complete the task
+1. Follow the skill instructions above to complete the task
+2. Use the available tools as needed
 3. When you have completed the task, provide your final answer wrapped in <final_answer></final_answer> tags
 
 ## Response Format
 - Use <thought></thought> tags to explain your reasoning
-- Use <action></action> tags to describe what you're doing
+- Use <action></action> tags to specify the tool to use
+- Use <action_input></action_input> tags for tool parameters (JSON format)
+- When done, use <final_answer></final_answer> tags for your final response
+
+Remember: Focus only on this specific subtask. Follow the skill instructions carefully."#,
+                subtask.description, skill.metadata.name, skill.content, tools_desc
+            )
+        }
+        // Phase 1: No active skill - show skills summaries if available
+        None => {
+            // Build skills section if summaries are provided
+            let skills_section = match skills_summaries {
+                Some(summaries) if !summaries.is_empty() => {
+                    let skills_table = summaries
+                        .iter()
+                        .map(|s| format!("| {} | {} |", s.name, s.description))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    format!(
+                        r#"
+
+## Available Skills
+
+The following skills are available to help you complete this task:
+
+| Skill | Description |
+|-------|-------------|
+{}
+
+If you need to use a skill, wrap the skill name in <use_skill></use_skill> tags at the beginning of your response.
+Example: <use_skill>skill-name</use_skill>
+
+"#,
+                        skills_table
+                    )
+                }
+                _ => String::new(),
+            };
+
+            format!(
+                r#"You are an AI assistant executing a specific subtask as part of a larger plan.
+
+## Your Task
+{}
+{}
+## Available Tools
+{}
+
+## Instructions
+1. Analyze the task and think about how to accomplish it
+2. If a skill would help, request it using <use_skill>skill-name</use_skill> tags
+3. Use the available tools as needed to complete the task
+4. When you have completed the task, provide your final answer wrapped in <final_answer></final_answer> tags
+
+## Response Format
+- Use <thought></thought> tags to explain your reasoning
+- Use <action></action> tags to specify the tool to use
+- Use <action_input></action_input> tags for tool parameters (JSON format)
 - When done, use <final_answer></final_answer> tags for your final response
 
 Remember: Focus only on this specific subtask. Use the context from previous results if needed."#,
-        subtask.description, tools_desc
-    );
+                subtask.description, skills_section, tools_desc
+            )
+        }
+    };
 
     messages.push(ChatCompletionRequestMessage::System(
         ChatCompletionSystemMessage::new(system_prompt, None),
@@ -1206,7 +1353,8 @@ mod tests {
             description: "Get weather information".to_string(),
         }];
 
-        let messages = build_context_for_react(&subtask, &previous_results, &available_tools);
+        let messages =
+            build_context_for_react(&subtask, &previous_results, &available_tools, None, None);
 
         // Should have system message + user message with task
         assert_eq!(messages.len(), 2);
@@ -1222,10 +1370,97 @@ mod tests {
         ];
         let available_tools = vec![];
 
-        let messages = build_context_for_react(&subtask, &previous_results, &available_tools);
+        let messages =
+            build_context_for_react(&subtask, &previous_results, &available_tools, None, None);
 
         // Should have system message + context message + task message
         assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn test_build_context_for_react_with_skills_summaries() {
+        let subtask = SubTask::new(0, "Query weather".to_string());
+        let previous_results: Vec<(usize, String)> = vec![];
+        let available_tools = vec![ToolDescription {
+            name: "weather---weather-server".to_string(),
+            description: "Get weather information".to_string(),
+        }];
+        let skills = vec![SkillSummary {
+            name: "weather-query".to_string(),
+            description: "Query weather for a city".to_string(),
+        }];
+
+        let messages = build_context_for_react(
+            &subtask,
+            &previous_results,
+            &available_tools,
+            Some(&skills),
+            None,
+        );
+
+        // Should have system message + user message with task
+        assert_eq!(messages.len(), 2);
+
+        // Verify skills are mentioned in system prompt
+        if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
+            let content = sys_msg.content();
+            assert!(content.contains("Available Skills"));
+            assert!(content.contains("weather-query"));
+            assert!(content.contains("<use_skill>"));
+        } else {
+            panic!("Expected system message");
+        }
+    }
+
+    #[test]
+    fn test_build_context_for_react_with_active_skill() {
+        use std::path::PathBuf;
+
+        use chrono::Utc;
+
+        let subtask = SubTask::new(0, "Query weather".to_string());
+        let previous_results: Vec<(usize, String)> = vec![];
+        let available_tools = vec![ToolDescription {
+            name: "weather---weather-server".to_string(),
+            description: "Get weather information".to_string(),
+        }];
+        let active_skill = LoadedSkill {
+            metadata: crate::skills::SkillMetadata {
+                name: "weather-query".to_string(),
+                description: "Query weather for a city".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: None,
+                model: None,
+            },
+            content: "Use the weather tool to query weather.".to_string(),
+            raw_content: "".to_string(),
+            skill_dir: PathBuf::new(),
+            file_path: "".to_string(),
+            enabled: true,
+            loaded_at: Utc::now(),
+        };
+
+        let messages = build_context_for_react(
+            &subtask,
+            &previous_results,
+            &available_tools,
+            None,
+            Some(&active_skill),
+        );
+
+        // Should have system message + user message with task
+        assert_eq!(messages.len(), 2);
+
+        // Verify skill content is injected in system prompt
+        if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
+            let content = sys_msg.content();
+            assert!(content.contains("Active Skill: weather-query"));
+            assert!(content.contains("Use the weather tool to query weather."));
+        } else {
+            panic!("Expected system message");
+        }
     }
 
     #[test]
@@ -1402,7 +1637,8 @@ mod tests {
         let previous_results = vec![(0, "Beijing: Sunny".to_string())];
         let available_tools = vec![];
 
-        let messages = build_context_for_react(&subtask, &previous_results, &available_tools);
+        let messages =
+            build_context_for_react(&subtask, &previous_results, &available_tools, None, None);
 
         // Should have system message + context message (with partial deps) + task message
         assert_eq!(messages.len(), 3);
@@ -1417,7 +1653,8 @@ mod tests {
             description: "Get weather information".to_string(),
         }];
 
-        let messages = build_context_for_react(&subtask, &previous_results, &available_tools);
+        let messages =
+            build_context_for_react(&subtask, &previous_results, &available_tools, None, None);
 
         // Check system message contains task description
         if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
@@ -1434,7 +1671,8 @@ mod tests {
         let previous_results: Vec<(usize, String)> = vec![];
         let available_tools: Vec<ToolDescription> = vec![];
 
-        let messages = build_context_for_react(&subtask, &previous_results, &available_tools);
+        let messages =
+            build_context_for_react(&subtask, &previous_results, &available_tools, None, None);
 
         assert_eq!(messages.len(), 2);
         // System message should still exist even without tools

@@ -225,6 +225,9 @@ pub struct SubtaskTrace {
     pub retry_count: u32,
     /// History of retry attempts with their error messages.
     pub retry_history: Vec<RetryAttempt>,
+    /// Active skill used during execution (if any).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_skill: Option<String>,
 }
 
 /// Information about a single retry attempt.
@@ -256,6 +259,7 @@ impl SubtaskTrace {
             result: None,
             retry_count: 0,
             retry_history: Vec::new(),
+            active_skill: None,
         }
     }
 
@@ -263,6 +267,11 @@ impl SubtaskTrace {
     pub fn start(&mut self) {
         self.start_time = Some(Utc::now());
         self.status = SubTaskStatus::InProgress;
+    }
+
+    /// Sets the active skill being used for this subtask.
+    pub fn set_active_skill(&mut self, skill_name: String) {
+        self.active_skill = Some(skill_name);
     }
 
     /// Marks the subtask as completed successfully.
@@ -397,6 +406,7 @@ impl Default for SubtaskTrace {
             result: None,
             retry_count: 0,
             retry_history: Vec::new(),
+            active_skill: None,
         }
     }
 }
