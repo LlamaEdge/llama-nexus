@@ -17,6 +17,9 @@ pub mod registry;
 pub mod types;
 pub mod validator;
 
+#[cfg(test)]
+mod e2e_tests;
+
 pub use detector::SkillDetector;
 pub use error::SkillError;
 pub use injector::SkillInjector;
