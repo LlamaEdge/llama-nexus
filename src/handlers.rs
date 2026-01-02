@@ -22,7 +22,7 @@ use crate::{
     dual_debug, dual_error, dual_info, dual_warn,
     error::{ServerError, ServerResult},
     info::ApiServer,
-    mcp::MCP_SEPARATOR,
+    mcp::format_mcp_tool_name,
     server::{RoutingPolicy, Server, ServerIdToRemove, ServerKind},
 };
 
@@ -63,10 +63,9 @@ pub(crate) async fn chat_handler(
                     .unwrap()
                     .iter()
                     .for_each(|mcp_tool| {
-                        let name = format!(
-                            "{}{MCP_SEPARATOR}{}",
+                        let name = format_mcp_tool_name(
+                            server_config.server_name.as_deref().unwrap(),
                             &mcp_tool.name,
-                            server_config.server_name.as_deref().unwrap()
                         );
                         let tool = Tool::new(ToolFunction {
                             name,

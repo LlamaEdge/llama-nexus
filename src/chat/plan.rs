@@ -43,7 +43,10 @@ use crate::{
     },
     dual_debug, dual_error, dual_info, dual_warn,
     error::{ServerError, ServerResult},
-    mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SEPARATOR, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES},
+    mcp::{
+        DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SEPARATOR_LEGACY, MCP_SERVICES,
+        SEARCH_MCP_SERVER_NAMES, format_mcp_tool_name,
+    },
     server::{RoutingPolicy, ServerKind},
     skills::{LoadedSkill, SkillDetector, SkillInjector, SkillRegistry, SkillSummary},
 };
@@ -511,7 +514,7 @@ async fn get_available_tools() -> Vec<ToolDescription> {
             // tools is Vec<McpToolName> (Vec<String>), just tool names
             for tool_name in &service_read.tools {
                 tools.push(ToolDescription {
-                    name: format!("{}{}{}", tool_name, MCP_SEPARATOR, server_name),
+                    name: format_mcp_tool_name(server_name, tool_name),
                     description: format!("Tool {} from {}", tool_name, server_name),
                 });
             }
@@ -839,7 +842,11 @@ async fn execute_tool_call(
     let tool_call_start = Instant::now();
 
     // Parse tool name and server name
-    let parts: Vec<&str> = tool_call.function.name.split(MCP_SEPARATOR).collect();
+    let parts: Vec<&str> = tool_call
+        .function
+        .name
+        .split(MCP_SEPARATOR_LEGACY)
+        .collect();
     if parts.len() != 2 {
         let err_msg = format!("Invalid tool name format: {}", tool_call.function.name);
         return Err(ServerError::Operation(err_msg));
@@ -1135,7 +1142,11 @@ fn filter_tools_by_patterns<'a>(
             .iter()
             .filter(|tool| {
                 // Extract the tool name part (before the MCP separator)
-                let tool_name = tool.name.split(MCP_SEPARATOR).next().unwrap_or(&tool.name);
+                let tool_name = tool
+                    .name
+                    .split(MCP_SEPARATOR_LEGACY)
+                    .next()
+                    .unwrap_or(&tool.name);
 
                 patterns.iter().any(|pattern| {
                     if pattern.contains('*') {
