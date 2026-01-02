@@ -39,7 +39,9 @@ use crate::{
     },
     dual_debug, dual_error, dual_info, dual_warn,
     error::{ServerError, ServerResult},
-    mcp::{DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SEPARATOR, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES},
+    mcp::{
+        DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES, parse_mcp_tool_name,
+    },
     server::{RoutingPolicy, ServerKind},
 };
 
@@ -337,16 +339,9 @@ pub(crate) async fn chat(
                     request_id
                 );
 
-                let contains = tool_call.function.name.as_str().contains(MCP_SEPARATOR);
-                let parts: Vec<&str> = tool_call
-                    .function
-                    .name
-                    .as_str()
-                    .split(MCP_SEPARATOR)
-                    .collect();
-                if contains && parts.len() == 2 {
-                    let mcp_tool_name = parts[0];
-                    let mcp_server_name = parts[1];
+                if let Some((mcp_server_name, mcp_tool_name)) =
+                    parse_mcp_tool_name(&tool_call.function.name)
+                {
                     let mcp_tool_args = tool_call.function.arguments.as_str();
                     let tool_call_id = tool_call.id.as_str();
 

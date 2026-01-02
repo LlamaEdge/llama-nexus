@@ -12,12 +12,10 @@ pub static MCP_SERVICES: OnceCell<TokioRwLock<HashMap<ServiceName, TokioRwLock<M
     OnceCell::new();
 
 // MCP tool naming constants
-/// Prefix for MCP tool names (new format)
+/// Prefix for MCP tool names
 pub(crate) const MCP_PREFIX: &str = "mcp";
-/// Separator for MCP tool name components (new format)
+/// Separator for MCP tool name components
 pub(crate) const MCP_SEPARATOR: &str = "__";
-/// Legacy separator for backward compatibility
-pub(crate) const MCP_SEPARATOR_LEGACY: &str = "---";
 
 pub(crate) const SEARCH_MCP_SERVER_NAMES: [&str; 6] = [
     "cardea-agentic-search",
@@ -72,7 +70,6 @@ impl McpService {
 /// let name = format_mcp_tool_name("cardea-calculator", "sum");
 /// assert_eq!(name, "mcp__cardea-calculator__sum");
 /// ```
-#[allow(dead_code)]
 pub fn format_mcp_tool_name(server_name: &str, tool_name: &str) -> String {
     format!("{MCP_PREFIX}{MCP_SEPARATOR}{server_name}{MCP_SEPARATOR}{tool_name}")
 }
@@ -87,7 +84,6 @@ pub fn format_mcp_tool_name(server_name: &str, tool_name: &str) -> String {
 /// let result = parse_mcp_tool_name("mcp__cardea-calculator__sum");
 /// assert_eq!(result, Some(("cardea-calculator", "sum")));
 /// ```
-#[allow(dead_code)]
 pub fn parse_mcp_tool_name(full_name: &str) -> Option<(&str, &str)> {
     let parts: Vec<&str> = full_name.split(MCP_SEPARATOR).collect();
     if parts.len() == 3 && parts[0] == MCP_PREFIX {
@@ -97,68 +93,17 @@ pub fn parse_mcp_tool_name(full_name: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// Parses an MCP tool name, supporting both new and legacy formats.
-///
-/// - New format: `mcp__{server_name}__{tool_name}`
-/// - Legacy format: `{tool_name}---{server_name}`
-///
-/// Returns `Some((server_name, tool_name))` if the name matches either format,
-/// otherwise returns `None`.
-///
-/// # Example
-/// ```ignore
-/// // New format
-/// let result = parse_mcp_tool_name_compat("mcp__cardea-calculator__sum");
-/// assert_eq!(result, Some(("cardea-calculator", "sum")));
-///
-/// // Legacy format
-/// let result = parse_mcp_tool_name_compat("search---serverA");
-/// assert_eq!(result, Some(("serverA", "search")));
-/// ```
-#[allow(dead_code)]
-pub fn parse_mcp_tool_name_compat(full_name: &str) -> Option<(&str, &str)> {
-    // Try new format first
-    if let Some(result) = parse_mcp_tool_name(full_name) {
-        return Some(result);
-    }
-    // Fall back to legacy format: tool---server
-    let parts: Vec<&str> = full_name.split(MCP_SEPARATOR_LEGACY).collect();
-    if parts.len() == 2 {
-        Some((parts[1], parts[0])) // Legacy format: tool---server
-    } else {
-        None
-    }
-}
-
-/// Checks if a name is an MCP tool name (either new or legacy format).
-///
-/// # Example
-/// ```ignore
-/// assert!(is_mcp_tool_name("mcp__server__tool"));
-/// assert!(is_mcp_tool_name("search---serverA"));
-/// assert!(!is_mcp_tool_name("local_tool"));
-/// ```
-#[allow(dead_code)]
-pub fn is_mcp_tool_name(name: &str) -> bool {
-    name.starts_with(&format!("{MCP_PREFIX}{MCP_SEPARATOR}")) || name.contains(MCP_SEPARATOR_LEGACY)
-}
-
 /// Extracts the tool name part from a full MCP tool name.
 ///
-/// Supports both new and legacy formats. If the name doesn't match either format,
-/// returns the original name unchanged.
+/// If the name doesn't match the MCP format, returns the original name unchanged.
 ///
 /// # Example
 /// ```ignore
 /// assert_eq!(extract_tool_name("mcp__server__search"), "search");
-/// assert_eq!(extract_tool_name("query---serverA"), "query");
 /// assert_eq!(extract_tool_name("local_tool"), "local_tool");
 /// ```
-#[allow(dead_code)]
 pub fn extract_tool_name(full_name: &str) -> &str {
     if let Some((_, tool_name)) = parse_mcp_tool_name(full_name) {
-        tool_name
-    } else if let Some((_, tool_name)) = parse_mcp_tool_name_compat(full_name) {
         tool_name
     } else {
         full_name
@@ -200,47 +145,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_mcp_tool_name_compat_new_format() {
-        let result = parse_mcp_tool_name_compat("mcp__cardea-calculator__sum");
-        assert_eq!(result, Some(("cardea-calculator", "sum")));
-    }
-
-    #[test]
-    fn test_parse_mcp_tool_name_compat_legacy_format() {
-        let result = parse_mcp_tool_name_compat("search---serverA");
-        assert_eq!(result, Some(("serverA", "search")));
-    }
-
-    #[test]
-    fn test_parse_mcp_tool_name_compat_invalid() {
-        assert_eq!(parse_mcp_tool_name_compat("invalid_name"), None);
-        assert_eq!(parse_mcp_tool_name_compat("no_separator"), None);
-    }
-
-    #[test]
-    fn test_is_mcp_tool_name() {
-        // New format
-        assert!(is_mcp_tool_name("mcp__server__tool"));
-        assert!(is_mcp_tool_name("mcp__cardea-calculator__sum"));
-
-        // Legacy format
-        assert!(is_mcp_tool_name("search---serverA"));
-        assert!(is_mcp_tool_name("query---my-server"));
-
-        // Not MCP tool names
-        assert!(!is_mcp_tool_name("local_tool"));
-        assert!(!is_mcp_tool_name("some_function"));
-    }
-
-    #[test]
     fn test_extract_tool_name() {
-        // New format
+        // MCP format
         assert_eq!(extract_tool_name("mcp__server__search"), "search");
         assert_eq!(extract_tool_name("mcp__cardea-calculator__sum"), "sum");
-
-        // Legacy format
-        assert_eq!(extract_tool_name("query---serverA"), "query");
-        assert_eq!(extract_tool_name("get_data---my-server"), "get_data");
 
         // Not MCP tool names - returns original
         assert_eq!(extract_tool_name("local_tool"), "local_tool");

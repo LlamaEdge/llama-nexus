@@ -44,8 +44,8 @@ use crate::{
     dual_debug, dual_error, dual_info, dual_warn,
     error::{ServerError, ServerResult},
     mcp::{
-        DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SEPARATOR_LEGACY, MCP_SERVICES,
-        SEARCH_MCP_SERVER_NAMES, format_mcp_tool_name,
+        DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES, extract_tool_name,
+        format_mcp_tool_name, parse_mcp_tool_name,
     },
     server::{RoutingPolicy, ServerKind},
     skills::{LoadedSkill, SkillDetector, SkillInjector, SkillRegistry, SkillSummary},
@@ -842,18 +842,11 @@ async fn execute_tool_call(
     let tool_call_start = Instant::now();
 
     // Parse tool name and server name
-    let parts: Vec<&str> = tool_call
-        .function
-        .name
-        .split(MCP_SEPARATOR_LEGACY)
-        .collect();
-    if parts.len() != 2 {
-        let err_msg = format!("Invalid tool name format: {}", tool_call.function.name);
-        return Err(ServerError::Operation(err_msg));
-    }
-
-    let tool_name = parts[0];
-    let server_name = parts[1];
+    let (server_name, tool_name) =
+        parse_mcp_tool_name(&tool_call.function.name).ok_or_else(|| {
+            let err_msg = format!("Invalid tool name format: {}", tool_call.function.name);
+            ServerError::Operation(err_msg)
+        })?;
     let tool_args: serde_json::Value =
         serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::json!({}));
 
@@ -1141,12 +1134,8 @@ fn filter_tools_by_patterns<'a>(
         Some(patterns) => tools
             .iter()
             .filter(|tool| {
-                // Extract the tool name part (before the MCP separator)
-                let tool_name = tool
-                    .name
-                    .split(MCP_SEPARATOR_LEGACY)
-                    .next()
-                    .unwrap_or(&tool.name);
+                // Extract the tool name part from MCP tool name
+                let tool_name = extract_tool_name(&tool.name);
 
                 patterns.iter().any(|pattern| {
                     if pattern.contains('*') {
@@ -1553,15 +1542,15 @@ mod tests {
     fn test_build_tools_json_with_filter() {
         let tools = vec![
             ToolDescription {
-                name: "weather---weather-server".to_string(),
+                name: "mcp__weather-server__weather".to_string(),
                 description: "Get weather information".to_string(),
             },
             ToolDescription {
-                name: "search---search-server".to_string(),
+                name: "mcp__search-server__search".to_string(),
                 description: "Search the web".to_string(),
             },
             ToolDescription {
-                name: "Bash(git:status)---mcp-server".to_string(),
+                name: "mcp__mcp-server__Bash(git:status)".to_string(),
                 description: "Git status".to_string(),
             },
         ];
@@ -1574,7 +1563,7 @@ mod tests {
         assert_eq!(tools_json.as_array().unwrap().len(), 1);
         assert_eq!(
             tools_json[0]["function"]["name"],
-            "weather---weather-server"
+            "mcp__weather-server__weather"
         );
     }
 
@@ -1582,19 +1571,19 @@ mod tests {
     fn test_filter_tools_by_patterns_wildcard() {
         let tools = vec![
             ToolDescription {
-                name: "Bash(git:status)---mcp-server".to_string(),
+                name: "mcp__mcp-server__Bash(git:status)".to_string(),
                 description: "Git status".to_string(),
             },
             ToolDescription {
-                name: "Bash(git:commit)---mcp-server".to_string(),
+                name: "mcp__mcp-server__Bash(git:commit)".to_string(),
                 description: "Git commit".to_string(),
             },
             ToolDescription {
-                name: "Bash(npm:install)---mcp-server".to_string(),
+                name: "mcp__mcp-server__Bash(npm:install)".to_string(),
                 description: "NPM install".to_string(),
             },
             ToolDescription {
-                name: "weather---weather-server".to_string(),
+                name: "mcp__weather-server__weather".to_string(),
                 description: "Get weather".to_string(),
             },
         ];
@@ -1607,12 +1596,12 @@ mod tests {
         assert!(
             filtered
                 .iter()
-                .any(|t| t.name == "Bash(git:status)---mcp-server")
+                .any(|t| t.name == "mcp__mcp-server__Bash(git:status)")
         );
         assert!(
             filtered
                 .iter()
-                .any(|t| t.name == "Bash(git:commit)---mcp-server")
+                .any(|t| t.name == "mcp__mcp-server__Bash(git:commit)")
         );
     }
 
@@ -2122,23 +2111,23 @@ git commit -m "feat: add new feature"
 
         let tools = vec![
             ToolDescription {
-                name: "Bash(git:status)---mcp".to_string(),
+                name: "mcp__mcp__Bash(git:status)".to_string(),
                 description: "Git status".to_string(),
             },
             ToolDescription {
-                name: "Bash(git:commit)---mcp".to_string(),
+                name: "mcp__mcp__Bash(git:commit)".to_string(),
                 description: "Git commit".to_string(),
             },
             ToolDescription {
-                name: "Bash(npm:install)---mcp".to_string(),
+                name: "mcp__mcp__Bash(npm:install)".to_string(),
                 description: "NPM install".to_string(),
             },
             ToolDescription {
-                name: "Read---mcp".to_string(),
+                name: "mcp__mcp__Read".to_string(),
                 description: "Read file".to_string(),
             },
             ToolDescription {
-                name: "Write---mcp".to_string(),
+                name: "mcp__mcp__Write".to_string(),
                 description: "Write file".to_string(),
             },
         ];
@@ -2173,12 +2162,12 @@ git commit -m "feat: add new feature"
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect();
 
-        assert!(tool_names.contains(&"Bash(git:status)---mcp"));
-        assert!(tool_names.contains(&"Bash(git:commit)---mcp"));
-        assert!(tool_names.contains(&"Read---mcp"));
+        assert!(tool_names.contains(&"mcp__mcp__Bash(git:status)"));
+        assert!(tool_names.contains(&"mcp__mcp__Bash(git:commit)"));
+        assert!(tool_names.contains(&"mcp__mcp__Read"));
         // Should NOT include npm or Write
-        assert!(!tool_names.contains(&"Bash(npm:install)---mcp"));
-        assert!(!tool_names.contains(&"Write---mcp"));
+        assert!(!tool_names.contains(&"mcp__mcp__Bash(npm:install)"));
+        assert!(!tool_names.contains(&"mcp__mcp__Write"));
     }
 
     /// Test tool filtering with multiple patterns
@@ -2186,23 +2175,23 @@ git commit -m "feat: add new feature"
     fn test_integration_tool_filtering_multiple_patterns() {
         let tools = vec![
             ToolDescription {
-                name: "Bash(git:status)---mcp".to_string(),
+                name: "mcp__mcp__Bash(git:status)".to_string(),
                 description: "Git status".to_string(),
             },
             ToolDescription {
-                name: "Bash(npm:install)---mcp".to_string(),
+                name: "mcp__mcp__Bash(npm:install)".to_string(),
                 description: "NPM install".to_string(),
             },
             ToolDescription {
-                name: "Read---mcp".to_string(),
+                name: "mcp__mcp__Read".to_string(),
                 description: "Read file".to_string(),
             },
             ToolDescription {
-                name: "Write---mcp".to_string(),
+                name: "mcp__mcp__Write".to_string(),
                 description: "Write file".to_string(),
             },
             ToolDescription {
-                name: "Search---mcp".to_string(),
+                name: "mcp__mcp__Search".to_string(),
                 description: "Search".to_string(),
             },
         ];
@@ -2218,9 +2207,9 @@ git commit -m "feat: add new feature"
 
         assert_eq!(filtered.len(), 3);
         let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"Bash(git:status)---mcp"));
-        assert!(names.contains(&"Read---mcp"));
-        assert!(names.contains(&"Write---mcp"));
+        assert!(names.contains(&"mcp__mcp__Bash(git:status)"));
+        assert!(names.contains(&"mcp__mcp__Read"));
+        assert!(names.contains(&"mcp__mcp__Write"));
     }
 
     /// Test tool filtering with no restrictions (None patterns)
@@ -2228,15 +2217,15 @@ git commit -m "feat: add new feature"
     fn test_integration_tool_filtering_no_restrictions() {
         let tools = vec![
             ToolDescription {
-                name: "tool1---server".to_string(),
+                name: "mcp__server__tool1".to_string(),
                 description: "Tool 1".to_string(),
             },
             ToolDescription {
-                name: "tool2---server".to_string(),
+                name: "mcp__server__tool2".to_string(),
                 description: "Tool 2".to_string(),
             },
             ToolDescription {
-                name: "tool3---server".to_string(),
+                name: "mcp__server__tool3".to_string(),
                 description: "Tool 3".to_string(),
             },
         ];
@@ -2374,15 +2363,15 @@ git commit -m "feat: add new feature"
         // Step 5: Filter tools
         let all_tools = vec![
             ToolDescription {
-                name: "Bash(git:status)---mcp".to_string(),
+                name: "mcp__mcp__Bash(git:status)".to_string(),
                 description: "Git status".to_string(),
             },
             ToolDescription {
-                name: "Bash(npm:install)---mcp".to_string(),
+                name: "mcp__mcp__Bash(npm:install)".to_string(),
                 description: "NPM install".to_string(),
             },
             ToolDescription {
-                name: "Read---mcp".to_string(),
+                name: "mcp__mcp__Read".to_string(),
                 description: "Read".to_string(),
             },
         ];
