@@ -31,7 +31,10 @@ use tokio_util::sync::CancellationToken;
 use super::{
     shared::TimeBudget,
     trace::{IterationTrace, ToolCallTrace},
-    xml_parser::{extract_action, extract_final_answer, extract_thought, has_final_answer_tag},
+    xml_parser::{
+        extract_action, extract_final_answer, extract_thought, extract_xml_tool_call,
+        has_action_tag, has_final_answer_tag,
+    },
 };
 use crate::{
     AppState,
@@ -670,59 +673,130 @@ async fn execute_subtask_with_react(
         let usage = &chat_completion.usage;
         iter_trace.llm_tokens = TokenUsage::new(usage.prompt_tokens, usage.completion_tokens);
 
-        // Check for tool calls
-        let requires_tool_call = !chat_completion.choices[0].message.tool_calls.is_empty();
+        // Check for tool calls - support both OpenAI JSON format and XML JSON-embedded format
+        let json_tool_calls = &chat_completion.choices[0].message.tool_calls;
+        let content = chat_completion.choices[0].message.content.as_ref();
+
+        // Priority: OpenAI JSON format > XML JSON-embedded format
+        let requires_tool_call = if !json_tool_calls.is_empty() {
+            true
+        } else if let Some(content) = content {
+            // Check for XML tool call with JSON-embedded format
+            // Must have <action> tag, not have <final_answer> tag, and be valid JSON
+            has_action_tag(content)
+                && !has_final_answer_tag(content)
+                && extract_xml_tool_call(content).is_some()
+        } else {
+            false
+        };
 
         if requires_tool_call {
-            // Process tool calls
-            let all_tool_calls = &chat_completion.choices[0].message.tool_calls;
-            let tool_calls_to_execute = if all_tool_calls.len() > max_tools_per_iteration {
-                &all_tool_calls[..max_tools_per_iteration]
-            } else {
-                all_tool_calls.as_slice()
-            };
+            // Check which format is used
+            if !json_tool_calls.is_empty() {
+                // === OpenAI JSON format tool calls ===
+                let tool_calls_to_execute = if json_tool_calls.len() > max_tools_per_iteration {
+                    &json_tool_calls[..max_tools_per_iteration]
+                } else {
+                    json_tool_calls.as_slice()
+                };
 
-            // Extract thought from content if present
-            if let Some(content) = chat_completion.choices[0].message.content.as_ref() {
-                if let Some(thought) = extract_thought(content) {
-                    dual_info!("💭 Subtask {} Thought: {}", subtask.id, thought);
-                    iter_trace.thought = Some(thought);
+                // Extract thought from content if present
+                if let Some(content) = content {
+                    if let Some(thought) = extract_thought(content) {
+                        dual_info!("💭 Subtask {} Thought: {}", subtask.id, thought);
+                        iter_trace.thought = Some(thought);
+                    }
+                    if let Some(action) = extract_action(content) {
+                        dual_info!("🔧 Subtask {} Action: {}", subtask.id, action);
+                        iter_trace.action = Some(action);
+                    }
                 }
-                if let Some(action) = extract_action(content) {
-                    dual_info!("🔧 Subtask {} Action: {}", subtask.id, action);
-                    iter_trace.action = Some(action);
+
+                // Execute tool calls
+                for tool_call in tool_calls_to_execute {
+                    let tool_result = execute_tool_call(
+                        state,
+                        tool_call,
+                        tool_call_max_retries,
+                        tool_call_retry_delay,
+                        request_id,
+                        &mut iter_trace,
+                    )
+                    .await?;
+
+                    // Format observation
+                    let observation = format!("<observation>{}</observation>", tool_result);
+                    iter_trace.observation = Some(tool_result.clone());
+
+                    // Append assistant message with tool call
+                    messages.push(ChatCompletionRequestMessage::Assistant(
+                        ChatCompletionAssistantMessage::new(
+                            chat_completion.choices[0].message.content.clone(),
+                            None,
+                            Some(vec![tool_call.clone()]),
+                        ),
+                    ));
+
+                    // Append tool result message
+                    messages.push(ChatCompletionRequestMessage::Tool(
+                        ChatCompletionToolMessage::new(&observation, &tool_call.id),
+                    ));
                 }
-            }
+            } else if let Some(content) = content {
+                // === XML JSON-embedded format tool call ===
+                if let Some(xml_tool_call) = extract_xml_tool_call(content) {
+                    // Extract thought
+                    if let Some(thought) = extract_thought(content) {
+                        dual_info!("💭 Subtask {} Thought: {}", subtask.id, thought);
+                        iter_trace.thought = Some(thought);
+                    }
 
-            // Execute tool calls
-            for tool_call in tool_calls_to_execute {
-                let tool_result = execute_tool_call(
-                    state,
-                    tool_call,
-                    tool_call_max_retries,
-                    tool_call_retry_delay,
-                    request_id,
-                    &mut iter_trace,
-                )
-                .await?;
+                    dual_info!(
+                        "🔧 Subtask {} Action (XML JSON): {}",
+                        subtask.id,
+                        xml_tool_call.tool_name
+                    );
+                    iter_trace.action = Some(xml_tool_call.tool_name.clone());
 
-                // Format observation
-                let observation = format!("<observation>{}</observation>", tool_result);
-                iter_trace.observation = Some(tool_result.clone());
+                    // Construct ToolCall structure for execution
+                    let tool_call = endpoints::chat::ToolCall {
+                        id: format!("xml_call_{}", gen_chat_id()),
+                        ty: "function".to_string(),
+                        function: endpoints::chat::Function {
+                            name: xml_tool_call.tool_name,
+                            arguments: xml_tool_call.arguments,
+                        },
+                    };
 
-                // Append assistant message with tool call
-                messages.push(ChatCompletionRequestMessage::Assistant(
-                    ChatCompletionAssistantMessage::new(
-                        chat_completion.choices[0].message.content.clone(),
-                        None,
-                        Some(vec![tool_call.clone()]),
-                    ),
-                ));
+                    // Execute tool call
+                    let tool_result = execute_tool_call(
+                        state,
+                        &tool_call,
+                        tool_call_max_retries,
+                        tool_call_retry_delay,
+                        request_id,
+                        &mut iter_trace,
+                    )
+                    .await?;
 
-                // Append tool result message
-                messages.push(ChatCompletionRequestMessage::Tool(
-                    ChatCompletionToolMessage::new(&observation, &tool_call.id),
-                ));
+                    // Format observation
+                    let observation = format!("<observation>{}</observation>", tool_result);
+                    iter_trace.observation = Some(tool_result.clone());
+
+                    // Append assistant message with tool call
+                    messages.push(ChatCompletionRequestMessage::Assistant(
+                        ChatCompletionAssistantMessage::new(
+                            Some(content.clone()),
+                            None,
+                            Some(vec![tool_call.clone()]),
+                        ),
+                    ));
+
+                    // Append tool result message
+                    messages.push(ChatCompletionRequestMessage::Tool(
+                        ChatCompletionToolMessage::new(&observation, &tool_call.id),
+                    ));
+                }
             }
 
             // Finalize iteration trace
@@ -983,6 +1057,81 @@ fn is_retryable_error(error: &ServerError) -> bool {
     )
 }
 
+/// Filters tools based on skill's allowed_tools.
+///
+/// - Phase 1 (no active_skill): Filters out tools that are covered by any skill's allowed_tools
+/// - Phase 2 (with active_skill): Only shows tools declared in the skill's allowed_tools (if any)
+///
+/// This prevents redundancy between skill descriptions and tool listings.
+fn filter_tools_by_skills<'a>(
+    tools: &'a [ToolDescription],
+    skills_summaries: Option<&[SkillSummary]>,
+    active_skill: Option<&LoadedSkill>,
+) -> Vec<&'a ToolDescription> {
+    match active_skill {
+        // Phase 2: Only show skill-related tools (if skill has allowed_tools)
+        Some(skill) => {
+            let skill_tools = skill.metadata.get_allowed_tools();
+            if skill_tools.is_empty() {
+                // No allowed-tools specified, show all tools (backward compatibility)
+                tools.iter().collect()
+            } else {
+                // Only show tools declared in skill's allowed-tools
+                let skill_tools_set: HashSet<&str> =
+                    skill_tools.iter().map(|s| s.as_str()).collect();
+
+                let filtered: Vec<&ToolDescription> = tools
+                    .iter()
+                    .filter(|t| skill_tools_set.contains(t.name.as_str()))
+                    .collect();
+
+                dual_debug!(
+                    "Phase 2 tool filtering: skill '{}' allows {} tools, showing {} of {} available",
+                    skill.metadata.name,
+                    skill_tools.len(),
+                    filtered.len(),
+                    tools.len()
+                );
+
+                filtered
+            }
+        }
+
+        // Phase 1: Filter out tools covered by skills
+        None => {
+            // Collect all tools covered by any skill
+            let covered_tools: HashSet<&str> = skills_summaries
+                .map(|summaries| {
+                    summaries
+                        .iter()
+                        .flat_map(|s| s.allowed_tools.iter().map(|t| t.as_str()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if covered_tools.is_empty() {
+                // No tools to filter, show all
+                return tools.iter().collect();
+            }
+
+            // Filter out covered tools
+            let filtered: Vec<&ToolDescription> = tools
+                .iter()
+                .filter(|t| !covered_tools.contains(t.name.as_str()))
+                .collect();
+
+            dual_debug!(
+                "Phase 1 tool filtering: {} tools covered by skills, showing {} of {} available",
+                covered_tools.len(),
+                filtered.len(),
+                tools.len()
+            );
+
+            filtered
+        }
+    }
+}
+
 /// Builds the initial context messages for React loop execution.
 ///
 /// This function supports two-phase skill loading:
@@ -997,11 +1146,14 @@ fn build_context_for_react(
 ) -> Vec<ChatCompletionRequestMessage> {
     let mut messages = Vec::new();
 
-    // Build tools description
-    let tools_desc = if available_tools.is_empty() {
+    // Filter tools based on skills' allowed_tools
+    let filtered_tools = filter_tools_by_skills(available_tools, skills_summaries, active_skill);
+
+    // Build tools description from filtered list
+    let tools_desc = if filtered_tools.is_empty() {
         "No tools are currently available.".to_string()
     } else {
-        available_tools
+        filtered_tools
             .iter()
             .map(|t| format!("- {}: {}", t.name, t.description))
             .collect::<Vec<_>>()
@@ -1031,9 +1183,18 @@ fn build_context_for_react(
 
 ## Response Format
 - Use <thought></thought> tags to explain your reasoning
-- Use <action></action> tags to specify the tool to use
-- Use <action_input></action_input> tags for tool parameters (JSON format)
+- Use <action></action> tags for tool calls with JSON format:
+  <action>{{"name": "tool_name", "arguments": {{"param": "value"}}}}</action>
 - When done, use <final_answer></final_answer> tags for your final response
+
+## Tool Call Example
+When you need to call a tool, output like this:
+<thought>I need to calculate the sum of two numbers</thought>
+<action>{{"name": "mcp__cardea-calculator__sum", "arguments": {{"a": 23, "b": 32}}}}</action>
+
+After receiving the observation, provide your final answer:
+<thought>I received the calculation result</thought>
+<final_answer>The sum of 23 and 32 is 55.</final_answer>
 
 Remember: Focus only on this specific subtask. Follow the skill instructions carefully."#,
                 subtask.description, skill_section, tools_desc
@@ -1064,9 +1225,14 @@ Remember: Focus only on this specific subtask. Follow the skill instructions car
 
 ## Response Format
 - Use <thought></thought> tags to explain your reasoning
-- Use <action></action> tags to specify the tool to use
-- Use <action_input></action_input> tags for tool parameters (JSON format)
+- Use <action></action> tags for tool calls with JSON format:
+  <action>{{"name": "tool_name", "arguments": {{"param": "value"}}}}</action>
 - When done, use <final_answer></final_answer> tags for your final response
+
+## Tool Call Example
+When you need to call a tool, output like this:
+<thought>I need to search for information</thought>
+<action>{{"name": "mcp__search__query", "arguments": {{"query": "example search"}}}}</action>
 
 Remember: Focus only on this specific subtask. Use the context from previous results if needed."#,
                 subtask.description, skills_section, tools_desc
@@ -1439,6 +1605,7 @@ mod tests {
         let skills = vec![SkillSummary {
             name: "weather-query".to_string(),
             description: "Query weather for a city".to_string(),
+            allowed_tools: vec![],
         }];
 
         let messages = build_context_for_react(
@@ -1915,10 +2082,12 @@ mod tests {
             SkillSummary {
                 name: "web-search".to_string(),
                 description: "Perform web searches with advanced filtering".to_string(),
+                allowed_tools: vec![],
             },
             SkillSummary {
                 name: "git-workflow".to_string(),
                 description: "Help with git operations and workflows".to_string(),
+                allowed_tools: vec![],
             },
         ];
 
@@ -2002,6 +2171,7 @@ mod tests {
         let skills = vec![SkillSummary {
             name: "git-workflow".to_string(),
             description: "Git workflow assistance".to_string(),
+            allowed_tools: vec![],
         }];
 
         // Phase 1: no active skill
@@ -2414,5 +2584,293 @@ git commit -m "feat: add new feature"
         assert_eq!(skills, vec!["code-review"]);
         assert_eq!(cleaned, "I will use  to help you.");
         assert!(!cleaned.contains("<use_skill>"));
+    }
+
+    // ==========================================================================
+    // Unit Tests: filter_tools_by_skills
+    // ==========================================================================
+
+    /// Test Phase 1 filtering: tools covered by skills are hidden
+    #[test]
+    fn test_filter_tools_by_skills_phase1_basic() {
+        let tools = vec![
+            ToolDescription {
+                name: "mcp__calc__sum".to_string(),
+                description: "Sum numbers".to_string(),
+            },
+            ToolDescription {
+                name: "mcp__calc__sub".to_string(),
+                description: "Subtract numbers".to_string(),
+            },
+            ToolDescription {
+                name: "mcp__search__query".to_string(),
+                description: "Search query".to_string(),
+            },
+        ];
+
+        let skills = vec![SkillSummary {
+            name: "calculator".to_string(),
+            description: "Calculator operations".to_string(),
+            allowed_tools: vec!["mcp__calc__sum".to_string(), "mcp__calc__sub".to_string()],
+        }];
+
+        // Phase 1: no active skill, with skill summaries
+        let filtered = filter_tools_by_skills(&tools, Some(&skills), None);
+
+        // Only search tool should remain (calc tools are covered by skill)
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "mcp__search__query");
+    }
+
+    /// Test Phase 1 filtering with multiple skills
+    #[test]
+    fn test_filter_tools_by_skills_phase1_multiple_skills() {
+        let tools = vec![
+            ToolDescription {
+                name: "mcp__calc__sum".to_string(),
+                description: "Sum".to_string(),
+            },
+            ToolDescription {
+                name: "mcp__search__query".to_string(),
+                description: "Search".to_string(),
+            },
+            ToolDescription {
+                name: "mcp__git__status".to_string(),
+                description: "Git status".to_string(),
+            },
+            ToolDescription {
+                name: "mcp__generic__tool".to_string(),
+                description: "Generic tool".to_string(),
+            },
+        ];
+
+        let skills = vec![
+            SkillSummary {
+                name: "calculator".to_string(),
+                description: "Calculator".to_string(),
+                allowed_tools: vec!["mcp__calc__sum".to_string()],
+            },
+            SkillSummary {
+                name: "search".to_string(),
+                description: "Search".to_string(),
+                allowed_tools: vec!["mcp__search__query".to_string()],
+            },
+        ];
+
+        let filtered = filter_tools_by_skills(&tools, Some(&skills), None);
+
+        // Only git and generic tools should remain
+        assert_eq!(filtered.len(), 2);
+        let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"mcp__git__status"));
+        assert!(names.contains(&"mcp__generic__tool"));
+    }
+
+    /// Test Phase 1 filtering with no skill summaries
+    #[test]
+    fn test_filter_tools_by_skills_phase1_no_skills() {
+        let tools = vec![
+            ToolDescription {
+                name: "tool1".to_string(),
+                description: "Tool 1".to_string(),
+            },
+            ToolDescription {
+                name: "tool2".to_string(),
+                description: "Tool 2".to_string(),
+            },
+        ];
+
+        // No skills = all tools shown
+        let filtered = filter_tools_by_skills(&tools, None, None);
+        assert_eq!(filtered.len(), 2);
+
+        // Empty skills = all tools shown
+        let empty_skills: Vec<SkillSummary> = vec![];
+        let filtered = filter_tools_by_skills(&tools, Some(&empty_skills), None);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    /// Test Phase 1 filtering with skills having no allowed_tools
+    #[test]
+    fn test_filter_tools_by_skills_phase1_skills_without_allowed_tools() {
+        let tools = vec![
+            ToolDescription {
+                name: "tool1".to_string(),
+                description: "Tool 1".to_string(),
+            },
+            ToolDescription {
+                name: "tool2".to_string(),
+                description: "Tool 2".to_string(),
+            },
+        ];
+
+        // Skill exists but has no allowed_tools = all tools shown
+        let skills = vec![SkillSummary {
+            name: "generic-skill".to_string(),
+            description: "A skill without tool restrictions".to_string(),
+            allowed_tools: vec![],
+        }];
+
+        let filtered = filter_tools_by_skills(&tools, Some(&skills), None);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    /// Test Phase 2 filtering: only skill's allowed tools are shown
+    #[test]
+    fn test_filter_tools_by_skills_phase2_basic() {
+        use std::path::PathBuf;
+
+        use chrono::Utc;
+
+        let tools = vec![
+            ToolDescription {
+                name: "mcp__calc__sum".to_string(),
+                description: "Sum".to_string(),
+            },
+            ToolDescription {
+                name: "mcp__calc__sub".to_string(),
+                description: "Subtract".to_string(),
+            },
+            ToolDescription {
+                name: "mcp__search__query".to_string(),
+                description: "Search".to_string(),
+            },
+        ];
+
+        let active_skill = LoadedSkill {
+            metadata: crate::skills::SkillMetadata {
+                name: "calculator".to_string(),
+                description: "Calculator".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: Some("mcp__calc__sum, mcp__calc__sub".to_string()),
+                model: None,
+            },
+            content: "Calculator instructions".to_string(),
+            raw_content: String::new(),
+            skill_dir: PathBuf::new(),
+            file_path: String::new(),
+            enabled: true,
+            loaded_at: Utc::now(),
+        };
+
+        // Phase 2: active skill present
+        let filtered = filter_tools_by_skills(&tools, None, Some(&active_skill));
+
+        // Only calc tools should be shown
+        assert_eq!(filtered.len(), 2);
+        let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"mcp__calc__sum"));
+        assert!(names.contains(&"mcp__calc__sub"));
+        assert!(!names.contains(&"mcp__search__query"));
+    }
+
+    /// Test Phase 2 filtering: skill without allowed_tools shows all tools
+    #[test]
+    fn test_filter_tools_by_skills_phase2_no_restrictions() {
+        use std::path::PathBuf;
+
+        use chrono::Utc;
+
+        let tools = vec![
+            ToolDescription {
+                name: "tool1".to_string(),
+                description: "Tool 1".to_string(),
+            },
+            ToolDescription {
+                name: "tool2".to_string(),
+                description: "Tool 2".to_string(),
+            },
+        ];
+
+        let active_skill = LoadedSkill {
+            metadata: crate::skills::SkillMetadata {
+                name: "generic-skill".to_string(),
+                description: "A skill without tool restrictions".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: None, // No restrictions
+                model: None,
+            },
+            content: "Skill content".to_string(),
+            raw_content: String::new(),
+            skill_dir: PathBuf::new(),
+            file_path: String::new(),
+            enabled: true,
+            loaded_at: Utc::now(),
+        };
+
+        // Phase 2 with no restrictions = all tools shown
+        let filtered = filter_tools_by_skills(&tools, None, Some(&active_skill));
+        assert_eq!(filtered.len(), 2);
+    }
+
+    /// Test Phase 2 takes precedence over Phase 1
+    #[test]
+    fn test_filter_tools_by_skills_phase2_overrides_phase1() {
+        use std::path::PathBuf;
+
+        use chrono::Utc;
+
+        let tools = vec![
+            ToolDescription {
+                name: "mcp__calc__sum".to_string(),
+                description: "Sum".to_string(),
+            },
+            ToolDescription {
+                name: "mcp__search__query".to_string(),
+                description: "Search".to_string(),
+            },
+        ];
+
+        // Even if skill summaries say to hide calc tools...
+        let skills = vec![SkillSummary {
+            name: "calculator".to_string(),
+            description: "Calculator".to_string(),
+            allowed_tools: vec!["mcp__calc__sum".to_string()],
+        }];
+
+        // ...when active skill is present, Phase 2 logic applies
+        let active_skill = LoadedSkill {
+            metadata: crate::skills::SkillMetadata {
+                name: "calculator".to_string(),
+                description: "Calculator".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: Some("mcp__calc__sum".to_string()),
+                model: None,
+            },
+            content: "Calculator".to_string(),
+            raw_content: String::new(),
+            skill_dir: PathBuf::new(),
+            file_path: String::new(),
+            enabled: true,
+            loaded_at: Utc::now(),
+        };
+
+        // Phase 2: only show skill's allowed tools
+        let filtered = filter_tools_by_skills(&tools, Some(&skills), Some(&active_skill));
+
+        // Only calc tool should be shown (Phase 2 filtering)
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "mcp__calc__sum");
+    }
+
+    /// Test filter_tools_by_skills with empty tools list
+    #[test]
+    fn test_filter_tools_by_skills_empty_tools() {
+        let tools: Vec<ToolDescription> = vec![];
+
+        let skills = vec![SkillSummary {
+            name: "skill".to_string(),
+            description: "A skill".to_string(),
+            allowed_tools: vec!["some_tool".to_string()],
+        }];
+
+        let filtered = filter_tools_by_skills(&tools, Some(&skills), None);
+        assert!(filtered.is_empty());
     }
 }

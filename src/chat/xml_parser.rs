@@ -193,6 +193,10 @@ fn fix_common_typos(content: &str) -> String {
     // This handles cases like <subtask id=1> or <subtask id=2>
     result = fix_unquoted_subtask_id(&result);
 
+    // Fix mismatched </subtasks> closing tag when it should be </subtask>
+    // LLM sometimes outputs </subtasks> instead of </subtask> for individual subtask elements
+    result = fix_mismatched_subtask_closing_tag(&result);
+
     result
 }
 
@@ -206,6 +210,108 @@ fn fix_unquoted_subtask_id(content: &str) -> String {
     UNQUOTED_ID_PATTERN
         .replace_all(content, r#"<subtask id="$1">"#)
         .to_string()
+}
+
+/// Fixes mismatched subtask closing tags.
+///
+/// LLM sometimes outputs `</subtasks>` instead of `</subtask>` for individual
+/// subtask elements (confusing the plural container tag with the singular element tag).
+///
+/// This function detects patterns like:
+/// ```xml
+/// <subtask id="2">
+///   ...content...
+/// </subtasks>  <!-- Should be </subtask> -->
+/// ```
+///
+/// And fixes them to:
+/// ```xml
+/// <subtask id="2">
+///   ...content...
+/// </subtask>
+/// ```
+///
+/// The fix works by counting open/close tags: if we find a `</subtasks>` that
+/// doesn't match a `<subtasks>` container, it's likely a typo for `</subtask>`.
+fn fix_mismatched_subtask_closing_tag(content: &str) -> String {
+    use regex::Regex;
+
+    // Regex patterns for detecting tag positions
+    static SUBTASKS_OPEN: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)<\s*subtasks\s*>").unwrap());
+    static SUBTASKS_CLOSE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)<\s*/\s*subtasks\s*>").unwrap());
+    static SUBTASK_OPEN: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"(?i)<\s*subtask\s+id\s*=\s*"?\d+"?\s*>"#).unwrap());
+    static SUBTASK_CLOSE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)<\s*/\s*subtask\s*>").unwrap());
+
+    // Count container tags (plural)
+    let container_open_count = SUBTASKS_OPEN.find_iter(content).count();
+    let container_close_count = SUBTASKS_CLOSE.find_iter(content).count();
+
+    // Count element tags (singular)
+    let element_open_count = SUBTASK_OPEN.find_iter(content).count();
+    let element_close_count = SUBTASK_CLOSE.find_iter(content).count();
+
+    // If we have more container closes than opens, AND
+    // more element opens than closes, then some </subtasks> are typos
+    if container_close_count > container_open_count
+        && element_open_count > element_close_count
+    {
+        // Calculate how many </subtasks> should be </subtask>
+        let extra_container_closes = container_close_count - container_open_count;
+        let missing_element_closes = element_open_count - element_close_count;
+
+        // Replace the minimum of these counts
+        let fixes_needed = extra_container_closes.min(missing_element_closes);
+
+        if fixes_needed > 0 {
+            // Find all </subtasks> positions
+            let positions: Vec<_> = SUBTASKS_CLOSE
+                .find_iter(content)
+                .map(|m| (m.start(), m.end()))
+                .collect();
+
+            // We need to keep `container_open_count` legitimate container closes
+            // The legitimate ones are typically at the end (outermost)
+            // So we replace the first N ones that appear to be misplaced
+
+            // Strategy: keep the LAST container_open_count occurrences as legitimate
+            // Replace the first `fixes_needed` occurrences
+            let legitimate_count = container_open_count;
+            let total_closes = positions.len();
+
+            if total_closes > legitimate_count {
+                let mut result = content.to_string();
+
+                // Get positions to replace (skip the last `legitimate_count` ones)
+                // These are the misplaced </subtasks> that should be </subtask>
+                let to_replace: Vec<_> = positions
+                    .into_iter()
+                    .rev()
+                    .skip(legitimate_count)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .take(fixes_needed)
+                    .collect();
+
+                // Replace from back to front to preserve indices
+                for (start, end) in to_replace.into_iter().rev() {
+                    result = format!(
+                        "{}</subtask>{}",
+                        &result[..start],
+                        &result[end..]
+                    );
+                }
+
+                return result;
+            }
+        }
+    }
+
+    content.to_string()
 }
 
 /// Result of XML tag extraction with diagnostic information.
@@ -349,6 +455,8 @@ static SUBTASKS_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?si)<\s*subtasks\s*>(.*?)<\s*/\s*subtasks\s*>").unwrap());
 
 /// Regex pattern for individual subtask with id attribute.
+/// Note: This pattern only matches `</subtask>` closing tag. The `fix_mismatched_subtask_closing_tag`
+/// function handles the case where LLM outputs `</subtasks>` instead of `</subtask>`.
 static SUBTASK_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?si)<\s*subtask\s+id\s*=\s*"?(\d+)"?\s*>(.*?)<\s*/\s*subtask\s*>"#).unwrap()
 });
@@ -545,6 +653,72 @@ impl TaskPlanExtractionResult {
         self.plan.is_some()
     }
 }
+
+// ============================================================================
+// XML Tool Call Parsing (JSON-embedded format)
+// ============================================================================
+
+/// Represents a parsed XML tool call with JSON-embedded format.
+///
+/// Supports the LlamaEdge format:
+/// `<action>{"name": "tool_name", "arguments": {"param": "value"}}</action>`
+#[derive(Debug, Clone)]
+pub struct XmlToolCall {
+    /// Tool name extracted from JSON "name" field
+    pub tool_name: String,
+    /// Tool arguments as JSON string
+    pub arguments: String,
+}
+
+/// Extracts a tool call from XML with JSON-embedded format.
+///
+/// Parses the LlamaEdge format:
+/// `<action>{"name": "tool_name", "arguments": {"param": "value"}}</action>`
+///
+/// Returns Some(XmlToolCall) if parsing succeeds, None otherwise.
+pub fn extract_xml_tool_call(content: &str) -> Option<XmlToolCall> {
+    // Extract content from <action> tag
+    let action_content = extract_action(content)?;
+
+    // Check if it's JSON format (starts with '{')
+    let trimmed = action_content.trim();
+    if !trimmed.starts_with('{') {
+        // Not JSON format, return None
+        return None;
+    }
+
+    // Parse JSON
+    let json: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+
+    // Extract "name" field
+    let name = json.get("name")?.as_str()?;
+
+    // Extract "arguments" field (default to empty object if missing)
+    let arguments = json
+        .get("arguments")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "{}".to_string());
+
+    Some(XmlToolCall {
+        tool_name: name.to_string(),
+        arguments,
+    })
+}
+
+/// Checks if the content contains a valid XML tool call with JSON format.
+#[allow(dead_code)]
+pub fn has_xml_tool_call(content: &str) -> bool {
+    if !has_action_tag(content) {
+        return false;
+    }
+
+    // Try to extract and parse
+    extract_xml_tool_call(content).is_some()
+}
+
+// ============================================================================
+// Task Plan Extraction (detailed)
+// ============================================================================
 
 /// Extracts a task plan with detailed result information.
 ///
@@ -1267,5 +1441,255 @@ mod tests {
         let result = TaskPlanExtractionResult::failed();
         assert!(!result.is_success());
         assert!(result.plan.is_none());
+    }
+
+    // ============================================================================
+    // XML Tool Call Parsing Tests (JSON-embedded format)
+    // ============================================================================
+
+    #[test]
+    fn test_extract_xml_tool_call_json_embedded() {
+        let content = r#"
+<thought>需要计算两个数的和</thought>
+<action>{"name": "mcp__cardea-calculator__sum", "arguments": {"a": 23, "b": 32}}</action>
+"#;
+        let tool_call = extract_xml_tool_call(content).unwrap();
+        assert_eq!(tool_call.tool_name, "mcp__cardea-calculator__sum");
+        assert!(tool_call.arguments.contains("23"));
+        assert!(tool_call.arguments.contains("32"));
+    }
+
+    #[test]
+    fn test_extract_xml_tool_call_no_arguments() {
+        let content = r#"<action>{"name": "simple_tool"}</action>"#;
+        let tool_call = extract_xml_tool_call(content).unwrap();
+        assert_eq!(tool_call.tool_name, "simple_tool");
+        assert_eq!(tool_call.arguments, "{}");
+    }
+
+    #[test]
+    fn test_extract_xml_tool_call_empty_arguments() {
+        let content = r#"<action>{"name": "tool", "arguments": {}}</action>"#;
+        let tool_call = extract_xml_tool_call(content).unwrap();
+        assert_eq!(tool_call.tool_name, "tool");
+        assert_eq!(tool_call.arguments, "{}");
+    }
+
+    #[test]
+    fn test_extract_xml_tool_call_complex_arguments() {
+        let content =
+            r#"<action>{"name": "search", "arguments": {"query": "test", "limit": 10}}</action>"#;
+        let tool_call = extract_xml_tool_call(content).unwrap();
+        assert_eq!(tool_call.tool_name, "search");
+        assert!(tool_call.arguments.contains("test"));
+        assert!(tool_call.arguments.contains("10"));
+    }
+
+    #[test]
+    fn test_extract_xml_tool_call_not_json() {
+        // Non-JSON format should return None
+        let content = r#"<action>simple_tool_name</action>"#;
+        assert!(extract_xml_tool_call(content).is_none());
+    }
+
+    #[test]
+    fn test_extract_xml_tool_call_invalid_json() {
+        // Invalid JSON should return None
+        let content = r#"<action>{invalid json}</action>"#;
+        assert!(extract_xml_tool_call(content).is_none());
+    }
+
+    #[test]
+    fn test_extract_xml_tool_call_missing_name() {
+        // Missing name field should return None
+        let content = r#"<action>{"arguments": {"a": 1}}</action>"#;
+        assert!(extract_xml_tool_call(content).is_none());
+    }
+
+    #[test]
+    fn test_has_xml_tool_call_valid() {
+        let content = r#"<action>{"name": "tool", "arguments": {}}</action>"#;
+        assert!(has_xml_tool_call(content));
+    }
+
+    #[test]
+    fn test_has_xml_tool_call_invalid() {
+        let content = r#"<action>not_json</action>"#;
+        assert!(!has_xml_tool_call(content));
+    }
+
+    #[test]
+    fn test_has_xml_tool_call_no_action_tag() {
+        let content = r#"{"name": "tool", "arguments": {}}"#;
+        assert!(!has_xml_tool_call(content));
+    }
+
+    #[test]
+    fn test_extract_xml_tool_call_with_array_arguments() {
+        let content = r#"<action>{"name": "multi_search", "arguments": {"queries": ["a", "b", "c"]}}</action>"#;
+        let tool_call = extract_xml_tool_call(content).unwrap();
+        assert_eq!(tool_call.tool_name, "multi_search");
+        assert!(tool_call.arguments.contains("["));
+        assert!(tool_call.arguments.contains("]"));
+    }
+
+    #[test]
+    fn test_extract_xml_tool_call_mcp_tool_name() {
+        let content = r#"
+<thought>I need to call the MCP calculator</thought>
+<action>{"name": "mcp__cardea-calculator__multiply", "arguments": {"x": 5, "y": 10}}</action>
+"#;
+        let tool_call = extract_xml_tool_call(content).unwrap();
+        assert_eq!(tool_call.tool_name, "mcp__cardea-calculator__multiply");
+        assert!(tool_call.arguments.contains("5"));
+        assert!(tool_call.arguments.contains("10"));
+    }
+
+    #[test]
+    fn test_extract_xml_tool_call_with_final_answer_should_still_parse() {
+        // extract_xml_tool_call only parses <action>, it doesn't check for final_answer
+        // The caller (plan.rs) is responsible for checking has_final_answer_tag
+        let content = r#"
+<action>{"name": "tool", "arguments": {}}</action>
+<final_answer>Done!</final_answer>
+"#;
+        let tool_call = extract_xml_tool_call(content);
+        // Should still parse the action tag
+        assert!(tool_call.is_some());
+        assert_eq!(tool_call.unwrap().tool_name, "tool");
+    }
+
+    #[test]
+    fn test_extract_xml_tool_call_case_insensitive() {
+        let content = r#"<ACTION>{"name": "tool", "arguments": {}}</ACTION>"#;
+        let tool_call = extract_xml_tool_call(content).unwrap();
+        assert_eq!(tool_call.tool_name, "tool");
+    }
+
+    #[test]
+    fn test_extract_xml_tool_call_with_whitespace() {
+        let content = r#"< action >{"name": "tool", "arguments": {}}</ action >"#;
+        let tool_call = extract_xml_tool_call(content).unwrap();
+        assert_eq!(tool_call.tool_name, "tool");
+    }
+
+    // ==================== Tests for </subtasks> -> </subtask> fix ====================
+
+    #[test]
+    fn test_fix_mismatched_subtask_closing_tag_single() {
+        let content = r#"<subtask id="1"><description>Test</description></subtasks>"#;
+        let fixed = fix_mismatched_subtask_closing_tag(content);
+        assert_eq!(
+            fixed,
+            r#"<subtask id="1"><description>Test</description></subtask>"#
+        );
+    }
+
+    #[test]
+    fn test_fix_mismatched_subtask_closing_tag_multiple() {
+        let content = r#"
+<subtask id="1">
+  <description>First task</description>
+</subtask>
+<subtask id="2">
+  <description>Second task</description>
+</subtasks>
+"#;
+        let fixed = fix_mismatched_subtask_closing_tag(content);
+        assert!(fixed.contains("</subtask>\n<subtask id=\"2\">"));
+        assert!(fixed.ends_with("</subtask>\n"));
+    }
+
+    #[test]
+    fn test_fix_mismatched_subtask_closing_tag_preserves_correct() {
+        let content = r#"<subtask id="1"><description>Test</description></subtask>"#;
+        let fixed = fix_mismatched_subtask_closing_tag(content);
+        // Should remain unchanged
+        assert_eq!(fixed, content);
+    }
+
+    #[test]
+    fn test_fix_common_typos_fixes_subtasks_closing_tag() {
+        let content = r#"<subtask id="1"><description>Test</description></subtasks>"#;
+        let fixed = fix_common_typos(content);
+        assert!(fixed.contains("</subtask>"));
+        assert!(!fixed.contains("</subtasks>"));
+    }
+
+    #[test]
+    fn test_subtask_pattern_matches_subtask_closing_tag() {
+        // Test that SUBTASK_PATTERN matches correct </subtask> closing tag
+        let content = r#"<subtask id="1"><description>Test</description></subtask>"#;
+        let captures = SUBTASK_PATTERN.captures(content);
+        assert!(captures.is_some());
+        let caps = captures.unwrap();
+        assert_eq!(caps.get(1).unwrap().as_str(), "1");
+    }
+
+    #[test]
+    fn test_subtask_pattern_after_sanitization() {
+        // After sanitization, </subtasks> should be fixed to </subtask>
+        let content = r#"<subtask id="2"><description>Test</description></subtasks>"#;
+        let sanitized = sanitize_xml_content(content);
+        let captures = SUBTASK_PATTERN.captures(&sanitized);
+        assert!(captures.is_some());
+        let caps = captures.unwrap();
+        assert_eq!(caps.get(1).unwrap().as_str(), "2");
+    }
+
+    #[test]
+    fn test_extract_task_plan_with_mismatched_closing_tag() {
+        // This is the actual LLM output that was failing
+        let content = r#"
+<task_plan>
+<goal>计算 23 + 32 + 33 的结果</goal>
+<subtasks>
+<subtask id="1">
+<description>首先计算 23 + 32。</description>
+<dependencies></dependencies>
+<tools>mcp__cardea-calculator__sum</tools>
+<recommended_skill>cardea-calculator</recommended_skill>
+</subtask>
+<subtask id="2">
+<description>然后将第一步的结果与 33 相加。</description>
+<dependencies>1</dependencies>
+<tools>mcp__cardea-calculator__sum</tools>
+<recommended_skill>cardea-calculator</recommended_skill>
+</subtasks>
+</subtasks>
+</task_plan>
+"#;
+        let result = extract_task_plan(content);
+        assert!(result.is_some());
+        let plan = result.unwrap();
+        assert_eq!(plan.subtasks.len(), 2);
+        assert_eq!(plan.subtasks[0].id, "1");
+        assert_eq!(plan.subtasks[1].id, "2");
+    }
+
+    #[test]
+    fn test_extract_task_plan_with_correct_closing_tags() {
+        // Verify normal case still works
+        let content = r#"
+<task_plan>
+<goal>Test goal</goal>
+<subtasks>
+<subtask id="1">
+<description>Task 1</description>
+<dependencies></dependencies>
+<tools>tool1</tools>
+</subtask>
+<subtask id="2">
+<description>Task 2</description>
+<dependencies>1</dependencies>
+<tools>tool2</tools>
+</subtask>
+</subtasks>
+</task_plan>
+"#;
+        let result = extract_task_plan(content);
+        assert!(result.is_some());
+        let plan = result.unwrap();
+        assert_eq!(plan.subtasks.len(), 2);
     }
 }

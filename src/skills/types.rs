@@ -50,11 +50,27 @@ pub struct SkillMetadata {
 impl SkillMetadata {
     /// Parse allowed-tools string into a list of tool names
     ///
-    /// Standard format: space-separated (not comma-separated)
+    /// Supports either space-separated or comma-separated formats (not mixed):
+    /// - "tool1 tool2 tool3" (space-separated, per Agent Skills Standard)
+    /// - "tool1, tool2, tool3" (comma-separated)
+    ///
+    /// Detection logic: if the string contains a comma, use comma as delimiter;
+    /// otherwise use whitespace.
     pub fn get_allowed_tools(&self) -> Vec<String> {
         self.allowed_tools
             .as_ref()
-            .map(|s| s.split_whitespace().map(|t| t.to_string()).collect())
+            .map(|s| {
+                if s.contains(',') {
+                    // Comma-separated format
+                    s.split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                } else {
+                    // Space-separated format (Agent Skills Standard)
+                    s.split_whitespace().map(|t| t.to_string()).collect()
+                }
+            })
             .unwrap_or_default()
     }
 }
@@ -90,7 +106,7 @@ pub struct LoadedSkill {
 
 /// Skill summary for phase 1 injection
 ///
-/// Contains only name and description to minimize context usage
+/// Contains name, description, and allowed tools for tool filtering
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSummary {
     /// Skill name
@@ -98,6 +114,10 @@ pub struct SkillSummary {
 
     /// Skill description
     pub description: String,
+
+    /// Tools covered by this skill (should be hidden in Phase 1)
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
 }
 
 impl From<&LoadedSkill> for SkillSummary {
@@ -105,6 +125,7 @@ impl From<&LoadedSkill> for SkillSummary {
         Self {
             name: skill.metadata.name.clone(),
             description: skill.metadata.description.clone(),
+            allowed_tools: skill.metadata.get_allowed_tools(),
         }
     }
 }
@@ -114,6 +135,7 @@ impl From<&SkillMetadata> for SkillSummary {
         Self {
             name: metadata.name.clone(),
             description: metadata.description.clone(),
+            allowed_tools: metadata.get_allowed_tools(),
         }
     }
 }
@@ -281,15 +303,29 @@ mod tests {
         let summary = SkillSummary {
             name: "git-commit".to_string(),
             description: "Create git commits".to_string(),
+            allowed_tools: vec!["Bash".to_string(), "Read".to_string()],
         };
 
         let json = serde_json::to_string(&summary).unwrap();
         assert!(json.contains("git-commit"));
         assert!(json.contains("Create git commits"));
+        assert!(json.contains("allowed_tools"));
 
         let deserialized: SkillSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "git-commit");
         assert_eq!(deserialized.description, "Create git commits");
+        assert_eq!(deserialized.allowed_tools, vec!["Bash", "Read"]);
+    }
+
+    #[test]
+    fn test_skill_summary_deserialization_without_allowed_tools() {
+        // Test backward compatibility: allowed_tools defaults to empty vec
+        let json = r#"{"name": "old-skill", "description": "Old skill without allowed_tools"}"#;
+        let summary: SkillSummary = serde_json::from_str(json).unwrap();
+
+        assert_eq!(summary.name, "old-skill");
+        assert_eq!(summary.description, "Old skill without allowed_tools");
+        assert!(summary.allowed_tools.is_empty());
     }
 
     #[test]
@@ -354,5 +390,145 @@ mod tests {
 
         let tools = metadata.get_allowed_tools();
         assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_get_allowed_tools_comma_separated() {
+        let metadata = SkillMetadata {
+            name: "test".to_string(),
+            description: "test".to_string(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: Some("tool1, tool2, tool3".to_string()),
+            model: None,
+        };
+
+        let tools = metadata.get_allowed_tools();
+        assert_eq!(tools, vec!["tool1", "tool2", "tool3"]);
+    }
+
+    #[test]
+    fn test_get_allowed_tools_comma_no_space() {
+        let metadata = SkillMetadata {
+            name: "test".to_string(),
+            description: "test".to_string(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: Some("tool1,tool2,tool3".to_string()),
+            model: None,
+        };
+
+        let tools = metadata.get_allowed_tools();
+        assert_eq!(tools, vec!["tool1", "tool2", "tool3"]);
+    }
+
+    #[test]
+    fn test_get_allowed_tools_comma_extra_whitespace() {
+        let metadata = SkillMetadata {
+            name: "test".to_string(),
+            description: "test".to_string(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: Some("  tool1 ,  tool2  ,  tool3  ".to_string()),
+            model: None,
+        };
+
+        let tools = metadata.get_allowed_tools();
+        assert_eq!(tools, vec!["tool1", "tool2", "tool3"]);
+    }
+
+    #[test]
+    fn test_get_allowed_tools_mcp_tool_names_comma() {
+        let metadata = SkillMetadata {
+            name: "test".to_string(),
+            description: "test".to_string(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: Some(
+                "mcp__cardea-calculator__sum, mcp__cardea-calculator__sub".to_string(),
+            ),
+            model: None,
+        };
+
+        let tools = metadata.get_allowed_tools();
+        assert_eq!(
+            tools,
+            vec!["mcp__cardea-calculator__sum", "mcp__cardea-calculator__sub"]
+        );
+    }
+
+    #[test]
+    fn test_get_allowed_tools_mcp_tool_names_space() {
+        let metadata = SkillMetadata {
+            name: "test".to_string(),
+            description: "test".to_string(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: Some(
+                "mcp__cardea-calculator__sum mcp__cardea-calculator__sub".to_string(),
+            ),
+            model: None,
+        };
+
+        let tools = metadata.get_allowed_tools();
+        assert_eq!(
+            tools,
+            vec!["mcp__cardea-calculator__sum", "mcp__cardea-calculator__sub"]
+        );
+    }
+
+    #[test]
+    fn test_skill_summary_from_loaded_skill_with_allowed_tools() {
+        let skill = LoadedSkill {
+            metadata: SkillMetadata {
+                name: "calculator".to_string(),
+                description: "Calculator skill".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: Some("mcp__calc__sum, mcp__calc__sub".to_string()),
+                model: None,
+            },
+            content: "# Calculator".to_string(),
+            raw_content: "---\nname: calculator\n---\n# Calculator".to_string(),
+            skill_dir: PathBuf::from("/skills/calculator"),
+            file_path: "/skills/calculator/SKILL.md".to_string(),
+            enabled: true,
+            loaded_at: Utc::now(),
+        };
+
+        let summary = SkillSummary::from(&skill);
+        assert_eq!(summary.name, "calculator");
+        assert_eq!(summary.description, "Calculator skill");
+        assert_eq!(
+            summary.allowed_tools,
+            vec!["mcp__calc__sum", "mcp__calc__sub"]
+        );
+    }
+
+    #[test]
+    fn test_skill_summary_from_metadata_with_allowed_tools() {
+        let metadata = SkillMetadata {
+            name: "search".to_string(),
+            description: "Search skill".to_string(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: Some("mcp__search__query mcp__search__lookup".to_string()),
+            model: None,
+        };
+
+        let summary = SkillSummary::from(&metadata);
+        assert_eq!(summary.name, "search");
+        assert_eq!(summary.description, "Search skill");
+        assert_eq!(
+            summary.allowed_tools,
+            vec!["mcp__search__query", "mcp__search__lookup"]
+        );
     }
 }

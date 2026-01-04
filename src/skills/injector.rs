@@ -145,6 +145,7 @@ mod tests {
         SkillSummary {
             name: name.to_string(),
             description: description.to_string(),
+            allowed_tools: vec![],
         }
     }
 
