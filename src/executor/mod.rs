@@ -41,14 +41,14 @@ mod traits;
 mod types;
 
 // Executor implementations
+pub mod deno;
 pub mod docker;
 
 // Future executor implementations (feature-gated)
 // #[cfg(feature = "executor-wasmedge")]
 // mod wasmedge;
-// #[cfg(feature = "executor-deno")]
-// mod deno;
 
+pub use deno::{DenoConfig, DenoExecutor};
 pub use docker::{DockerConfig, DockerExecutor};
 pub use error::{ExecutionError, ExecutionResult};
 pub use manager::ScriptExecutorManager;
