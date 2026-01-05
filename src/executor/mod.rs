@@ -40,15 +40,17 @@ mod manager;
 mod traits;
 mod types;
 
+// Executor implementations
+pub mod docker;
+
 // Future executor implementations (feature-gated)
 // #[cfg(feature = "executor-wasmedge")]
 // mod wasmedge;
-// #[cfg(feature = "executor-docker")]
-// mod docker;
 // #[cfg(feature = "executor-deno")]
 // mod deno;
 
+pub use docker::{DockerConfig, DockerExecutor};
 pub use error::{ExecutionError, ExecutionResult};
 pub use manager::ScriptExecutorManager;
-pub use traits::Executor;
+pub use traits::{Executor, IsolationLevel};
 pub use types::{ExecuteRequest, FilesystemPolicy, ResourceLimits, ResourceUsage, ScriptOutput};
