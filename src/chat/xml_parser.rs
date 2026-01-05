@@ -237,8 +237,7 @@ fn fix_mismatched_subtask_closing_tag(content: &str) -> String {
     use regex::Regex;
 
     // Regex patterns for detecting tag positions
-    static SUBTASKS_OPEN: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)<\s*subtasks\s*>").unwrap());
+    static SUBTASKS_OPEN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)<\s*subtasks\s*>").unwrap());
     static SUBTASKS_CLOSE: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(?i)<\s*/\s*subtasks\s*>").unwrap());
     static SUBTASK_OPEN: Lazy<Regex> =
@@ -256,9 +255,7 @@ fn fix_mismatched_subtask_closing_tag(content: &str) -> String {
 
     // If we have more container closes than opens, AND
     // more element opens than closes, then some </subtasks> are typos
-    if container_close_count > container_open_count
-        && element_open_count > element_close_count
-    {
+    if container_close_count > container_open_count && element_open_count > element_close_count {
         // Calculate how many </subtasks> should be </subtask>
         let extra_container_closes = container_close_count - container_open_count;
         let missing_element_closes = element_open_count - element_close_count;
@@ -299,11 +296,7 @@ fn fix_mismatched_subtask_closing_tag(content: &str) -> String {
 
                 // Replace from back to front to preserve indices
                 for (start, end) in to_replace.into_iter().rev() {
-                    result = format!(
-                        "{}</subtask>{}",
-                        &result[..start],
-                        &result[end..]
-                    );
+                    result = format!("{}</subtask>{}", &result[..start], &result[end..]);
                 }
 
                 return result;
