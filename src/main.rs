@@ -1,6 +1,7 @@
 mod chat;
 mod config;
 mod error;
+mod executor;
 mod handlers;
 mod info;
 mod mcp;
