@@ -1417,14 +1417,23 @@ fn build_context_for_react(
   <action>{{"name": "tool_name", "arguments": {{"param": "value"}}}}</action>
 - When done, use <final_answer></final_answer> tags for your final response
 
-## Tool Call Example
-When you need to call a tool, output like this:
+## Tool Call Examples
+
+### Example 1: MCP Tool Call
 <thought>I need to calculate the sum of two numbers</thought>
 <action>{{"name": "mcp__cardea-calculator__sum", "arguments": {{"a": 23, "b": 32}}}}</action>
 
+### Example 2: Run a Script from the Active Skill
+<thought>I need to run a script from the skill to process data</thought>
+<action>{{"name": "internal__skill_run_script", "arguments": {{"script_name": "process.py", "args": ["--input", "data.csv", "--output", "result.json"]}}}}</action>
+
+**Important**: When using `internal__skill_run_script`:
+- `script_name`: Just the filename (e.g., "convert.py"), not the full path
+- `args`: Array of command line arguments to pass to the script
+
 After receiving the observation, provide your final answer:
-<thought>I received the calculation result</thought>
-<final_answer>The sum of 23 and 32 is 55.</final_answer>
+<thought>I received the result</thought>
+<final_answer>The task is complete.</final_answer>
 
 Remember: Focus only on this specific subtask. Follow the skill instructions carefully."#,
                 subtask.description, skill_section, tools_desc

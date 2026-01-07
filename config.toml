@@ -7,7 +7,8 @@
 [server]
 host = "127.0.0.1"   # The host to listen on.
 port = 3389          # The port to listen on.
-chat_mode = "normal" # Chat mode: "normal", "react", or "plan" (default: "normal")
+chat_mode = "normal"   # Chat mode: "normal", "react", or "plan" (default: "normal")
+                     # NOTE: Skills system is ONLY available in "plan" mode
 
 # React mode enhancement configuration (only effective when chat_mode = "react")
 # max_react_iterations = 10        # Maximum iterations for React loop (default: 10)
@@ -62,6 +63,86 @@ summarization_strategy = "Incremental"
 # - Example: 20 messages trigger → keep 6 recent → summarize 14 old messages
 max_stored_messages = 20                         # Trigger summarization when message count reaches this limit
 summarize_threshold = 12                         # Base number for calculating minimum kept messages (kept = threshold/2)
+
+
+# ============================================================================
+# SECTION 1.5: SKILLS CONFIGURATION (Only effective in Plan Mode)
+# ============================================================================
+# Skills are modular capabilities that extend the AI's abilities.
+# Each skill contains a SKILL.md file with metadata and optional scripts.
+# NOTE: Skills system is ONLY available when chat_mode = "plan"
+
+[skill]
+enabled = true                              # Enable Skills system
+directories = [                             # Directories to scan for Skills
+    # "/path/to/custom/skills",   # Your custom skills directory
+    ".skills",                              # Project-local skills
+    "~/.llama-nexus/skills"                 # User-level skills
+]
+
+# Script execution configuration for Skills
+[skill.execution]
+enabled = true                              # Enable script execution
+
+# Default resource limits for script execution
+[skill.execution.limits]
+max_memory_bytes = 268435456    # Maximum memory: 256MB (default)
+timeout = "30s"                 # Maximum execution time (default: 30s)
+max_output_bytes = 1048576      # Maximum output size: 1MB (default)
+network_access = false          # Whether to allow network access (default: false)
+
+# Deno executor configuration (for JavaScript/TypeScript)
+# Supported extensions: js, ts, mjs, mts, jsx, tsx
+[skill.execution.deno]
+deno_path = "deno"              # Path to Deno binary (default: "deno" from PATH)
+allow_net = false               # Allow network access by default
+allow_env = false               # Allow environment variable access by default
+allow_hrtime = false            # Allow high-resolution time measurement
+unstable = false                # Run in unstable mode
+cache = true                    # Cache compiled scripts
+# cache_dir = "/tmp/deno-cache" # Custom cache directory (optional)
+# v8_flags = []                 # Additional V8 flags (optional)
+
+# Docker executor configuration (for Python, Shell, Ruby, etc.)
+# Supported extensions: py, sh, bash, rb
+# NOTE: Requires Docker daemon running. Enable this section to use Docker sandbox.
+[skill.execution.docker]
+# socket = "/var/run/docker.sock"  # Docker socket path (auto-detect if not set)
+default_image = "alpine:latest"    # Default image for unknown script types
+auto_remove = true                 # Auto-remove containers after execution
+read_only = true                   # Use read-only root filesystem for security
+network_mode = "none"              # Network mode: "none" for isolation (recommended)
+container_prefix = "llama-nexus-exec"  # Container name prefix
+auto_pull = true                   # Auto-pull images if not present locally
+
+# File access strategy for data files referenced in script arguments
+# - "auto": (Default) Try bind mount first, fall back to file copy if not in data_dirs
+# - "bind_only": Only use bind mounts (fail if file not in data_dirs)
+# - "copy_only": Always copy files to temp directory (best for remote/network scenarios)
+file_access_mode = "auto"
+
+# Additional directories to mount in container (read-write for output files)
+# Format: "/host/path" or "/host/path:/container/path"
+# Files in these directories can be accessed directly via absolute paths
+data_dirs = [
+    "/path/to/skills",  # Skills directory (for accessing example files)
+    "/path/to/data:/data",               # Custom data directory
+]
+
+# Temporary directory for file copy mode (optional, defaults to system temp)
+# temp_dir = "/tmp/llama-nexus"
+
+# Whether to copy output files back to original location after execution (default: true)
+# Only applies when using file copy strategy
+copy_output_back = true
+
+# Image mapping for different script types (extension -> Docker image)
+[skill.execution.docker.images]
+py = "python:3.11-slim"            # Python scripts
+sh = "alpine:latest"               # Shell scripts
+bash = "alpine:latest"             # Bash scripts
+rb = "ruby:3.2-slim"               # Ruby scripts
+# js = "node:20-slim"              # Node.js (if needed, usually handled by Deno)
 
 
 # ============================================================================

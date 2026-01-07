@@ -6,7 +6,7 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use super::{
-    deno::{DenoConfig, DenoExecutor},
+    deno::DenoExecutor,
     error::ExecutionError,
     manager::ScriptExecutorManager,
     traits::{Executor, IsolationLevel},
@@ -508,7 +508,7 @@ async fn test_default_resource_limits() {
 /// Test Deno executor health check
 #[tokio::test]
 async fn test_deno_executor_health_check() {
-    let executor = DenoExecutor::with_defaults();
+    let executor = DenoExecutor::new();
 
     match executor {
         Ok(exec) => {
@@ -526,7 +526,7 @@ async fn test_deno_executor_health_check() {
 /// Test Deno executor supported extensions
 #[test]
 fn test_deno_executor_extensions() {
-    if let Ok(executor) = DenoExecutor::with_defaults() {
+    if let Ok(executor) = DenoExecutor::new() {
         let extensions = executor.supported_extensions();
         assert!(extensions.contains(&"js"));
         assert!(extensions.contains(&"ts"));

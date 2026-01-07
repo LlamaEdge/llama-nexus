@@ -46,16 +46,21 @@ impl SkillParser {
             validate_compatibility(compat)?;
         }
 
-        let file_path = skill_dir.join("SKILL.md");
+        // Canonicalize skill_dir to ensure absolute path (required for Docker bind mounts)
+        let canonical_skill_dir = skill_dir
+            .canonicalize()
+            .unwrap_or_else(|_| skill_dir.to_path_buf());
+
+        let file_path = canonical_skill_dir.join("SKILL.md");
 
         // Load scripts from scripts/ directory
-        let scripts = SkillLoader::list_scripts(skill_dir).await;
+        let scripts = SkillLoader::list_scripts(&canonical_skill_dir).await;
 
         Ok(LoadedSkill {
             metadata,
             content: markdown,
             raw_content: content.to_string(),
-            skill_dir: skill_dir.to_path_buf(),
+            skill_dir: canonical_skill_dir,
             file_path: file_path.to_string_lossy().to_string(),
             enabled: true,
             loaded_at: Utc::now(),
@@ -95,8 +100,6 @@ impl SkillParser {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use tempfile::TempDir;
 
     use super::*;

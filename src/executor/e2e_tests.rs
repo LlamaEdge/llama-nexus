@@ -574,7 +574,7 @@ async fn test_e2e_health_check_integration() {
 #[tokio::test]
 async fn test_e2e_deno_real_execution() {
     // Skip if Deno is not available
-    let executor = match DenoExecutor::with_defaults() {
+    let executor = match DenoExecutor::new() {
         Ok(e) => e,
         Err(_) => {
             eprintln!("Skipping Deno real execution test: Deno not available");

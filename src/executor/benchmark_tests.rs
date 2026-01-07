@@ -459,7 +459,7 @@ async fn bench_deno_startup() {
 
     for _ in 0..iterations {
         let start = Instant::now();
-        let result = DenoExecutor::with_defaults();
+        let result = DenoExecutor::new();
         let duration = start.elapsed();
 
         if result.is_ok() {
