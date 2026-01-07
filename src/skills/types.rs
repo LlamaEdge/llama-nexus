@@ -7,6 +7,8 @@ use std::{collections::HashMap, path::PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::executor::{EXECUTOR_MANAGER, ExecutionError, ResourceLimits, ScriptOutput};
+
 /// Skill metadata from YAML front matter
 ///
 /// Fields follow the Agent Skills Standard specification:
@@ -89,7 +91,6 @@ pub struct LoadedSkill {
     pub raw_content: String,
 
     /// Directory containing the skill
-    #[allow(dead_code)]
     pub skill_dir: PathBuf,
 
     /// Path to SKILL.md file
@@ -102,6 +103,136 @@ pub struct LoadedSkill {
     /// When this skill was loaded
     #[allow(dead_code)]
     pub loaded_at: DateTime<Utc>,
+
+    /// Available scripts from the scripts/ directory
+    pub scripts: Vec<ScriptInfo>,
+}
+
+impl LoadedSkill {
+    /// Get a script by name
+    ///
+    /// Returns the script info if found, or None if the script doesn't exist.
+    pub fn get_script(&self, script_name: &str) -> Option<&ScriptInfo> {
+        self.scripts.iter().find(|s| s.name == script_name)
+    }
+
+    /// Check if a script exists in this skill
+    pub fn has_script(&self, script_name: &str) -> bool {
+        self.scripts.iter().any(|s| s.name == script_name)
+    }
+
+    /// Get the path to the assets directory for this skill
+    pub fn assets_dir(&self) -> PathBuf {
+        self.skill_dir.join("assets")
+    }
+
+    /// Get the path to the references directory for this skill
+    pub fn references_dir(&self) -> PathBuf {
+        self.skill_dir.join("references")
+    }
+
+    /// Get the path to the scripts directory for this skill
+    pub fn scripts_dir(&self) -> PathBuf {
+        self.skill_dir.join("scripts")
+    }
+
+    /// Build environment variables for script execution
+    ///
+    /// Creates the standard set of environment variables passed to scripts:
+    /// - SKILL_DIR: Absolute path to the skill directory
+    /// - SKILL_NAME: Name of the skill
+    /// - SKILL_ASSETS: Path to the assets directory
+    /// - SKILL_REFERENCES: Path to the references directory
+    ///
+    /// Additional variables can be merged with the returned map.
+    pub fn build_script_env(&self) -> HashMap<String, String> {
+        let mut env = HashMap::new();
+
+        // Core environment variables
+        env.insert(
+            "SKILL_DIR".to_string(),
+            self.skill_dir.to_string_lossy().to_string(),
+        );
+        env.insert("SKILL_NAME".to_string(), self.metadata.name.clone());
+
+        // Derived paths
+        env.insert(
+            "SKILL_ASSETS".to_string(),
+            self.assets_dir().to_string_lossy().to_string(),
+        );
+        env.insert(
+            "SKILL_REFERENCES".to_string(),
+            self.references_dir().to_string_lossy().to_string(),
+        );
+
+        env
+    }
+
+    /// Execute a script from this skill
+    ///
+    /// # Arguments
+    /// * `script_name` - Name of the script file (e.g., "process.js")
+    /// * `args` - Command line arguments to pass to the script
+    /// * `env` - Additional environment variables (merged with skill env)
+    /// * `limits` - Optional resource limits (uses global default if None)
+    ///
+    /// # Returns
+    /// * `Ok(ScriptOutput)` - Execution result including stdout, stderr, exit code
+    /// * `Err(ExecutionError)` - If script not found, no executor available, or execution fails
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let output = skill.execute_script(
+    ///     "process.js",
+    ///     vec!["--input".to_string(), "data.json".to_string()],
+    ///     HashMap::new(),
+    ///     None,
+    /// ).await?;
+    /// ```
+    pub async fn execute_script(
+        &self,
+        script_name: &str,
+        args: Vec<String>,
+        additional_env: HashMap<String, String>,
+        limits: Option<ResourceLimits>,
+    ) -> Result<ScriptOutput, ExecutionError> {
+        // Get the script
+        let script = self
+            .get_script(script_name)
+            .ok_or_else(|| ExecutionError::ScriptNotFound(self.scripts_dir().join(script_name)))?;
+
+        // Get the global executor manager
+        let manager = EXECUTOR_MANAGER.get().ok_or_else(|| {
+            ExecutionError::ConfigError("Executor manager not initialized".to_string())
+        })?;
+
+        // Build environment with skill context
+        let mut env = self.build_script_env();
+        env.insert("SCRIPT_NAME".to_string(), script_name.to_string());
+        env.extend(additional_env);
+
+        // Execute the script
+        manager.execute(script, args, env, limits).await
+    }
+
+    /// List all available scripts in this skill
+    pub fn list_scripts(&self) -> Vec<&str> {
+        self.scripts.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    /// Check if the executor manager supports a given script
+    ///
+    /// Returns true if there's an executor registered for the script's file extension.
+    pub fn is_script_supported(&self, script_name: &str) -> bool {
+        if let Some(script) = self.get_script(script_name) {
+            if let Some(manager) = EXECUTOR_MANAGER.get() {
+                if let Some(ext) = script.path.extension().and_then(|e| e.to_str()) {
+                    return manager.supports(ext);
+                }
+            }
+        }
+        false
+    }
 }
 
 /// Skill summary for phase 1 injection
@@ -224,6 +355,7 @@ mod tests {
             file_path: "/skills/weather-query/SKILL.md".to_string(),
             enabled: true,
             loaded_at: Utc::now(),
+            scripts: Vec::new(),
         };
 
         let summary = SkillSummary::from(&skill);
@@ -500,6 +632,7 @@ mod tests {
             file_path: "/skills/calculator/SKILL.md".to_string(),
             enabled: true,
             loaded_at: Utc::now(),
+            scripts: Vec::new(),
         };
 
         let summary = SkillSummary::from(&skill);
@@ -530,5 +663,119 @@ mod tests {
             summary.allowed_tools,
             vec!["mcp__search__query", "mcp__search__lookup"]
         );
+    }
+
+    // Tests for LoadedSkill methods
+
+    fn create_test_skill_with_scripts() -> LoadedSkill {
+        LoadedSkill {
+            metadata: SkillMetadata {
+                name: "test-skill".to_string(),
+                description: "A test skill".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: None,
+                model: None,
+            },
+            content: "# Test".to_string(),
+            raw_content: "".to_string(),
+            skill_dir: PathBuf::from("/skills/test-skill"),
+            file_path: "/skills/test-skill/SKILL.md".to_string(),
+            enabled: true,
+            loaded_at: Utc::now(),
+            scripts: vec![
+                ScriptInfo {
+                    name: "process.js".to_string(),
+                    path: PathBuf::from("/skills/test-skill/scripts/process.js"),
+                    executable: true,
+                },
+                ScriptInfo {
+                    name: "helper.py".to_string(),
+                    path: PathBuf::from("/skills/test-skill/scripts/helper.py"),
+                    executable: true,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_loaded_skill_get_script() {
+        let skill = create_test_skill_with_scripts();
+
+        // Found
+        let script = skill.get_script("process.js");
+        assert!(script.is_some());
+        assert_eq!(script.unwrap().name, "process.js");
+
+        // Not found
+        let script = skill.get_script("nonexistent.js");
+        assert!(script.is_none());
+    }
+
+    #[test]
+    fn test_loaded_skill_has_script() {
+        let skill = create_test_skill_with_scripts();
+
+        assert!(skill.has_script("process.js"));
+        assert!(skill.has_script("helper.py"));
+        assert!(!skill.has_script("nonexistent.js"));
+    }
+
+    #[test]
+    fn test_loaded_skill_directory_paths() {
+        let skill = create_test_skill_with_scripts();
+
+        assert_eq!(
+            skill.assets_dir(),
+            PathBuf::from("/skills/test-skill/assets")
+        );
+        assert_eq!(
+            skill.references_dir(),
+            PathBuf::from("/skills/test-skill/references")
+        );
+        assert_eq!(
+            skill.scripts_dir(),
+            PathBuf::from("/skills/test-skill/scripts")
+        );
+    }
+
+    #[test]
+    fn test_loaded_skill_build_script_env() {
+        let skill = create_test_skill_with_scripts();
+        let env = skill.build_script_env();
+
+        assert_eq!(
+            env.get("SKILL_DIR"),
+            Some(&"/skills/test-skill".to_string())
+        );
+        assert_eq!(env.get("SKILL_NAME"), Some(&"test-skill".to_string()));
+        assert_eq!(
+            env.get("SKILL_ASSETS"),
+            Some(&"/skills/test-skill/assets".to_string())
+        );
+        assert_eq!(
+            env.get("SKILL_REFERENCES"),
+            Some(&"/skills/test-skill/references".to_string())
+        );
+    }
+
+    #[test]
+    fn test_loaded_skill_list_scripts() {
+        let skill = create_test_skill_with_scripts();
+        let scripts = skill.list_scripts();
+
+        assert_eq!(scripts.len(), 2);
+        assert!(scripts.contains(&"process.js"));
+        assert!(scripts.contains(&"helper.py"));
+    }
+
+    #[test]
+    fn test_loaded_skill_list_scripts_empty() {
+        let mut skill = create_test_skill_with_scripts();
+        skill.scripts = Vec::new();
+        let scripts = skill.list_scripts();
+
+        assert!(scripts.is_empty());
     }
 }

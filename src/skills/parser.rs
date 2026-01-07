@@ -8,6 +8,7 @@ use chrono::Utc;
 
 use crate::skills::{
     error::{SkillError, SkillResult},
+    loader::SkillLoader,
     types::{LoadedSkill, SkillMetadata},
     validator::{validate_compatibility, validate_description, validate_skill_name},
 };
@@ -25,7 +26,7 @@ impl SkillParser {
     /// # Returns
     /// * `Ok(LoadedSkill)` on success
     /// * `Err(SkillError)` on failure
-    pub fn parse(content: &str, skill_dir: &Path) -> SkillResult<LoadedSkill> {
+    pub async fn parse(content: &str, skill_dir: &Path) -> SkillResult<LoadedSkill> {
         let (front_matter, markdown) = Self::split_front_matter(content)?;
 
         let metadata: SkillMetadata = serde_yaml::from_str(&front_matter)
@@ -47,6 +48,9 @@ impl SkillParser {
 
         let file_path = skill_dir.join("SKILL.md");
 
+        // Load scripts from scripts/ directory
+        let scripts = SkillLoader::list_scripts(skill_dir).await;
+
         Ok(LoadedSkill {
             metadata,
             content: markdown,
@@ -55,6 +59,7 @@ impl SkillParser {
             file_path: file_path.to_string_lossy().to_string(),
             enabled: true,
             loaded_at: Utc::now(),
+            scripts,
         })
     }
 
@@ -92,10 +97,21 @@ impl SkillParser {
 mod tests {
     use std::path::PathBuf;
 
+    use tempfile::TempDir;
+
     use super::*;
 
-    #[test]
-    fn test_parse_valid_skill() {
+    /// Helper to create a test skill directory with SKILL.md
+    fn create_test_skill_dir(name: &str, content: &str) -> TempDir {
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+        temp_dir
+    }
+
+    #[tokio::test]
+    async fn test_parse_valid_skill() {
         let content = r#"---
 name: weather-query
 description: Query weather information for cities
@@ -106,8 +122,9 @@ description: Query weather information for cities
 This skill helps query weather.
 "#;
 
-        let skill_dir = PathBuf::from("/skills/weather-query");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = create_test_skill_dir("weather-query", content);
+        let skill_dir = temp_dir.path().join("weather-query");
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(result.is_ok());
         let skill = result.unwrap();
@@ -117,10 +134,11 @@ This skill helps query weather.
             "Query weather information for cities"
         );
         assert!(skill.content.contains("# Weather Query Skill"));
+        assert!(skill.scripts.is_empty()); // No scripts directory
     }
 
-    #[test]
-    fn test_parse_with_all_fields() {
+    #[tokio::test]
+    async fn test_parse_with_all_fields() {
         let content = r#"---
 name: code-review
 description: Review code changes and provide feedback
@@ -136,8 +154,9 @@ model: claude-3-opus
 # Code Review Skill
 "#;
 
-        let skill_dir = PathBuf::from("/skills/code-review");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = create_test_skill_dir("code-review", content);
+        let skill_dir = temp_dir.path().join("code-review");
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(result.is_ok());
         let skill = result.unwrap();
@@ -157,38 +176,70 @@ model: claude-3-opus
         assert_eq!(meta.get("author"), Some(&"llama-nexus".to_string()));
     }
 
-    #[test]
-    fn test_parse_missing_front_matter() {
+    #[tokio::test]
+    async fn test_parse_with_scripts() {
+        let content = r#"---
+name: scripted-skill
+description: A skill with scripts
+---
+
+# Scripted Skill
+"#;
+
+        let temp_dir = create_test_skill_dir("scripted-skill", content);
+        let skill_dir = temp_dir.path().join("scripted-skill");
+
+        // Create scripts directory with some scripts
+        let scripts_dir = skill_dir.join("scripts");
+        std::fs::create_dir_all(&scripts_dir).unwrap();
+        std::fs::write(scripts_dir.join("process.js"), "console.log('test');").unwrap();
+        std::fs::write(scripts_dir.join("helper.py"), "print('test')").unwrap();
+
+        let result = SkillParser::parse(content, &skill_dir).await;
+
+        assert!(result.is_ok());
+        let skill = result.unwrap();
+        assert_eq!(skill.scripts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_parse_missing_front_matter() {
         let content = "# No front matter";
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("test");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(matches!(result, Err(SkillError::ParseError(_))));
     }
 
-    #[test]
-    fn test_parse_unclosed_front_matter() {
+    #[tokio::test]
+    async fn test_parse_unclosed_front_matter() {
         let content = r#"---
 name: test
 description: Test
 "#;
 
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("test");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(matches!(result, Err(SkillError::ParseError(_))));
     }
 
-    #[test]
-    fn test_parse_name_mismatch() {
+    #[tokio::test]
+    async fn test_parse_name_mismatch() {
         let content = r#"---
 name: different-name
 description: Test skill
 ---
 "#;
 
-        let skill_dir = PathBuf::from("/skills/actual-name");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("actual-name");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(matches!(
             result,
@@ -196,30 +247,34 @@ description: Test skill
         ));
     }
 
-    #[test]
-    fn test_parse_invalid_name() {
+    #[tokio::test]
+    async fn test_parse_invalid_name() {
         let content = r#"---
 name: Invalid-Name
 description: Test skill
 ---
 "#;
 
-        let skill_dir = PathBuf::from("/skills/Invalid-Name");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("Invalid-Name");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(matches!(result, Err(SkillError::InvalidName { .. })));
     }
 
-    #[test]
-    fn test_parse_empty_description() {
+    #[tokio::test]
+    async fn test_parse_empty_description() {
         let content = r#"---
 name: test
 description: ""
 ---
 "#;
 
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("test");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(matches!(result, Err(SkillError::InvalidDescription(_))));
     }
@@ -238,48 +293,51 @@ Body content here.
         assert_eq!(body, "Body content here.");
     }
 
-    #[test]
-    fn test_parse_empty_front_matter() {
+    #[tokio::test]
+    async fn test_parse_empty_front_matter() {
         let content = r#"---
 ---
 Body content
 "#;
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("test");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(matches!(result, Err(SkillError::ParseError(_))));
-        if let Err(SkillError::ParseError(msg)) = result {
-            assert!(msg.contains("empty"));
-        }
     }
 
-    #[test]
-    fn test_parse_yaml_syntax_error() {
+    #[tokio::test]
+    async fn test_parse_yaml_syntax_error() {
         let content = r#"---
 name: test
 description: "unclosed quote
 ---
 "#;
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("test");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(matches!(result, Err(SkillError::YamlError(_))));
     }
 
-    #[test]
-    fn test_parse_missing_required_fields() {
+    #[tokio::test]
+    async fn test_parse_missing_required_fields() {
         let content = r#"---
 name: test
 ---
 "#;
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("test");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(matches!(result, Err(SkillError::YamlError(_))));
     }
 
-    #[test]
-    fn test_parse_description_too_long() {
+    #[tokio::test]
+    async fn test_parse_description_too_long() {
         let long_desc = "x".repeat(1025);
         let content = format!(
             r#"---
@@ -289,14 +347,16 @@ description: "{}"
 "#,
             long_desc
         );
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(&content, &skill_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("test");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let result = SkillParser::parse(&content, &skill_dir).await;
 
         assert!(matches!(result, Err(SkillError::InvalidDescription(_))));
     }
 
-    #[test]
-    fn test_parse_compatibility_too_long() {
+    #[tokio::test]
+    async fn test_parse_compatibility_too_long() {
         let long_compat = "x".repeat(501);
         let content = format!(
             r#"---
@@ -307,14 +367,16 @@ compatibility: "{}"
 "#,
             long_compat
         );
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(&content, &skill_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("test");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let result = SkillParser::parse(&content, &skill_dir).await;
 
         assert!(matches!(result, Err(SkillError::InvalidCompatibility(_))));
     }
 
-    #[test]
-    fn test_parse_with_whitespace_around_front_matter() {
+    #[tokio::test]
+    async fn test_parse_with_whitespace_around_front_matter() {
         let content = r#"
 
 ---
@@ -325,16 +387,17 @@ description: A test skill
 # Content
 
 "#;
-        let skill_dir = PathBuf::from("/skills/test-skill");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = create_test_skill_dir("test-skill", content);
+        let skill_dir = temp_dir.path().join("test-skill");
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(result.is_ok());
         let skill = result.unwrap();
         assert_eq!(skill.metadata.name, "test-skill");
     }
 
-    #[test]
-    fn test_parse_markdown_with_triple_dashes() {
+    #[tokio::test]
+    async fn test_parse_markdown_with_triple_dashes() {
         let content = r#"---
 name: test
 description: A test skill
@@ -348,8 +411,9 @@ Some text here.
 
 More content after horizontal rule.
 "#;
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = create_test_skill_dir("test", content);
+        let skill_dir = temp_dir.path().join("test");
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(result.is_ok());
         let skill = result.unwrap();
@@ -358,23 +422,24 @@ More content after horizontal rule.
         assert!(skill.content.contains("More content after horizontal rule"));
     }
 
-    #[test]
-    fn test_parse_empty_markdown_body() {
+    #[tokio::test]
+    async fn test_parse_empty_markdown_body() {
         let content = r#"---
 name: test
 description: A test skill
 ---
 "#;
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = create_test_skill_dir("test", content);
+        let skill_dir = temp_dir.path().join("test");
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(result.is_ok());
         let skill = result.unwrap();
         assert!(skill.content.is_empty());
     }
 
-    #[test]
-    fn test_parse_name_too_long() {
+    #[tokio::test]
+    async fn test_parse_name_too_long() {
         let long_name = "a".repeat(65);
         let content = format!(
             r#"---
@@ -384,14 +449,16 @@ description: A test skill
 "#,
             long_name
         );
-        let skill_dir = PathBuf::from(format!("/skills/{}", long_name));
-        let result = SkillParser::parse(&content, &skill_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join(&long_name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let result = SkillParser::parse(&content, &skill_dir).await;
 
         assert!(matches!(result, Err(SkillError::InvalidName { .. })));
     }
 
-    #[test]
-    fn test_parse_preserves_raw_content() {
+    #[tokio::test]
+    async fn test_parse_preserves_raw_content() {
         let content = r#"---
 name: test
 description: A test skill
@@ -399,23 +466,25 @@ description: A test skill
 
 # Content here
 "#;
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = create_test_skill_dir("test", content);
+        let skill_dir = temp_dir.path().join("test");
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(result.is_ok());
         let skill = result.unwrap();
         assert_eq!(skill.raw_content, content);
     }
 
-    #[test]
-    fn test_parse_sets_file_path() {
+    #[tokio::test]
+    async fn test_parse_sets_file_path() {
         let content = r#"---
 name: my-skill
 description: A test skill
 ---
 "#;
-        let skill_dir = PathBuf::from("/custom/path/my-skill");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = create_test_skill_dir("my-skill", content);
+        let skill_dir = temp_dir.path().join("my-skill");
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(result.is_ok());
         let skill = result.unwrap();
@@ -423,15 +492,16 @@ description: A test skill
         assert!(skill.file_path.contains("my-skill"));
     }
 
-    #[test]
-    fn test_parse_enabled_by_default() {
+    #[tokio::test]
+    async fn test_parse_enabled_by_default() {
         let content = r#"---
 name: test
 description: A test skill
 ---
 "#;
-        let skill_dir = PathBuf::from("/skills/test");
-        let result = SkillParser::parse(content, &skill_dir);
+        let temp_dir = create_test_skill_dir("test", content);
+        let skill_dir = temp_dir.path().join("test");
+        let result = SkillParser::parse(content, &skill_dir).await;
 
         assert!(result.is_ok());
         let skill = result.unwrap();

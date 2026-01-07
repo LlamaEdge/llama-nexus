@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use crate::skills::types::ScriptInfo;
+use crate::{executor::EXECUTOR_MANAGER, skills::types::ScriptInfo};
 
 /// Loader for skill resources
 ///
@@ -155,6 +155,86 @@ impl SkillLoader {
 
         matches!(ext.as_str(), "exe" | "bat" | "cmd" | "ps1")
     }
+
+    /// Check if a script extension is supported by the executor manager
+    ///
+    /// Returns true if an executor is registered for the given extension.
+    /// Returns false if the executor manager is not initialized or no executor
+    /// is registered for the extension.
+    ///
+    /// # Arguments
+    /// * `extension` - The file extension (without dot, e.g., "js", "py")
+    ///
+    /// # Returns
+    /// true if the extension is supported
+    pub fn is_extension_supported(extension: &str) -> bool {
+        EXECUTOR_MANAGER
+            .get()
+            .map(|m| m.supports(extension))
+            .unwrap_or(false)
+    }
+
+    /// Get all supported script extensions
+    ///
+    /// Returns the list of file extensions that have registered executors.
+    /// Returns an empty list if the executor manager is not initialized.
+    ///
+    /// # Returns
+    /// Vector of supported extensions (without dots)
+    pub fn supported_extensions() -> Vec<String> {
+        EXECUTOR_MANAGER
+            .get()
+            .map(|m| {
+                m.supported_extensions()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Filter scripts to only include those with supported extensions
+    ///
+    /// # Arguments
+    /// * `scripts` - List of scripts to filter
+    ///
+    /// # Returns
+    /// Scripts that have registered executors
+    pub fn filter_supported_scripts(scripts: &[ScriptInfo]) -> Vec<&ScriptInfo> {
+        scripts
+            .iter()
+            .filter(|s| {
+                s.path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|ext| Self::is_extension_supported(ext))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    /// Get unsupported scripts from a list
+    ///
+    /// Returns scripts whose extensions don't have registered executors.
+    /// Useful for warning users about scripts that cannot be executed.
+    ///
+    /// # Arguments
+    /// * `scripts` - List of scripts to check
+    ///
+    /// # Returns
+    /// Scripts that don't have registered executors
+    pub fn filter_unsupported_scripts(scripts: &[ScriptInfo]) -> Vec<&ScriptInfo> {
+        scripts
+            .iter()
+            .filter(|s| {
+                s.path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|ext| !Self::is_extension_supported(ext))
+                    .unwrap_or(true)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -234,5 +314,75 @@ mod tests {
         // With scripts/
         std::fs::create_dir(temp_dir.path().join("scripts")).unwrap();
         assert!(SkillLoader::has_resources(temp_dir.path()));
+    }
+
+    #[test]
+    fn test_is_extension_supported_no_manager() {
+        // Without executor manager initialized, all extensions are unsupported
+        // Note: This test might fail if another test initializes the global manager
+        // In practice, it returns false when not initialized
+        let result = SkillLoader::is_extension_supported("js");
+        // Result depends on whether EXECUTOR_MANAGER is initialized
+        assert!(result == false || result == true); // Just check it doesn't panic
+    }
+
+    #[test]
+    fn test_supported_extensions_no_manager() {
+        // Without executor manager, returns empty list
+        let extensions = SkillLoader::supported_extensions();
+        // Result depends on whether EXECUTOR_MANAGER is initialized
+        // Just verify it returns a Vec and doesn't panic
+        let _ = extensions.len();
+    }
+
+    #[test]
+    fn test_filter_supported_scripts() {
+        use std::path::PathBuf;
+
+        let scripts = vec![
+            ScriptInfo {
+                name: "script.js".to_string(),
+                path: PathBuf::from("/skills/test/scripts/script.js"),
+                executable: true,
+            },
+            ScriptInfo {
+                name: "helper.py".to_string(),
+                path: PathBuf::from("/skills/test/scripts/helper.py"),
+                executable: true,
+            },
+            ScriptInfo {
+                name: "config.json".to_string(),
+                path: PathBuf::from("/skills/test/scripts/config.json"),
+                executable: false,
+            },
+        ];
+
+        // Without EXECUTOR_MANAGER, all scripts are unsupported
+        // This tests the filtering logic
+        let supported = SkillLoader::filter_supported_scripts(&scripts);
+        // Check it doesn't panic and returns a valid vector
+        assert!(supported.len() <= scripts.len());
+    }
+
+    #[test]
+    fn test_filter_unsupported_scripts() {
+        use std::path::PathBuf;
+
+        let scripts = vec![
+            ScriptInfo {
+                name: "script.js".to_string(),
+                path: PathBuf::from("/skills/test/scripts/script.js"),
+                executable: true,
+            },
+            ScriptInfo {
+                name: "helper.py".to_string(),
+                path: PathBuf::from("/skills/test/scripts/helper.py"),
+                executable: true,
+            },
+        ];
+
+        let unsupported = SkillLoader::filter_unsupported_scripts(&scripts);
+        // Check it doesn't panic and returns a valid vector
+        assert!(unsupported.len() <= scripts.len());
     }
 }

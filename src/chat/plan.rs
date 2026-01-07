@@ -1658,6 +1658,7 @@ mod tests {
             file_path: "".to_string(),
             enabled: true,
             loaded_at: Utc::now(),
+            scripts: Vec::new(),
         };
 
         let messages = build_context_for_react(
@@ -2242,6 +2243,7 @@ git commit -m "feat: add new feature"
             file_path: String::new(),
             enabled: true,
             loaded_at: Utc::now(),
+            scripts: Vec::new(),
         };
 
         // Phase 2: with active skill
@@ -2318,6 +2320,7 @@ git commit -m "feat: add new feature"
             file_path: String::new(),
             enabled: true,
             loaded_at: Utc::now(),
+            scripts: Vec::new(),
         };
 
         let allowed_patterns = skill.metadata.get_allowed_tools();
@@ -2524,6 +2527,7 @@ git commit -m "feat: add new feature"
             file_path: String::new(),
             enabled: true,
             loaded_at: Utc::now(),
+            scripts: Vec::new(),
         };
 
         // Step 4: Get allowed tools from skill
@@ -2753,6 +2757,7 @@ git commit -m "feat: add new feature"
             file_path: String::new(),
             enabled: true,
             loaded_at: Utc::now(),
+            scripts: Vec::new(),
         };
 
         // Phase 2: active skill present
@@ -2800,6 +2805,7 @@ git commit -m "feat: add new feature"
             file_path: String::new(),
             enabled: true,
             loaded_at: Utc::now(),
+            scripts: Vec::new(),
         };
 
         // Phase 2 with no restrictions = all tools shown
@@ -2849,6 +2855,7 @@ git commit -m "feat: add new feature"
             file_path: String::new(),
             enabled: true,
             loaded_at: Utc::now(),
+            scripts: Vec::new(),
         };
 
         // Phase 2: only show skill's allowed tools

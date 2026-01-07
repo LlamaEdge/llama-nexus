@@ -28,6 +28,7 @@ use tokio::{
 use crate::{
     dual_debug, dual_error, dual_info,
     error::{ServerError, ServerResult},
+    executor::{DenoConfig, DockerConfig, ResourceLimits},
     mcp::{MCP_SERVICES, McpService},
 };
 
@@ -1081,6 +1082,10 @@ pub struct SkillConfig {
     /// Each directory should contain skill subdirectories with SKILL.md files
     #[serde(default = "default_skills_directories")]
     pub directories: Vec<String>,
+
+    /// Script execution configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionConfig>,
 }
 
 fn default_skills_enabled() -> bool {
@@ -1096,6 +1101,77 @@ impl Default for SkillConfig {
         Self {
             enabled: default_skills_enabled(),
             directories: default_skills_directories(),
+            execution: None,
+        }
+    }
+}
+
+/// Script execution configuration
+///
+/// Configures script executors for Skills that include executable scripts.
+/// Multiple executor backends are supported (Docker, Deno, etc.).
+///
+/// # Example Configuration
+///
+/// ```toml
+/// [skill.execution]
+/// enabled = true
+/// preferred_executor = "deno"
+///
+/// [skill.execution.limits]
+/// max_memory_bytes = 268435456  # 256MB
+/// timeout = "30s"
+/// network_access = false
+///
+/// [skill.execution.deno]
+/// deno_path = "/usr/local/bin/deno"
+/// allow_net = false
+/// allow_env = true
+///
+/// [skill.execution.docker]
+/// default_image = "python:3.11-slim"
+/// auto_remove = true
+/// ```
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ExecutionConfig {
+    /// Enable or disable script execution (default: true)
+    #[serde(default = "default_execution_enabled")]
+    pub enabled: bool,
+
+    /// Preferred executor backend: "deno", "docker", or "auto"
+    /// When set to "auto", selects executor based on file extension
+    #[serde(default = "default_preferred_executor")]
+    pub preferred_executor: String,
+
+    /// Default resource limits for all executors
+    #[serde(default)]
+    pub limits: ResourceLimits,
+
+    /// Deno executor configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deno: Option<DenoConfig>,
+
+    /// Docker executor configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docker: Option<DockerConfig>,
+}
+
+fn default_execution_enabled() -> bool {
+    true
+}
+
+fn default_preferred_executor() -> String {
+    "auto".to_string()
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_execution_enabled(),
+            preferred_executor: default_preferred_executor(),
+            limits: ResourceLimits::default(),
+            deno: None,
+            docker: None,
         }
     }
 }

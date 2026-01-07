@@ -41,6 +41,7 @@ use uuid::Uuid;
 
 use crate::{
     config::ChatMode,
+    executor::ScriptExecutorManager,
     info::ServerInfo,
     server::{Server, ServerGroup, ServerId, ServerKind},
     skills::SkillRegistry,
@@ -203,6 +204,27 @@ async fn main() -> ServerResult<()> {
                     "No skills directories found. Searched: {:?}",
                     skill_config.directories
                 );
+            }
+            // Initialize script executor manager if execution is configured
+            if let Some(execution_config) = skill_config.execution.clone() {
+                if execution_config.enabled {
+                    match ScriptExecutorManager::init_global(execution_config).await {
+                        Ok(manager) => {
+                            dual_info!(
+                                "Script executor manager initialized: {} executors registered",
+                                manager.executor_count()
+                            );
+                        }
+                        Err(e) => {
+                            dual_warn!(
+                                "Failed to initialize script executor manager: {}. Scripts will not be executable.",
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    dual_info!("Script execution is disabled in config");
+                }
             }
         } else {
             dual_info!("Skills system is disabled in config");

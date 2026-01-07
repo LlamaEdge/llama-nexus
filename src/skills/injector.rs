@@ -166,6 +166,7 @@ mod tests {
             file_path: String::new(),
             enabled: true,
             loaded_at: Utc::now(),
+            scripts: Vec::new(),
         }
     }
 

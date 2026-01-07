@@ -115,7 +115,7 @@ impl SkillRegistry {
     async fn load_skill(&self, skill_dir: &Path) -> SkillResult<LoadedSkill> {
         let skill_md_path = skill_dir.join("SKILL.md");
         let content = tokio::fs::read_to_string(&skill_md_path).await?;
-        SkillParser::parse(&content, skill_dir)
+        SkillParser::parse(&content, skill_dir).await
     }
 
     /// Get a skill by name

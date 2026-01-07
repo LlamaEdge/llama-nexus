@@ -51,6 +51,13 @@ pub mod docker;
 pub use deno::{DenoConfig, DenoExecutor};
 pub use docker::{DockerConfig, DockerExecutor};
 pub use error::{ExecutionError, ExecutionResult};
-pub use manager::ScriptExecutorManager;
+pub use manager::{EXECUTOR_MANAGER, ScriptExecutorManager};
 pub use traits::{Executor, IsolationLevel};
 pub use types::{ExecuteRequest, FilesystemPolicy, ResourceLimits, ResourceUsage, ScriptOutput};
+
+#[cfg(test)]
+mod benchmark_tests;
+#[cfg(test)]
+mod e2e_tests;
+#[cfg(test)]
+mod integration_tests;

@@ -5,14 +5,20 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use once_cell::sync::OnceCell;
 use tracing::{debug, info, warn};
 
 use super::{
+    deno::{DenoConfig, DenoExecutor},
+    docker::{DockerConfig, DockerExecutor},
     error::ExecutionError,
     traits::Executor,
     types::{ExecuteRequest, ResourceLimits, ScriptOutput},
 };
-use crate::skills::types::ScriptInfo;
+use crate::{config::ExecutionConfig, skills::types::ScriptInfo};
+
+/// Global executor manager instance
+pub static EXECUTOR_MANAGER: OnceCell<ScriptExecutorManager> = OnceCell::new();
 
 /// Script Executor Manager
 ///
@@ -201,6 +207,69 @@ impl ScriptExecutorManager {
 impl Default for ScriptExecutorManager {
     fn default() -> Self {
         Self::new(ResourceLimits::default())
+    }
+}
+
+impl ScriptExecutorManager {
+    /// Initialize the global executor manager from configuration
+    ///
+    /// Creates and registers all enabled executors based on the provided
+    /// execution configuration.
+    ///
+    /// # Arguments
+    /// * `config` - Execution configuration from config file
+    ///
+    /// # Returns
+    /// Reference to the initialized manager, or error if initialization fails
+    pub async fn init_global(
+        config: ExecutionConfig,
+    ) -> Result<&'static ScriptExecutorManager, ExecutionError> {
+        let mut manager = ScriptExecutorManager::new(config.limits.clone());
+
+        // Register Deno executor if configured or use defaults
+        let deno_config = config.deno.unwrap_or_default();
+        match DenoExecutor::new(deno_config.clone()) {
+            Ok(executor) => {
+                info!(
+                    deno_path = %deno_config.deno_path.display(),
+                    "Deno executor initialized"
+                );
+                manager.register(Arc::new(executor));
+            }
+            Err(e) => {
+                warn!("Failed to initialize Deno executor: {}", e);
+            }
+        }
+
+        // Register Docker executor if configured
+        if let Some(docker_config) = config.docker {
+            match DockerExecutor::with_config(docker_config.clone()).await {
+                Ok(executor) => {
+                    info!(
+                        default_image = %docker_config.default_image,
+                        "Docker executor initialized"
+                    );
+                    manager.register(Arc::new(executor));
+                }
+                Err(e) => {
+                    warn!("Failed to initialize Docker executor: {}", e);
+                }
+            }
+        }
+
+        // Store in global
+        EXECUTOR_MANAGER.set(manager).map_err(|_| {
+            ExecutionError::ConfigError("Executor manager already initialized".to_string())
+        })?;
+
+        Ok(EXECUTOR_MANAGER
+            .get()
+            .expect("Manager was just initialized"))
+    }
+
+    /// Get the global executor manager instance
+    pub fn global() -> Option<&'static ScriptExecutorManager> {
+        EXECUTOR_MANAGER.get()
     }
 }
 
