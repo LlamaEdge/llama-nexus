@@ -438,6 +438,45 @@ impl LoadedSkill {
         }
         false
     }
+
+    /// Execute a script with context
+    ///
+    /// This is the recommended method for executing scripts from tool handlers,
+    /// as it properly handles context information like conversation and request IDs.
+    ///
+    /// # Arguments
+    /// * `script_name` - Name of the script file (e.g., "process.js")
+    /// * `args` - Command line arguments to pass to the script
+    /// * `context` - Execution context including conversation ID and custom env vars
+    /// * `limits` - Optional resource limits (overrides skill-level limits)
+    ///
+    /// # Returns
+    /// * `Ok(ScriptOutput)` - Execution result including stdout, stderr, exit code
+    /// * `Err(ExecutionError)` - If script not found, permission denied, or execution fails
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let context = ScriptContext::with_ids(Some(conv_id), Some(req_id));
+    /// let output = skill.execute_script_with_context(
+    ///     "process.js",
+    ///     vec!["--input".to_string(), "data.json".to_string()],
+    ///     context,
+    ///     None,
+    /// ).await?;
+    /// ```
+    pub async fn execute_script_with_context(
+        &self,
+        script_name: &str,
+        args: Vec<String>,
+        context: ScriptContext,
+        limits: Option<ResourceLimits>,
+    ) -> Result<ScriptOutput, ExecutionError> {
+        // Build environment from context
+        let env = context.to_env(self, script_name);
+
+        // Delegate to execute_script with empty additional_env since context already has everything
+        self.execute_script(script_name, args, env, limits).await
+    }
 }
 
 /// Skill summary for phase 1 injection
@@ -488,6 +527,108 @@ pub struct ScriptInfo {
 
     /// Whether the script is executable
     pub executable: bool,
+}
+
+/// Context for script execution
+///
+/// Provides execution context including conversation tracking and user-defined
+/// environment variables. Used when executing scripts via the `skill_run_script` tool.
+///
+/// # Environment Variables
+///
+/// When converted to environment variables via `to_env()`, includes:
+///
+/// ## Core variables (automatically set):
+/// - `SKILL_DIR`: Absolute path to the skill directory
+/// - `SKILL_NAME`: Name of the skill
+/// - `SCRIPT_NAME`: Name of the script being executed
+///
+/// ## Derived paths:
+/// - `SKILL_ASSETS`: Path to the assets directory
+/// - `SKILL_REFERENCES`: Path to the references directory
+///
+/// ## Optional context:
+/// - `CONVERSATION_ID`: Conversation session ID (if provided)
+/// - `REQUEST_ID`: Current request ID (if provided)
+///
+/// ## Runtime info:
+/// - `LLAMA_NEXUS_VERSION`: Server version
+///
+/// ## User-defined:
+/// - Any additional variables from `user_env`
+#[derive(Debug, Clone, Default)]
+pub struct ScriptContext {
+    /// Conversation session ID for tracking
+    pub conversation_id: Option<String>,
+
+    /// Current request ID for tracking
+    pub request_id: Option<String>,
+
+    /// User-defined environment variables
+    ///
+    /// These are merged with the automatically generated variables,
+    /// with user-defined values taking precedence.
+    pub user_env: HashMap<String, String>,
+}
+
+impl ScriptContext {
+    /// Creates a new ScriptContext with default values
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a ScriptContext with conversation and request IDs
+    pub fn with_ids(conversation_id: Option<String>, request_id: Option<String>) -> Self {
+        Self {
+            conversation_id,
+            request_id,
+            user_env: HashMap::new(),
+        }
+    }
+
+    /// Adds a user-defined environment variable
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.user_env.insert(key.into(), value.into());
+        self
+    }
+
+    /// Converts the context to environment variables for script execution
+    ///
+    /// This method is called internally by `LoadedSkill::execute_script_with_context()`
+    /// to build the complete environment variable map.
+    ///
+    /// # Arguments
+    /// * `skill` - The skill containing the script
+    /// * `script_name` - Name of the script being executed
+    ///
+    /// # Returns
+    /// A HashMap of environment variables to pass to the script
+    pub fn to_env(&self, skill: &LoadedSkill, script_name: &str) -> HashMap<String, String> {
+        // Start with skill's base environment
+        let mut env = skill.build_script_env();
+
+        // Add script name
+        env.insert("SCRIPT_NAME".to_string(), script_name.to_string());
+
+        // Add optional context variables
+        if let Some(id) = &self.conversation_id {
+            env.insert("CONVERSATION_ID".to_string(), id.clone());
+        }
+        if let Some(id) = &self.request_id {
+            env.insert("REQUEST_ID".to_string(), id.clone());
+        }
+
+        // Add runtime info
+        env.insert(
+            "LLAMA_NEXUS_VERSION".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        );
+
+        // Merge user-defined environment variables (takes precedence)
+        env.extend(self.user_env.clone());
+
+        env
+    }
 }
 
 #[cfg(test)]
@@ -1156,5 +1297,100 @@ allowed-scripts:
         // No wildcards
         assert!(SkillMetadata::glob_match("exact", "exact"));
         assert!(!SkillMetadata::glob_match("exact", "exacta"));
+    }
+
+    // Tests for ScriptContext
+
+    #[test]
+    fn test_script_context_new() {
+        let context = ScriptContext::new();
+
+        assert!(context.conversation_id.is_none());
+        assert!(context.request_id.is_none());
+        assert!(context.user_env.is_empty());
+    }
+
+    #[test]
+    fn test_script_context_with_ids() {
+        let context =
+            ScriptContext::with_ids(Some("conv_123".to_string()), Some("req_456".to_string()));
+
+        assert_eq!(context.conversation_id, Some("conv_123".to_string()));
+        assert_eq!(context.request_id, Some("req_456".to_string()));
+        assert!(context.user_env.is_empty());
+    }
+
+    #[test]
+    fn test_script_context_with_env() {
+        let context = ScriptContext::new()
+            .with_env("CUSTOM_VAR", "value1")
+            .with_env("ANOTHER_VAR", "value2");
+
+        assert_eq!(
+            context.user_env.get("CUSTOM_VAR"),
+            Some(&"value1".to_string())
+        );
+        assert_eq!(
+            context.user_env.get("ANOTHER_VAR"),
+            Some(&"value2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_script_context_to_env() {
+        let skill = create_test_skill_with_scripts();
+        let context =
+            ScriptContext::with_ids(Some("conv_123".to_string()), Some("req_456".to_string()))
+                .with_env("USER_VAR", "custom_value");
+
+        let env = context.to_env(&skill, "process.js");
+
+        // Core variables from skill
+        assert_eq!(
+            env.get("SKILL_DIR"),
+            Some(&"/skills/test-skill".to_string())
+        );
+        assert_eq!(env.get("SKILL_NAME"), Some(&"test-skill".to_string()));
+
+        // Script name
+        assert_eq!(env.get("SCRIPT_NAME"), Some(&"process.js".to_string()));
+
+        // Optional context
+        assert_eq!(env.get("CONVERSATION_ID"), Some(&"conv_123".to_string()));
+        assert_eq!(env.get("REQUEST_ID"), Some(&"req_456".to_string()));
+
+        // Runtime info
+        assert!(env.get("LLAMA_NEXUS_VERSION").is_some());
+
+        // User-defined
+        assert_eq!(env.get("USER_VAR"), Some(&"custom_value".to_string()));
+    }
+
+    #[test]
+    fn test_script_context_user_env_overrides() {
+        let skill = create_test_skill_with_scripts();
+        // User env should override skill env
+        let context = ScriptContext::new().with_env("SKILL_NAME", "overridden-name");
+
+        let env = context.to_env(&skill, "process.js");
+
+        // User env takes precedence
+        assert_eq!(env.get("SKILL_NAME"), Some(&"overridden-name".to_string()));
+    }
+
+    #[test]
+    fn test_script_context_without_optional_ids() {
+        let skill = create_test_skill_with_scripts();
+        let context = ScriptContext::new();
+
+        let env = context.to_env(&skill, "script.js");
+
+        // Optional IDs should not be present
+        assert!(env.get("CONVERSATION_ID").is_none());
+        assert!(env.get("REQUEST_ID").is_none());
+
+        // But core variables should still be present
+        assert!(env.get("SKILL_DIR").is_some());
+        assert!(env.get("SCRIPT_NAME").is_some());
     }
 }

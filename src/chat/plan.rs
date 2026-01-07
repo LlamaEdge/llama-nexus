@@ -51,8 +51,35 @@ use crate::{
         format_mcp_tool_name, parse_mcp_tool_name,
     },
     server::{RoutingPolicy, ServerKind},
-    skills::{LoadedSkill, SkillDetector, SkillInjector, SkillRegistry, SkillSummary},
+    skills::{
+        LoadedSkill, ScriptContext, SkillDetector, SkillInjector, SkillRegistry, SkillSummary,
+    },
 };
+
+// ============================================================================
+// Internal Tool Constants
+// ============================================================================
+
+/// Internal tool prefix for non-MCP tools
+const INTERNAL_TOOL_PREFIX: &str = "internal";
+
+/// Skill script execution tool name
+const SKILL_RUN_SCRIPT_TOOL: &str = "skill_run_script";
+
+/// Full name for the skill_run_script internal tool
+fn internal_tool_name(tool_name: &str) -> String {
+    format!("{INTERNAL_TOOL_PREFIX}__{tool_name}")
+}
+
+/// Check if a tool name is an internal tool
+fn is_internal_tool(tool_name: &str) -> bool {
+    tool_name.starts_with(&format!("{INTERNAL_TOOL_PREFIX}__"))
+}
+
+/// Parse an internal tool name, returning the tool name if valid
+fn parse_internal_tool_name(full_name: &str) -> Option<&str> {
+    full_name.strip_prefix(&format!("{INTERNAL_TOOL_PREFIX}__"))
+}
 
 // ============================================================================
 // Plan Mode Handler
@@ -350,6 +377,7 @@ pub(crate) async fn chat(
                 &subtask_results,
                 &available_tools,
                 Some(&skills_summaries),
+                conv_id.as_deref(),
                 attempt_timeout,
                 subtask_react_max_iterations,
                 max_tools_per_iteration,
@@ -506,10 +534,14 @@ async fn get_chat_server(
     }
 }
 
-/// Gets available tools from MCP services.
+/// Gets available tools from MCP services and internal tools.
+///
+/// Returns both MCP tools (from registered MCP servers) and internal tools
+/// (like `skill_run_script`).
 async fn get_available_tools() -> Vec<ToolDescription> {
     let mut tools = Vec::new();
 
+    // Add MCP tools
     if let Some(services) = MCP_SERVICES.get() {
         let service_map = services.read().await;
         for (server_name, service) in service_map.iter() {
@@ -522,6 +554,14 @@ async fn get_available_tools() -> Vec<ToolDescription> {
                 });
             }
         }
+    }
+
+    // Add internal skill_run_script tool (only available when skills are loaded)
+    if SkillRegistry::global().is_ok() {
+        tools.push(ToolDescription {
+            name: internal_tool_name(SKILL_RUN_SCRIPT_TOOL),
+            description: "Execute a script from an active skill. Use this tool to run scripts in the skill's scripts/ directory.".to_string(),
+        });
     }
 
     tools
@@ -545,6 +585,7 @@ async fn execute_subtask_with_react(
     previous_results: &[(usize, String)],
     available_tools: &[ToolDescription],
     skills_summaries: Option<&[SkillSummary]>,
+    conv_id: Option<&str>,
     timeout: Duration,
     max_iterations: u32,
     max_tools_per_iteration: usize,
@@ -717,6 +758,8 @@ async fn execute_subtask_with_react(
                     let tool_result = execute_tool_call(
                         state,
                         tool_call,
+                        active_skill.as_ref(),
+                        conv_id,
                         tool_call_max_retries,
                         tool_call_retry_delay,
                         request_id,
@@ -772,6 +815,8 @@ async fn execute_subtask_with_react(
                     let tool_result = execute_tool_call(
                         state,
                         &tool_call,
+                        active_skill.as_ref(),
+                        conv_id,
                         tool_call_max_retries,
                         tool_call_retry_delay,
                         request_id,
@@ -905,24 +950,47 @@ async fn execute_subtask_with_react(
 }
 
 /// Executes a single tool call with retry logic.
+///
+/// Supports both MCP tools (format: `mcp__{server}__{tool}`) and internal tools
+/// (format: `internal__{tool}`).
+///
+/// # Internal Tools
+/// - `internal__skill_run_script`: Execute a script from the active skill
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_call(
     _state: &Arc<AppState>,
     tool_call: &endpoints::chat::ToolCall,
+    active_skill: Option<&LoadedSkill>,
+    conv_id: Option<&str>,
     max_retries: u32,
     retry_delay: Duration,
     request_id: &str,
     iter_trace: &mut IterationTrace,
 ) -> ServerResult<String> {
     let tool_call_start = Instant::now();
+    let tool_args: serde_json::Value =
+        serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::json!({}));
 
-    // Parse tool name and server name
+    // Check if this is an internal tool
+    if is_internal_tool(&tool_call.function.name) {
+        return execute_internal_tool(
+            &tool_call.function.name,
+            tool_args,
+            active_skill,
+            conv_id,
+            request_id,
+            iter_trace,
+            tool_call_start,
+        )
+        .await;
+    }
+
+    // Parse MCP tool name and server name
     let (server_name, tool_name) =
         parse_mcp_tool_name(&tool_call.function.name).ok_or_else(|| {
             let err_msg = format!("Invalid tool name format: {}", tool_call.function.name);
             ServerError::Operation(err_msg)
         })?;
-    let tool_args: serde_json::Value =
-        serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::json!({}));
 
     // Initialize tool trace
     let mut tool_trace = ToolCallTrace::new(
@@ -1031,6 +1099,168 @@ async fn execute_tool_call(
         attempts: max_retries + 1,
         message: err_msg,
     })
+}
+
+/// Executes an internal tool (non-MCP tool).
+///
+/// # Supported Internal Tools
+///
+/// - `internal__skill_run_script`: Execute a script from the active skill
+///   - Arguments: `script_name` (required), `args` (optional array)
+///   - Requires an active skill to be loaded
+async fn execute_internal_tool(
+    full_tool_name: &str,
+    tool_args: serde_json::Value,
+    active_skill: Option<&LoadedSkill>,
+    conv_id: Option<&str>,
+    request_id: &str,
+    iter_trace: &mut IterationTrace,
+    start_time: Instant,
+) -> ServerResult<String> {
+    let tool_name = parse_internal_tool_name(full_tool_name).ok_or_else(|| {
+        ServerError::Operation(format!("Invalid internal tool name: {}", full_tool_name))
+    })?;
+
+    // Initialize tool trace for internal tool
+    let mut tool_trace = ToolCallTrace::new(
+        tool_name.to_string(),
+        INTERNAL_TOOL_PREFIX.to_string(),
+        tool_args.clone(),
+    );
+
+    match tool_name {
+        SKILL_RUN_SCRIPT_TOOL => {
+            execute_skill_run_script(
+                tool_args,
+                active_skill,
+                conv_id,
+                request_id,
+                &mut tool_trace,
+                iter_trace,
+                start_time,
+            )
+            .await
+        }
+        _ => {
+            let err_msg = format!("Unknown internal tool: {}", tool_name);
+            tool_trace.set_error(err_msg.clone(), start_time.elapsed());
+            iter_trace.add_tool_call(tool_trace);
+            Err(ServerError::Operation(err_msg))
+        }
+    }
+}
+
+/// Executes the skill_run_script internal tool.
+///
+/// # Arguments Schema
+/// ```json
+/// {
+///   "script_name": "process.js",  // Required: name of the script file
+///   "args": ["--input", "data.json"]  // Optional: command line arguments
+/// }
+/// ```
+///
+/// # Returns
+/// The script output as a formatted string including stdout, stderr, and exit code.
+async fn execute_skill_run_script(
+    tool_args: serde_json::Value,
+    active_skill: Option<&LoadedSkill>,
+    conv_id: Option<&str>,
+    request_id: &str,
+    tool_trace: &mut ToolCallTrace,
+    iter_trace: &mut IterationTrace,
+    start_time: Instant,
+) -> ServerResult<String> {
+    // Require an active skill
+    let skill = active_skill.ok_or_else(|| {
+        let err_msg =
+            "skill_run_script requires an active skill. Use <use_skill> to activate a skill first.";
+        tool_trace.set_error(err_msg.to_string(), start_time.elapsed());
+        iter_trace.add_tool_call(tool_trace.clone());
+        ServerError::Operation(err_msg.to_string())
+    })?;
+
+    // Parse arguments
+    let script_name = tool_args
+        .get("script_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            let err_msg = "skill_run_script requires 'script_name' argument";
+            tool_trace.set_error(err_msg.to_string(), start_time.elapsed());
+            iter_trace.add_tool_call(tool_trace.clone());
+            ServerError::Operation(err_msg.to_string())
+        })?;
+
+    let args: Vec<String> = tool_args
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    dual_info!(
+        "🔧 Executing skill script: {} (skill: {}, args: {:?}) - request_id: {}",
+        script_name,
+        skill.metadata.name,
+        args,
+        request_id
+    );
+
+    // Build execution context
+    let context =
+        ScriptContext::with_ids(conv_id.map(|s| s.to_string()), Some(request_id.to_string()));
+
+    // Execute the script
+    match skill
+        .execute_script_with_context(script_name, args.clone(), context, None)
+        .await
+    {
+        Ok(output) => {
+            // Format result for LLM
+            let result = if output.exit_code == 0 {
+                format!(
+                    "Script '{}' executed successfully.\n\nOutput:\n{}",
+                    script_name,
+                    output.stdout.trim()
+                )
+            } else {
+                format!(
+                    "Script '{}' failed with exit code {}.\n\nStdout:\n{}\n\nStderr:\n{}",
+                    script_name,
+                    output.exit_code,
+                    output.stdout.trim(),
+                    output.stderr.trim()
+                )
+            };
+
+            dual_info!(
+                "✅ Script execution completed: {} (exit_code: {}, duration: {:?}) - request_id: {}",
+                script_name,
+                output.exit_code,
+                output.duration,
+                request_id
+            );
+
+            tool_trace.set_result(result.clone(), start_time.elapsed());
+            iter_trace.add_tool_call(tool_trace.clone());
+            Ok(result)
+        }
+        Err(e) => {
+            let err_msg = format!("Script execution failed: {}", e);
+            dual_warn!(
+                "❌ Script execution failed: {} - {} - request_id: {}",
+                script_name,
+                e,
+                request_id
+            );
+            tool_trace.set_error(err_msg.clone(), start_time.elapsed());
+            iter_trace.add_tool_call(tool_trace.clone());
+            Err(ServerError::Operation(err_msg))
+        }
+    }
 }
 
 /// Determines if an error is retryable for subtask execution.
@@ -1350,6 +1580,7 @@ fn match_wildcard_pattern(pattern: &str, tool_name: &str) -> bool {
 /// Builds the tools JSON for the LLM request.
 ///
 /// If `allowed_patterns` is provided, only tools matching the patterns are included.
+/// Internal tools (like `skill_run_script`) get custom parameter schemas.
 fn build_tools_json(
     available_tools: &[ToolDescription],
     allowed_patterns: Option<&[String]>,
@@ -1359,21 +1590,46 @@ fn build_tools_json(
     let tools: Vec<serde_json::Value> = filtered_tools
         .iter()
         .map(|tool| {
+            // Check if this is the skill_run_script internal tool
+            let is_skill_run_script = tool.name == internal_tool_name(SKILL_RUN_SCRIPT_TOOL);
+
+            let parameters = if is_skill_run_script {
+                // Custom schema for skill_run_script
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "script_name": {
+                            "type": "string",
+                            "description": "Name of the script file to execute (e.g., 'process.js', 'export.py')"
+                        },
+                        "args": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional command line arguments to pass to the script"
+                        }
+                    },
+                    "required": ["script_name"]
+                })
+            } else {
+                // Default schema for MCP tools
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The query or input for the tool"
+                        }
+                    },
+                    "required": ["query"]
+                })
+            };
+
             serde_json::json!({
                 "type": "function",
                 "function": {
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "The query or input for the tool"
-                            }
-                        },
-                        "required": ["query"]
-                    }
+                    "parameters": parameters
                 }
             })
         })

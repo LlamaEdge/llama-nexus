@@ -31,7 +31,7 @@ pub use parser::SkillParser;
 #[allow(unused_imports)]
 pub use registry::SKILLS_REGISTRY;
 pub use registry::SkillRegistry;
-pub use types::{LoadedSkill, SkillSummary};
+pub use types::{LoadedSkill, ScriptContext, SkillSummary};
 #[allow(unused_imports)]
 pub use types::{ScriptInfo, SkillMetadata};
 #[allow(unused_imports)]
