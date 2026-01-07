@@ -4,11 +4,9 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-/// Result type for executor operations
-pub type ExecutionResult<T> = Result<T, ExecutionError>;
-
 /// Errors that can occur during script execution
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum ExecutionError {
     /// Script file not found
     #[error("script not found: {0}")]
@@ -63,6 +61,7 @@ pub enum ExecutionError {
     Internal(String),
 }
 
+#[allow(dead_code)]
 impl ExecutionError {
     /// Creates a runtime-specific error
     pub fn runtime(runtime: impl Into<String>, message: impl Into<String>) -> Self {

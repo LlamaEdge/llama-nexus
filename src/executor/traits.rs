@@ -49,6 +49,7 @@ pub trait Executor: Send + Sync {
     ///
     /// Default implementation checks the file extension.
     /// Override for more complex matching logic.
+    #[allow(dead_code)]
     fn supports(&self, script: &ScriptInfo) -> bool {
         let ext = script
             .path
@@ -84,13 +85,18 @@ pub trait Executor: Send + Sync {
     /// Returns the isolation level of this executor
     ///
     /// Used for informational purposes and executor selection.
+    #[allow(dead_code)]
     fn isolation_level(&self) -> IsolationLevel {
         IsolationLevel::Runtime
     }
 }
 
 /// Isolation level of an executor
+///
+/// Note: Some variants are used in tests and executor implementations
+/// but clippy reports them as dead code because test usage is ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[allow(dead_code)]
 pub enum IsolationLevel {
     /// No isolation (direct process execution)
     None,

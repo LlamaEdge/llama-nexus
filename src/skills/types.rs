@@ -165,6 +165,7 @@ impl SkillMetadata {
     /// Get the list of allowed script patterns
     ///
     /// Returns None if all scripts are allowed, Some with patterns otherwise.
+    #[allow(dead_code)]
     pub fn get_allowed_scripts(&self) -> Option<&[String]> {
         self.allowed_scripts
             .as_ref()
@@ -282,6 +283,7 @@ impl LoadedSkill {
     }
 
     /// Check if a script exists in this skill
+    #[allow(dead_code)]
     pub fn has_script(&self, script_name: &str) -> bool {
         self.scripts.iter().any(|s| s.name == script_name)
     }
@@ -411,7 +413,7 @@ impl LoadedSkill {
                 }
 
                 // Get global defaults from executor manager
-                EXECUTOR_MANAGER.get().map(|manager| {
+                EXECUTOR_MANAGER.get().map(|_manager| {
                     // Access the default limits from manager
                     // For now, use ResourceLimits::default() as the base
                     // In production, this should come from manager's configured defaults
@@ -421,6 +423,7 @@ impl LoadedSkill {
     }
 
     /// List all available scripts in this skill
+    #[allow(dead_code)]
     pub fn list_scripts(&self) -> Vec<&str> {
         self.scripts.iter().map(|s| s.name.as_str()).collect()
     }
@@ -428,14 +431,15 @@ impl LoadedSkill {
     /// Check if the executor manager supports a given script
     ///
     /// Returns true if there's an executor registered for the script's file extension.
+    #[allow(dead_code)]
     pub fn is_script_supported(&self, script_name: &str) -> bool {
-        if let Some(script) = self.get_script(script_name) {
-            if let Some(manager) = EXECUTOR_MANAGER.get() {
-                if let Some(ext) = script.path.extension().and_then(|e| e.to_str()) {
-                    return manager.supports(ext);
-                }
-            }
+        if let Some(script) = self.get_script(script_name)
+            && let Some(manager) = EXECUTOR_MANAGER.get()
+            && let Some(ext) = script.path.extension().and_then(|e| e.to_str())
+        {
+            return manager.supports(ext);
         }
+
         false
     }
 
@@ -571,6 +575,7 @@ pub struct ScriptContext {
     pub user_env: HashMap<String, String>,
 }
 
+#[allow(dead_code)]
 impl ScriptContext {
     /// Creates a new ScriptContext with default values
     pub fn new() -> Self {

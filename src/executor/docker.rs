@@ -119,6 +119,7 @@ pub struct DockerExecutor {
 
 impl DockerExecutor {
     /// Creates a new Docker executor with default configuration
+    #[allow(dead_code)]
     pub async fn new() -> Result<Self, ExecutionError> {
         Self::with_config(DockerConfig::default()).await
     }

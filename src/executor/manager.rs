@@ -9,8 +9,8 @@ use once_cell::sync::OnceCell;
 use tracing::{debug, info, warn};
 
 use super::{
-    deno::{DenoConfig, DenoExecutor},
-    docker::{DockerConfig, DockerExecutor},
+    deno::DenoExecutor,
+    docker::DockerExecutor,
     error::ExecutionError,
     traits::Executor,
     types::{ExecuteRequest, ResourceLimits, ScriptOutput},
@@ -88,11 +88,13 @@ impl ScriptExecutorManager {
     }
 
     /// Unregisters all executors for a given extension
+    #[allow(dead_code)]
     pub fn unregister(&mut self, extension: &str) -> Option<Arc<dyn Executor>> {
         self.executors.remove(&extension.to_lowercase())
     }
 
     /// Gets the executor for a given extension
+    #[allow(dead_code)]
     pub fn get_executor(&self, extension: &str) -> Option<&Arc<dyn Executor>> {
         self.executors.get(&extension.to_lowercase())
     }
@@ -187,6 +189,7 @@ impl ScriptExecutorManager {
     /// Performs health checks on all registered executors
     ///
     /// Returns a map of executor name -> health check result.
+    #[allow(dead_code)]
     pub async fn health_check_all(&self) -> HashMap<String, Result<(), ExecutionError>> {
         let mut results = HashMap::new();
 
@@ -228,7 +231,7 @@ impl ScriptExecutorManager {
 
         // Register Deno executor if configured or use defaults
         let deno_config = config.deno.unwrap_or_default();
-        match DenoExecutor::new(deno_config.clone()) {
+        match DenoExecutor::with_config(deno_config.clone()) {
             Ok(executor) => {
                 info!(
                     deno_path = %deno_config.deno_path.display(),
@@ -268,6 +271,7 @@ impl ScriptExecutorManager {
     }
 
     /// Get the global executor manager instance
+    #[allow(dead_code)]
     pub fn global() -> Option<&'static ScriptExecutorManager> {
         EXECUTOR_MANAGER.get()
     }

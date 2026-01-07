@@ -23,6 +23,7 @@ pub struct ExecuteRequest {
     pub stdin: Option<String>,
 }
 
+#[allow(dead_code)]
 impl ExecuteRequest {
     /// Creates a new execution request with default limits
     pub fn new(script: ScriptInfo) -> Self {
@@ -78,12 +79,14 @@ pub struct ScriptOutput {
     pub exit_code: i32,
     /// Execution duration
     pub duration: Duration,
-    /// Resource usage statistics
+    /// Resource usage statistics (reserved for future use)
+    #[allow(dead_code)]
     pub resource_usage: ResourceUsage,
     /// Whether the script was killed due to timeout
     pub timed_out: bool,
 }
 
+#[allow(dead_code)]
 impl ScriptOutput {
     /// Returns true if the script exited successfully (exit code 0)
     pub fn success(&self) -> bool {
@@ -105,9 +108,11 @@ impl ScriptOutput {
 /// Resource usage statistics
 #[derive(Debug, Clone, Default)]
 pub struct ResourceUsage {
-    /// Peak memory usage in bytes
+    /// Peak memory usage in bytes (reserved for future use)
+    #[allow(dead_code)]
     pub peak_memory_bytes: u64,
-    /// CPU time in milliseconds
+    /// CPU time in milliseconds (reserved for future use)
+    #[allow(dead_code)]
     pub cpu_time_ms: u64,
 }
 
@@ -163,6 +168,7 @@ impl Default for ResourceLimits {
     }
 }
 
+#[allow(dead_code)]
 impl ResourceLimits {
     /// Creates limits suitable for untrusted scripts
     pub fn strict() -> Self {
@@ -200,6 +206,7 @@ pub enum FilesystemPolicy {
     ReadWrite(Vec<PathBuf>),
 }
 
+#[allow(dead_code)]
 impl FilesystemPolicy {
     /// Returns true if any filesystem access is allowed
     pub fn allows_access(&self) -> bool {

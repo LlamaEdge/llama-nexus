@@ -48,11 +48,15 @@ pub mod docker;
 // #[cfg(feature = "executor-wasmedge")]
 // mod wasmedge;
 
+#[allow(unused_imports)]
 pub use deno::{DenoConfig, DenoExecutor};
+#[allow(unused_imports)]
 pub use docker::{DockerConfig, DockerExecutor};
-pub use error::{ExecutionError, ExecutionResult};
+pub use error::ExecutionError;
 pub use manager::{EXECUTOR_MANAGER, ScriptExecutorManager};
+#[allow(unused_imports)]
 pub use traits::{Executor, IsolationLevel};
+#[allow(unused_imports)]
 pub use types::{ExecuteRequest, FilesystemPolicy, ResourceLimits, ResourceUsage, ScriptOutput};
 
 #[cfg(test)]

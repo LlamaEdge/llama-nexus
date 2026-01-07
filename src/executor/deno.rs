@@ -84,14 +84,15 @@ pub struct DenoExecutor {
 }
 
 impl DenoExecutor {
-    /// Creates a new Deno executor with the given configuration
-    pub fn new(config: DenoConfig) -> Result<Self, ExecutionError> {
-        Ok(Self { config })
+    /// Creates a new Deno executor with default configuration
+    #[allow(dead_code)]
+    pub fn new() -> Result<Self, ExecutionError> {
+        Self::with_config(DenoConfig::default())
     }
 
-    /// Creates a new Deno executor with default configuration
-    pub fn with_defaults() -> Result<Self, ExecutionError> {
-        Self::new(DenoConfig::default())
+    /// Creates a new Deno executor with custom configuration
+    pub fn with_config(config: DenoConfig) -> Result<Self, ExecutionError> {
+        Ok(Self { config })
     }
 
     /// Builds the permission flags based on request limits
@@ -264,12 +265,12 @@ impl Executor for DenoExecutor {
         })?;
 
         // Handle stdin if provided
-        if let Some(stdin_data) = &request.stdin {
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                if let Err(e) = stdin.write_all(stdin_data.as_bytes()).await {
-                    warn!(error = %e, "failed to write to stdin");
-                }
+        if let Some(stdin_data) = &request.stdin
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            use tokio::io::AsyncWriteExt;
+            if let Err(e) = stdin.write_all(stdin_data.as_bytes()).await {
+                warn!(error = %e, "failed to write to stdin");
             }
         }
 
@@ -443,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_supported_extensions() {
-        let executor = DenoExecutor::with_defaults().unwrap();
+        let executor = DenoExecutor::new().unwrap();
         let extensions = executor.supported_extensions();
 
         assert!(extensions.contains(&"js"));
@@ -456,13 +457,13 @@ mod tests {
 
     #[test]
     fn test_isolation_level() {
-        let executor = DenoExecutor::with_defaults().unwrap();
+        let executor = DenoExecutor::new().unwrap();
         assert_eq!(executor.isolation_level(), IsolationLevel::Runtime);
     }
 
     #[test]
     fn test_build_permission_flags_no_access() {
-        let executor = DenoExecutor::with_defaults().unwrap();
+        let executor = DenoExecutor::new().unwrap();
         let request = ExecuteRequest {
             script: ScriptInfo {
                 name: "test.js".to_string(),
@@ -488,7 +489,7 @@ mod tests {
         let mut config = DenoConfig::default();
         config.allow_net = true;
 
-        let executor = DenoExecutor::new(config).unwrap();
+        let executor = DenoExecutor::with_config(config).unwrap();
         let request = ExecuteRequest {
             script: ScriptInfo {
                 name: "test.js".to_string(),
@@ -508,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_build_permission_flags_readonly() {
-        let executor = DenoExecutor::with_defaults().unwrap();
+        let executor = DenoExecutor::new().unwrap();
         let mut limits = crate::executor::ResourceLimits::default();
         limits.filesystem_access = FilesystemPolicy::ReadOnly(vec![PathBuf::from("/data")]);
 
@@ -532,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_build_permission_flags_readwrite() {
-        let executor = DenoExecutor::with_defaults().unwrap();
+        let executor = DenoExecutor::new().unwrap();
         let mut limits = crate::executor::ResourceLimits::default();
         limits.filesystem_access =
             FilesystemPolicy::ReadWrite(vec![PathBuf::from("/data"), PathBuf::from("/tmp")]);
@@ -557,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_build_command_args() {
-        let executor = DenoExecutor::with_defaults().unwrap();
+        let executor = DenoExecutor::new().unwrap();
         let request = ExecuteRequest {
             script: ScriptInfo {
                 name: "test.ts".to_string(),
@@ -585,7 +586,7 @@ mod tests {
         config.unstable = true;
         config.v8_flags = vec!["--max-old-space-size=512".to_string()];
 
-        let executor = DenoExecutor::new(config).unwrap();
+        let executor = DenoExecutor::with_config(config).unwrap();
         let request = ExecuteRequest {
             script: ScriptInfo {
                 name: "test.ts".to_string(),
@@ -613,7 +614,7 @@ mod tests {
         let mut config = DenoConfig::default();
         config.cache_dir = Some(PathBuf::from("/tmp/deno-cache"));
 
-        let executor = DenoExecutor::new(config).unwrap();
+        let executor = DenoExecutor::with_config(config).unwrap();
 
         let mut request_env = HashMap::new();
         request_env.insert("MY_VAR".to_string(), "value".to_string());
@@ -640,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_build_permission_flags_with_env_vars() {
-        let executor = DenoExecutor::with_defaults().unwrap();
+        let executor = DenoExecutor::new().unwrap();
 
         let mut request_env = HashMap::new();
         request_env.insert("API_KEY".to_string(), "secret".to_string());

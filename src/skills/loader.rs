@@ -207,7 +207,7 @@ impl SkillLoader {
                 s.path
                     .extension()
                     .and_then(|e| e.to_str())
-                    .map(|ext| Self::is_extension_supported(ext))
+                    .map(Self::is_extension_supported)
                     .unwrap_or(false)
             })
             .collect()
