@@ -159,6 +159,8 @@ mod tests {
                 metadata: None,
                 allowed_tools: None,
                 model: None,
+                allowed_scripts: None,
+                execution_limits: None,
             },
             content: content.to_string(),
             raw_content: String::new(),

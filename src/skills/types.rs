@@ -47,6 +47,171 @@ pub struct SkillMetadata {
     /// Not part of the standard, for compatibility
     #[serde(default)]
     pub model: Option<String>,
+
+    /// Allowed scripts for execution (optional, extension field)
+    ///
+    /// Controls which scripts from the scripts/ directory can be executed.
+    /// Supports glob patterns (e.g., "*.js", "process-*.py").
+    ///
+    /// - If None or empty: all scripts in scripts/ are allowed (default permissive)
+    /// - If Some with patterns: only matching scripts are allowed
+    ///
+    /// Examples:
+    /// - `["*.js", "*.ts"]` - allow all JavaScript and TypeScript files
+    /// - `["process.py", "export.py"]` - allow only specific files
+    /// - `["data-*.js"]` - allow files matching pattern
+    #[serde(rename = "allowed-scripts", default)]
+    pub allowed_scripts: Option<Vec<String>>,
+
+    /// Execution resource limits for this skill (optional, extension field)
+    ///
+    /// Overrides global default limits for scripts executed by this skill.
+    /// Any field not specified inherits from the global default.
+    #[serde(rename = "execution-limits", default)]
+    pub execution_limits: Option<SkillResourceLimits>,
+}
+
+/// Skill-specific resource limits configuration
+///
+/// Allows skills to override global execution limits.
+/// Fields are optional - unset fields inherit from global defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SkillResourceLimits {
+    /// Maximum memory in bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_bytes: Option<u64>,
+
+    /// Maximum execution time in seconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+
+    /// Maximum output size in bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_bytes: Option<u64>,
+
+    /// Whether network access is allowed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_access: Option<bool>,
+}
+
+impl SkillResourceLimits {
+    /// Merge skill-specific limits with global defaults
+    ///
+    /// Returns a `ResourceLimits` instance where skill-specific values
+    /// override the corresponding global defaults.
+    ///
+    /// # Arguments
+    /// * `global` - The global default resource limits
+    ///
+    /// # Returns
+    /// A new `ResourceLimits` with merged values
+    pub fn merge_with(&self, global: &ResourceLimits) -> ResourceLimits {
+        use std::time::Duration;
+
+        ResourceLimits {
+            max_memory_bytes: self.max_memory_bytes.unwrap_or(global.max_memory_bytes),
+            timeout: self
+                .timeout_secs
+                .map(Duration::from_secs)
+                .unwrap_or(global.timeout),
+            max_output_bytes: self.max_output_bytes.unwrap_or(global.max_output_bytes),
+            network_access: self.network_access.unwrap_or(global.network_access),
+            filesystem_access: global.filesystem_access.clone(),
+        }
+    }
+
+    /// Check if any limits are specified
+    pub fn is_empty(&self) -> bool {
+        self.max_memory_bytes.is_none()
+            && self.timeout_secs.is_none()
+            && self.max_output_bytes.is_none()
+            && self.network_access.is_none()
+    }
+}
+
+impl SkillMetadata {
+    /// Check if a script is allowed to be executed by this skill
+    ///
+    /// # Arguments
+    /// * `script_name` - The name of the script file (e.g., "process.js")
+    ///
+    /// # Returns
+    /// * `true` if the script is allowed (matches patterns or no restrictions)
+    /// * `false` if the script is explicitly disallowed
+    ///
+    /// # Pattern matching
+    /// - If `allowed_scripts` is None or empty, all scripts are allowed
+    /// - If `allowed_scripts` contains patterns, the script must match at least one
+    /// - Supports glob patterns: `*` (any chars), `?` (single char)
+    pub fn is_script_allowed(&self, script_name: &str) -> bool {
+        match &self.allowed_scripts {
+            None => true,                                  // No restrictions - allow all
+            Some(patterns) if patterns.is_empty() => true, // Empty list - allow all
+            Some(patterns) => {
+                // Check if script matches any pattern
+                patterns.iter().any(|pattern| {
+                    if pattern.contains('*') || pattern.contains('?') {
+                        // Glob pattern matching
+                        Self::glob_match(pattern, script_name)
+                    } else {
+                        // Exact match
+                        pattern == script_name
+                    }
+                })
+            }
+        }
+    }
+
+    /// Get the list of allowed script patterns
+    ///
+    /// Returns None if all scripts are allowed, Some with patterns otherwise.
+    pub fn get_allowed_scripts(&self) -> Option<&[String]> {
+        self.allowed_scripts
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .map(|v| v.as_slice())
+    }
+
+    /// Simple glob pattern matching using dynamic programming
+    ///
+    /// Supports:
+    /// - `*` matches any sequence of characters (including empty)
+    /// - `?` matches exactly one character
+    fn glob_match(pattern: &str, text: &str) -> bool {
+        let p: Vec<char> = pattern.chars().collect();
+        let t: Vec<char> = text.chars().collect();
+        let (m, n) = (p.len(), t.len());
+
+        // dp[i][j] = true if pattern[0..i] matches text[0..j]
+        let mut dp = vec![vec![false; n + 1]; m + 1];
+
+        // Empty pattern matches empty text
+        dp[0][0] = true;
+
+        // Handle patterns starting with *
+        for i in 1..=m {
+            if p[i - 1] == '*' {
+                dp[i][0] = dp[i - 1][0];
+            } else {
+                break;
+            }
+        }
+
+        // Fill the DP table
+        for i in 1..=m {
+            for j in 1..=n {
+                if p[i - 1] == '*' {
+                    // * can match empty (dp[i-1][j]) or match one more char (dp[i][j-1])
+                    dp[i][j] = dp[i - 1][j] || dp[i][j - 1];
+                } else if p[i - 1] == '?' || p[i - 1] == t[j - 1] {
+                    // ? matches any single char, or exact char match
+                    dp[i][j] = dp[i - 1][j - 1];
+                }
+            }
+        }
+
+        dp[m][n]
+    }
 }
 
 impl SkillMetadata {
@@ -174,11 +339,16 @@ impl LoadedSkill {
     /// * `script_name` - Name of the script file (e.g., "process.js")
     /// * `args` - Command line arguments to pass to the script
     /// * `env` - Additional environment variables (merged with skill env)
-    /// * `limits` - Optional resource limits (uses global default if None)
+    /// * `limits` - Optional resource limits (overrides skill-level limits)
     ///
     /// # Returns
     /// * `Ok(ScriptOutput)` - Execution result including stdout, stderr, exit code
-    /// * `Err(ExecutionError)` - If script not found, no executor available, or execution fails
+    /// * `Err(ExecutionError)` - If script not found, permission denied, no executor available, or execution fails
+    ///
+    /// # Resource Limits Priority (highest to lowest)
+    /// 1. `limits` parameter (if provided)
+    /// 2. Skill-level `execution-limits` from SKILL.md
+    /// 3. Global default limits from ExecutorManager
     ///
     /// # Example
     /// ```rust,ignore
@@ -196,6 +366,14 @@ impl LoadedSkill {
         additional_env: HashMap<String, String>,
         limits: Option<ResourceLimits>,
     ) -> Result<ScriptOutput, ExecutionError> {
+        // Check if script is allowed by the skill's allowed_scripts configuration
+        if !self.metadata.is_script_allowed(script_name) {
+            return Err(ExecutionError::PermissionDenied(format!(
+                "script '{}' is not in the allowed-scripts list for skill '{}'",
+                script_name, self.metadata.name
+            )));
+        }
+
         // Get the script
         let script = self
             .get_script(script_name)
@@ -211,8 +389,35 @@ impl LoadedSkill {
         env.insert("SCRIPT_NAME".to_string(), script_name.to_string());
         env.extend(additional_env);
 
+        // Resolve resource limits: request > skill > global
+        let resolved_limits = limits.or_else(|| self.resolve_resource_limits());
+
         // Execute the script
-        manager.execute(script, args, env, limits).await
+        manager.execute(script, args, env, resolved_limits).await
+    }
+
+    /// Resolve resource limits for script execution
+    ///
+    /// Returns skill-level limits merged with global defaults,
+    /// or None to use global defaults directly.
+    fn resolve_resource_limits(&self) -> Option<ResourceLimits> {
+        self.metadata
+            .execution_limits
+            .as_ref()
+            .and_then(|skill_limits| {
+                // Only create merged limits if skill has custom limits
+                if skill_limits.is_empty() {
+                    return None;
+                }
+
+                // Get global defaults from executor manager
+                EXECUTOR_MANAGER.get().map(|manager| {
+                    // Access the default limits from manager
+                    // For now, use ResourceLimits::default() as the base
+                    // In production, this should come from manager's configured defaults
+                    skill_limits.merge_with(&ResourceLimits::default())
+                })
+            })
     }
 
     /// List all available scripts in this skill
@@ -289,17 +494,25 @@ pub struct ScriptInfo {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_get_allowed_tools_space_separated() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
+    /// Helper to create a minimal SkillMetadata for testing
+    fn test_metadata(name: &str, description: &str) -> SkillMetadata {
+        SkillMetadata {
+            name: name.to_string(),
+            description: description.to_string(),
             license: None,
             compatibility: None,
             metadata: None,
-            allowed_tools: Some("tool1 tool2 tool3".to_string()),
+            allowed_tools: None,
             model: None,
-        };
+            allowed_scripts: None,
+            execution_limits: None,
+        }
+    }
+
+    #[test]
+    fn test_get_allowed_tools_space_separated() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_tools = Some("tool1 tool2 tool3".to_string());
 
         let tools = metadata.get_allowed_tools();
         assert_eq!(tools, vec!["tool1", "tool2", "tool3"]);
@@ -307,15 +520,7 @@ mod tests {
 
     #[test]
     fn test_get_allowed_tools_empty() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: None,
-            model: None,
-        };
+        let metadata = test_metadata("test", "test");
 
         let tools = metadata.get_allowed_tools();
         assert!(tools.is_empty());
@@ -323,15 +528,8 @@ mod tests {
 
     #[test]
     fn test_get_allowed_tools_with_extra_whitespace() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: Some("  tool1   tool2  ".to_string()),
-            model: None,
-        };
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_tools = Some("  tool1   tool2  ".to_string());
 
         let tools = metadata.get_allowed_tools();
         assert_eq!(tools, vec!["tool1", "tool2"]);
@@ -340,15 +538,7 @@ mod tests {
     #[test]
     fn test_skill_summary_from_loaded_skill() {
         let skill = LoadedSkill {
-            metadata: SkillMetadata {
-                name: "weather-query".to_string(),
-                description: "Query weather information".to_string(),
-                license: None,
-                compatibility: None,
-                metadata: None,
-                allowed_tools: None,
-                model: None,
-            },
+            metadata: test_metadata("weather-query", "Query weather information"),
             content: "# Weather Query".to_string(),
             raw_content: "---\nname: weather-query\n---\n# Weather Query".to_string(),
             skill_dir: PathBuf::from("/skills/weather-query"),
@@ -365,15 +555,8 @@ mod tests {
 
     #[test]
     fn test_skill_summary_from_metadata() {
-        let metadata = SkillMetadata {
-            name: "code-review".to_string(),
-            description: "Review code for best practices".to_string(),
-            license: Some("MIT".to_string()),
-            compatibility: None,
-            metadata: None,
-            allowed_tools: None,
-            model: None,
-        };
+        let mut metadata = test_metadata("code-review", "Review code for best practices");
+        metadata.license = Some("MIT".to_string());
 
         let summary = SkillSummary::from(&metadata);
         assert_eq!(summary.name, "code-review");
@@ -382,18 +565,15 @@ mod tests {
 
     #[test]
     fn test_skill_metadata_serialization() {
-        let metadata = SkillMetadata {
-            name: "test-skill".to_string(),
-            description: "A test skill".to_string(),
-            license: Some("Apache-2.0".to_string()),
-            compatibility: Some("Requires network access".to_string()),
-            metadata: Some(HashMap::from([
-                ("author".to_string(), "test".to_string()),
-                ("version".to_string(), "1.0".to_string()),
-            ])),
-            allowed_tools: Some("Bash Read Write".to_string()),
-            model: Some("claude-sonnet".to_string()),
-        };
+        let mut metadata = test_metadata("test-skill", "A test skill");
+        metadata.license = Some("Apache-2.0".to_string());
+        metadata.compatibility = Some("Requires network access".to_string());
+        metadata.metadata = Some(HashMap::from([
+            ("author".to_string(), "test".to_string()),
+            ("version".to_string(), "1.0".to_string()),
+        ]));
+        metadata.allowed_tools = Some("Bash Read Write".to_string());
+        metadata.model = Some("claude-sonnet".to_string());
 
         let json = serde_json::to_string(&metadata).unwrap();
         let deserialized: SkillMetadata = serde_json::from_str(&json).unwrap();
@@ -428,6 +608,8 @@ mod tests {
         assert!(metadata.metadata.is_none());
         assert!(metadata.allowed_tools.is_none());
         assert!(metadata.model.is_none());
+        assert!(metadata.allowed_scripts.is_none());
+        assert!(metadata.execution_limits.is_none());
     }
 
     #[test]
@@ -462,15 +644,8 @@ mod tests {
 
     #[test]
     fn test_get_allowed_tools_single_tool() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: Some("Bash".to_string()),
-            model: None,
-        };
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_tools = Some("Bash".to_string());
 
         let tools = metadata.get_allowed_tools();
         assert_eq!(tools, vec!["Bash"]);
@@ -478,15 +653,8 @@ mod tests {
 
     #[test]
     fn test_get_allowed_tools_with_wildcards() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: Some("Bash(git:*) Read Write".to_string()),
-            model: None,
-        };
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_tools = Some("Bash(git:*) Read Write".to_string());
 
         let tools = metadata.get_allowed_tools();
         assert_eq!(tools, vec!["Bash(git:*)", "Read", "Write"]);
@@ -494,15 +662,8 @@ mod tests {
 
     #[test]
     fn test_get_allowed_tools_empty_string() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: Some("".to_string()),
-            model: None,
-        };
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_tools = Some("".to_string());
 
         let tools = metadata.get_allowed_tools();
         assert!(tools.is_empty());
@@ -510,15 +671,8 @@ mod tests {
 
     #[test]
     fn test_get_allowed_tools_whitespace_only() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: Some("   \t\n  ".to_string()),
-            model: None,
-        };
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_tools = Some("   \t\n  ".to_string());
 
         let tools = metadata.get_allowed_tools();
         assert!(tools.is_empty());
@@ -526,15 +680,8 @@ mod tests {
 
     #[test]
     fn test_get_allowed_tools_comma_separated() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: Some("tool1, tool2, tool3".to_string()),
-            model: None,
-        };
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_tools = Some("tool1, tool2, tool3".to_string());
 
         let tools = metadata.get_allowed_tools();
         assert_eq!(tools, vec!["tool1", "tool2", "tool3"]);
@@ -542,15 +689,8 @@ mod tests {
 
     #[test]
     fn test_get_allowed_tools_comma_no_space() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: Some("tool1,tool2,tool3".to_string()),
-            model: None,
-        };
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_tools = Some("tool1,tool2,tool3".to_string());
 
         let tools = metadata.get_allowed_tools();
         assert_eq!(tools, vec!["tool1", "tool2", "tool3"]);
@@ -558,15 +698,8 @@ mod tests {
 
     #[test]
     fn test_get_allowed_tools_comma_extra_whitespace() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: Some("  tool1 ,  tool2  ,  tool3  ".to_string()),
-            model: None,
-        };
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_tools = Some("  tool1 ,  tool2  ,  tool3  ".to_string());
 
         let tools = metadata.get_allowed_tools();
         assert_eq!(tools, vec!["tool1", "tool2", "tool3"]);
@@ -574,17 +707,9 @@ mod tests {
 
     #[test]
     fn test_get_allowed_tools_mcp_tool_names_comma() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: Some(
-                "mcp__cardea-calculator__sum, mcp__cardea-calculator__sub".to_string(),
-            ),
-            model: None,
-        };
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_tools =
+            Some("mcp__cardea-calculator__sum, mcp__cardea-calculator__sub".to_string());
 
         let tools = metadata.get_allowed_tools();
         assert_eq!(
@@ -595,17 +720,9 @@ mod tests {
 
     #[test]
     fn test_get_allowed_tools_mcp_tool_names_space() {
-        let metadata = SkillMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: Some(
-                "mcp__cardea-calculator__sum mcp__cardea-calculator__sub".to_string(),
-            ),
-            model: None,
-        };
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_tools =
+            Some("mcp__cardea-calculator__sum mcp__cardea-calculator__sub".to_string());
 
         let tools = metadata.get_allowed_tools();
         assert_eq!(
@@ -616,16 +733,11 @@ mod tests {
 
     #[test]
     fn test_skill_summary_from_loaded_skill_with_allowed_tools() {
+        let mut metadata = test_metadata("calculator", "Calculator skill");
+        metadata.allowed_tools = Some("mcp__calc__sum, mcp__calc__sub".to_string());
+
         let skill = LoadedSkill {
-            metadata: SkillMetadata {
-                name: "calculator".to_string(),
-                description: "Calculator skill".to_string(),
-                license: None,
-                compatibility: None,
-                metadata: None,
-                allowed_tools: Some("mcp__calc__sum, mcp__calc__sub".to_string()),
-                model: None,
-            },
+            metadata,
             content: "# Calculator".to_string(),
             raw_content: "---\nname: calculator\n---\n# Calculator".to_string(),
             skill_dir: PathBuf::from("/skills/calculator"),
@@ -646,15 +758,8 @@ mod tests {
 
     #[test]
     fn test_skill_summary_from_metadata_with_allowed_tools() {
-        let metadata = SkillMetadata {
-            name: "search".to_string(),
-            description: "Search skill".to_string(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: Some("mcp__search__query mcp__search__lookup".to_string()),
-            model: None,
-        };
+        let mut metadata = test_metadata("search", "Search skill");
+        metadata.allowed_tools = Some("mcp__search__query mcp__search__lookup".to_string());
 
         let summary = SkillSummary::from(&metadata);
         assert_eq!(summary.name, "search");
@@ -669,15 +774,7 @@ mod tests {
 
     fn create_test_skill_with_scripts() -> LoadedSkill {
         LoadedSkill {
-            metadata: SkillMetadata {
-                name: "test-skill".to_string(),
-                description: "A test skill".to_string(),
-                license: None,
-                compatibility: None,
-                metadata: None,
-                allowed_tools: None,
-                model: None,
-            },
+            metadata: test_metadata("test-skill", "A test skill"),
             content: "# Test".to_string(),
             raw_content: "".to_string(),
             skill_dir: PathBuf::from("/skills/test-skill"),
@@ -777,5 +874,287 @@ mod tests {
         let scripts = skill.list_scripts();
 
         assert!(scripts.is_empty());
+    }
+
+    // Tests for allowed_scripts functionality
+
+    #[test]
+    fn test_is_script_allowed_no_restrictions() {
+        let metadata = test_metadata("test", "test");
+
+        // No restrictions - all scripts allowed
+        assert!(metadata.is_script_allowed("process.js"));
+        assert!(metadata.is_script_allowed("helper.py"));
+        assert!(metadata.is_script_allowed("any-script.sh"));
+    }
+
+    #[test]
+    fn test_is_script_allowed_empty_list() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_scripts = Some(vec![]);
+
+        // Empty list - all scripts allowed
+        assert!(metadata.is_script_allowed("process.js"));
+    }
+
+    #[test]
+    fn test_is_script_allowed_exact_match() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_scripts = Some(vec!["process.js".to_string(), "export.py".to_string()]);
+
+        // Exact matches
+        assert!(metadata.is_script_allowed("process.js"));
+        assert!(metadata.is_script_allowed("export.py"));
+
+        // Not in list
+        assert!(!metadata.is_script_allowed("helper.py"));
+        assert!(!metadata.is_script_allowed("process.ts"));
+    }
+
+    #[test]
+    fn test_is_script_allowed_glob_star() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_scripts = Some(vec!["*.js".to_string()]);
+
+        // Matches *.js
+        assert!(metadata.is_script_allowed("process.js"));
+        assert!(metadata.is_script_allowed("helper.js"));
+        assert!(metadata.is_script_allowed("a.js"));
+
+        // Does not match
+        assert!(!metadata.is_script_allowed("process.py"));
+        assert!(!metadata.is_script_allowed("process.ts"));
+    }
+
+    #[test]
+    fn test_is_script_allowed_glob_multiple_patterns() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_scripts = Some(vec!["*.js".to_string(), "*.ts".to_string()]);
+
+        // Matches either pattern
+        assert!(metadata.is_script_allowed("process.js"));
+        assert!(metadata.is_script_allowed("process.ts"));
+
+        // Does not match
+        assert!(!metadata.is_script_allowed("process.py"));
+    }
+
+    #[test]
+    fn test_is_script_allowed_glob_prefix() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_scripts = Some(vec!["process-*.js".to_string()]);
+
+        // Matches prefix pattern
+        assert!(metadata.is_script_allowed("process-data.js"));
+        assert!(metadata.is_script_allowed("process-export.js"));
+        assert!(metadata.is_script_allowed("process-.js"));
+
+        // Does not match
+        assert!(!metadata.is_script_allowed("process.js"));
+        assert!(!metadata.is_script_allowed("helper-data.js"));
+    }
+
+    #[test]
+    fn test_is_script_allowed_glob_question_mark() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_scripts = Some(vec!["script?.js".to_string()]);
+
+        // Matches exactly one character
+        assert!(metadata.is_script_allowed("script1.js"));
+        assert!(metadata.is_script_allowed("scripta.js"));
+
+        // Does not match
+        assert!(!metadata.is_script_allowed("script.js"));
+        assert!(!metadata.is_script_allowed("script12.js"));
+    }
+
+    #[test]
+    fn test_get_allowed_scripts_none() {
+        let metadata = test_metadata("test", "test");
+        assert!(metadata.get_allowed_scripts().is_none());
+    }
+
+    #[test]
+    fn test_get_allowed_scripts_empty() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_scripts = Some(vec![]);
+        assert!(metadata.get_allowed_scripts().is_none());
+    }
+
+    #[test]
+    fn test_get_allowed_scripts_with_values() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.allowed_scripts = Some(vec!["*.js".to_string(), "process.py".to_string()]);
+
+        let scripts = metadata.get_allowed_scripts();
+        assert!(scripts.is_some());
+        let scripts = scripts.unwrap();
+        assert_eq!(scripts.len(), 2);
+        assert!(scripts.contains(&"*.js".to_string()));
+        assert!(scripts.contains(&"process.py".to_string()));
+    }
+
+    // Tests for SkillResourceLimits
+
+    #[test]
+    fn test_skill_resource_limits_default() {
+        let limits = SkillResourceLimits::default();
+
+        assert!(limits.max_memory_bytes.is_none());
+        assert!(limits.timeout_secs.is_none());
+        assert!(limits.max_output_bytes.is_none());
+        assert!(limits.network_access.is_none());
+        assert!(limits.is_empty());
+    }
+
+    #[test]
+    fn test_skill_resource_limits_is_empty() {
+        let mut limits = SkillResourceLimits::default();
+        assert!(limits.is_empty());
+
+        limits.timeout_secs = Some(30);
+        assert!(!limits.is_empty());
+    }
+
+    #[test]
+    fn test_skill_resource_limits_merge_with() {
+        use std::time::Duration;
+
+        use crate::executor::FilesystemPolicy;
+
+        let global = ResourceLimits {
+            max_memory_bytes: 256 * 1024 * 1024,
+            timeout: Duration::from_secs(60),
+            max_output_bytes: 1024 * 1024,
+            network_access: false,
+            filesystem_access: FilesystemPolicy::None,
+        };
+
+        // Partial override
+        let skill_limits = SkillResourceLimits {
+            max_memory_bytes: Some(128 * 1024 * 1024),
+            timeout_secs: Some(30),
+            max_output_bytes: None,
+            network_access: Some(true),
+        };
+
+        let merged = skill_limits.merge_with(&global);
+
+        // Skill values override
+        assert_eq!(merged.max_memory_bytes, 128 * 1024 * 1024);
+        assert_eq!(merged.timeout, Duration::from_secs(30));
+        assert!(merged.network_access);
+
+        // Global values inherited
+        assert_eq!(merged.max_output_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_skill_resource_limits_merge_with_empty() {
+        use std::time::Duration;
+
+        use crate::executor::FilesystemPolicy;
+
+        let global = ResourceLimits {
+            max_memory_bytes: 256 * 1024 * 1024,
+            timeout: Duration::from_secs(60),
+            max_output_bytes: 1024 * 1024,
+            network_access: false,
+            filesystem_access: FilesystemPolicy::None,
+        };
+
+        // Empty skill limits
+        let skill_limits = SkillResourceLimits::default();
+        let merged = skill_limits.merge_with(&global);
+
+        // All values from global
+        assert_eq!(merged.max_memory_bytes, 256 * 1024 * 1024);
+        assert_eq!(merged.timeout, Duration::from_secs(60));
+        assert_eq!(merged.max_output_bytes, 1024 * 1024);
+        assert!(!merged.network_access);
+    }
+
+    #[test]
+    fn test_skill_resource_limits_serialization() {
+        let limits = SkillResourceLimits {
+            max_memory_bytes: Some(128 * 1024 * 1024),
+            timeout_secs: Some(30),
+            max_output_bytes: None,
+            network_access: Some(true),
+        };
+
+        let json = serde_json::to_string(&limits).unwrap();
+
+        // None fields should be skipped
+        assert!(json.contains("max_memory_bytes"));
+        assert!(json.contains("timeout_secs"));
+        assert!(json.contains("network_access"));
+        assert!(!json.contains("max_output_bytes"));
+
+        let deserialized: SkillResourceLimits = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, limits);
+    }
+
+    #[test]
+    fn test_skill_metadata_with_execution_limits() {
+        let yaml = r#"
+name: test-skill
+description: A test skill
+execution-limits:
+  max_memory_bytes: 134217728
+  timeout_secs: 30
+  network_access: true
+"#;
+
+        let metadata: SkillMetadata = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(metadata.execution_limits.is_some());
+        let limits = metadata.execution_limits.unwrap();
+        assert_eq!(limits.max_memory_bytes, Some(128 * 1024 * 1024));
+        assert_eq!(limits.timeout_secs, Some(30));
+        assert_eq!(limits.network_access, Some(true));
+        assert!(limits.max_output_bytes.is_none());
+    }
+
+    #[test]
+    fn test_skill_metadata_with_allowed_scripts() {
+        let yaml = r#"
+name: test-skill
+description: A test skill
+allowed-scripts:
+  - "*.js"
+  - "*.ts"
+  - "process.py"
+"#;
+
+        let metadata: SkillMetadata = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(metadata.allowed_scripts.is_some());
+        let scripts = metadata.allowed_scripts.unwrap();
+        assert_eq!(scripts.len(), 3);
+        assert!(scripts.contains(&"*.js".to_string()));
+        assert!(scripts.contains(&"*.ts".to_string()));
+        assert!(scripts.contains(&"process.py".to_string()));
+    }
+
+    #[test]
+    fn test_glob_match_complex_patterns() {
+        // Test the glob matching function directly
+        assert!(SkillMetadata::glob_match("*.js", "test.js"));
+        assert!(SkillMetadata::glob_match("*.js", ".js"));
+        assert!(!SkillMetadata::glob_match("*.js", "test.ts"));
+
+        // Multiple stars
+        assert!(SkillMetadata::glob_match("*-*-*.js", "a-b-c.js"));
+        assert!(SkillMetadata::glob_match("*-*-*.js", "foo-bar-baz.js"));
+
+        // Star at end
+        assert!(SkillMetadata::glob_match("process*", "process.js"));
+        assert!(SkillMetadata::glob_match("process*", "process-data.js"));
+        assert!(SkillMetadata::glob_match("process*", "process"));
+
+        // No wildcards
+        assert!(SkillMetadata::glob_match("exact", "exact"));
+        assert!(!SkillMetadata::glob_match("exact", "exacta"));
     }
 }
