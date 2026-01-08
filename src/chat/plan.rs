@@ -194,10 +194,17 @@ pub(crate) async fn chat(
         }
     };
 
+    // Get model name from request, fallback to "default" if not specified
+    let model_name = request
+        .model
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+
     // Create task planner
     let planner = TaskPlanner::with_chat_llm(
         format!("{}/chat/completions", chat_server.url.trim_end_matches('/')),
         chat_server.api_key.clone(),
+        model_name.clone(),
         max_plan_subtasks,
     )
     .with_tools(available_tools.clone())
@@ -386,6 +393,7 @@ pub(crate) async fn chat(
                 &cancel_token,
                 request_id,
                 &mut subtask_trace,
+                &model_name,
             )
             .await;
 
@@ -594,6 +602,7 @@ async fn execute_subtask_with_react(
     cancel_token: &CancellationToken,
     request_id: &str,
     subtask_trace: &mut SubtaskTrace,
+    model: &str,
 ) -> ServerResult<String> {
     let start_time = Instant::now();
     let tool_call_retry_delay = Duration::from_millis(tool_call_retry_delay_ms);
@@ -688,7 +697,7 @@ async fn execute_subtask_with_react(
             .map(|skill| skill.metadata.get_allowed_tools());
         let tools_json = build_tools_json(available_tools, allowed_patterns.as_deref());
         let request_json = serde_json::json!({
-            "model": "default",
+            "model": model,
             "messages": messages,
             "tools": tools_json,
             "stream": false
@@ -1652,7 +1661,7 @@ async fn generate_final_response(
     _state: &Arc<AppState>,
     chat_server: &crate::server::TargetServerInfo,
     headers: &HeaderMap,
-    _original_request: &ChatCompletionRequest,
+    original_request: &ChatCompletionRequest,
     plan: &TaskPlan,
     results: &[(usize, String)],
     request_id: &str,
@@ -1686,8 +1695,10 @@ async fn generate_final_response(
         ),
     )];
 
+    let model_name = original_request.model.as_deref().unwrap_or("default");
+
     let summary_request = serde_json::json!({
-        "model": "default",
+        "model": model_name,
         "messages": summary_messages,
         "stream": false
     });

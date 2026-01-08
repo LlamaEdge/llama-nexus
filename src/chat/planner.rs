@@ -244,16 +244,19 @@ pub struct ChatLlmProvider {
     chat_url: String,
     /// Optional API key for authentication.
     api_key: Option<String>,
+    /// Model name to use for requests.
+    model: String,
     /// HTTP client for making requests.
     client: reqwest::Client,
 }
 
 impl ChatLlmProvider {
     /// Creates a new ChatLlmProvider.
-    pub fn new(chat_url: String, api_key: Option<String>) -> Self {
+    pub fn new(chat_url: String, api_key: Option<String>, model: String) -> Self {
         Self {
             chat_url,
             api_key,
+            model,
             client: reqwest::Client::new(),
         }
     }
@@ -264,7 +267,7 @@ impl LlmProvider for ChatLlmProvider {
     async fn complete(&self, messages: Vec<PlannerMessage>) -> Result<String, ServerError> {
         // Build request body
         let body = serde_json::json!({
-            "model": "default",
+            "model": &self.model,
             "messages": messages,
             "temperature": 0.7,
             "stream": false
@@ -335,9 +338,14 @@ pub struct TaskPlanner {
 
 impl TaskPlanner {
     /// Creates a TaskPlanner using the Chat LLM as the provider.
-    pub fn with_chat_llm(chat_url: String, api_key: Option<String>, max_subtasks: usize) -> Self {
+    pub fn with_chat_llm(
+        chat_url: String,
+        api_key: Option<String>,
+        model: String,
+        max_subtasks: usize,
+    ) -> Self {
         Self {
-            llm_provider: Arc::new(ChatLlmProvider::new(chat_url, api_key)),
+            llm_provider: Arc::new(ChatLlmProvider::new(chat_url, api_key, model)),
             available_tools: vec![],
             max_subtasks,
             skills_summaries: vec![],
