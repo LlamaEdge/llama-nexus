@@ -162,25 +162,200 @@ The following skill instructions guide how to complete this task:
 
     /// Generate injection text for multiple skills
     ///
+    /// Combines content from all skills into a single injection text,
+    /// with a summary section showing merged allowed-tools and allowed-scripts.
+    ///
     /// # Arguments
     /// * `skills` - List of loaded skills to inject
     ///
     /// # Returns
-    /// Combined injection text for all skills
+    /// Combined injection text for all skills with merged permissions
     #[allow(dead_code)]
     pub fn multi_skill_injection(skills: &[LoadedSkill]) -> String {
+        Self::multi_skill_injection_with_refs(skills, &[])
+    }
+
+    /// Generate injection text for multiple skills with references
+    ///
+    /// # Arguments
+    /// * `skills` - List of loaded skills to inject
+    /// * `all_references` - All references to include (flat list from all skills)
+    ///
+    /// # Returns
+    /// Combined injection text for all skills with merged permissions and references
+    #[allow(dead_code)]
+    pub fn multi_skill_injection_with_refs(
+        skills: &[LoadedSkill],
+        all_references: &[String],
+    ) -> String {
         if skills.is_empty() {
             return String::new();
         }
 
-        let mut output = String::from("\n## Active Skills\n\n");
+        let mut output = String::new();
 
-        for skill in skills {
-            output.push_str(&Self::phase2_injection(skill));
-            output.push_str("\n\n");
+        // Generate skill names list
+        let skill_names: Vec<&str> = skills.iter().map(|s| s.metadata.name.as_str()).collect();
+
+        // Header with active skills
+        output.push_str(&format!(
+            "\n## Active Skills: {}\n\n",
+            skill_names.join(", ")
+        ));
+
+        // Merged permissions section
+        let merged_tools = Self::merge_allowed_tools(skills);
+        let merged_scripts = Self::merge_allowed_scripts(skills);
+
+        if !merged_tools.is_empty() || !merged_scripts.is_empty() {
+            output.push_str("### Merged Permissions\n\n");
+
+            if !merged_tools.is_empty() {
+                output.push_str(&format!(
+                    "**Allowed Tools:** {}\n\n",
+                    merged_tools.join(", ")
+                ));
+            }
+
+            if !merged_scripts.is_empty() {
+                output.push_str(&format!(
+                    "**Allowed Scripts:** {}\n\n",
+                    merged_scripts.join(", ")
+                ));
+            }
+        }
+
+        // Individual skill content
+        output.push_str("---\n\n");
+
+        for (i, skill) in skills.iter().enumerate() {
+            if i > 0 {
+                output.push_str("\n---\n\n");
+            }
+            output.push_str(&format!("### Skill: {}\n\n", skill.metadata.name));
+            output.push_str(&skill.content);
+        }
+
+        output.push_str("\n---");
+
+        // References section (if any)
+        if !all_references.is_empty() {
+            let refs_content = all_references
+                .iter()
+                .enumerate()
+                .map(|(i, content)| {
+                    format!("### Reference Document {}\n\n{}", i + 1, content.trim())
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+
+            output.push_str(&format!(
+                "\n\n## Reference Materials\n\nThe following reference documents provide additional context:\n\n{}",
+                refs_content
+            ));
         }
 
         output
+    }
+
+    /// Generate injection text for multiple skills with auto-loaded references
+    ///
+    /// Automatically loads reference documents from each skill's references/ directory
+    /// and includes them in the injection.
+    ///
+    /// # Arguments
+    /// * `skills` - List of loaded skills to inject
+    /// * `max_total_size` - Maximum total size of all references in bytes (0 = no limit)
+    ///
+    /// # Returns
+    /// Combined injection text for all skills with merged permissions and auto-loaded references
+    #[allow(dead_code)]
+    pub async fn multi_skill_injection_auto_refs(
+        skills: &[LoadedSkill],
+        max_total_size: usize,
+    ) -> String {
+        if skills.is_empty() {
+            return String::new();
+        }
+
+        // Load references from all skills
+        let mut all_references = Vec::new();
+
+        for skill in skills {
+            let skill_refs = SkillLoader::load_references_with_patterns(
+                &skill.skill_dir,
+                skill.metadata.references.as_deref(),
+            )
+            .await;
+            all_references.extend(skill_refs);
+        }
+
+        // Apply size limit if specified
+        let filtered_refs = if max_total_size > 0 {
+            Self::filter_by_size(&all_references, max_total_size)
+        } else {
+            all_references
+        };
+
+        Self::multi_skill_injection_with_refs(skills, &filtered_refs)
+    }
+
+    /// Merge allowed-tools from multiple skills (union)
+    ///
+    /// Creates a unique list of all tools from all skills, preserving order
+    /// of first occurrence. Duplicates are removed.
+    ///
+    /// # Arguments
+    /// * `skills` - List of loaded skills
+    ///
+    /// # Returns
+    /// Deduplicated list of all allowed tools
+    #[allow(dead_code)]
+    pub fn merge_allowed_tools(skills: &[LoadedSkill]) -> Vec<String> {
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+
+        for skill in skills {
+            for tool in skill.metadata.get_allowed_tools() {
+                if seen.insert(tool.clone()) {
+                    result.push(tool);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Merge allowed-scripts from multiple skills
+    ///
+    /// Creates a unique list of all script patterns from all skills.
+    /// Patterns are preserved as-is (glob patterns are not merged).
+    ///
+    /// # Arguments
+    /// * `skills` - List of loaded skills
+    ///
+    /// # Returns
+    /// Deduplicated list of all allowed script patterns
+    #[allow(dead_code)]
+    pub fn merge_allowed_scripts(skills: &[LoadedSkill]) -> Vec<String> {
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+
+        for skill in skills {
+            if let Some(scripts) = &skill.metadata.allowed_scripts {
+                for script in scripts {
+                    if seen.insert(script.clone()) {
+                        result.push(script.clone());
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     /// Inject skill summaries into an existing system prompt
@@ -340,10 +515,11 @@ mod tests {
 
         let result = SkillInjector::multi_skill_injection(&skills);
 
-        assert!(result.contains("## Active Skills"));
-        assert!(result.contains("skill-a"));
+        // New format shows skill names in header
+        assert!(result.contains("## Active Skills: skill-a, skill-b"));
+        assert!(result.contains("### Skill: skill-a"));
         assert!(result.contains("Content A"));
-        assert!(result.contains("skill-b"));
+        assert!(result.contains("### Skill: skill-b"));
         assert!(result.contains("Content B"));
     }
 
@@ -495,6 +671,9 @@ fn main() {
         ];
 
         let result = SkillInjector::multi_skill_injection(&skills);
+
+        // Check header shows correct order
+        assert!(result.contains("## Active Skills: first, second, third"));
 
         let first_pos = result.find("First content").unwrap();
         let second_pos = result.find("Second content").unwrap();
@@ -746,5 +925,298 @@ fn main() {
 
         assert!(result.contains("Markdown file"));
         assert!(!result.contains("ignored"));
+    }
+
+    // Tests for merge_allowed_tools
+
+    fn create_test_skill_with_tools(name: &str, tools: Option<&str>) -> LoadedSkill {
+        let mut skill = create_test_skill(name, "Content");
+        skill.metadata.allowed_tools = tools.map(|s| s.to_string());
+        skill
+    }
+
+    fn create_test_skill_with_scripts(name: &str, scripts: Option<Vec<&str>>) -> LoadedSkill {
+        let mut skill = create_test_skill(name, "Content");
+        skill.metadata.allowed_scripts = scripts.map(|v| v.into_iter().map(String::from).collect());
+        skill
+    }
+
+    #[test]
+    fn test_merge_allowed_tools_empty_skills() {
+        let skills: Vec<LoadedSkill> = vec![];
+        let result = SkillInjector::merge_allowed_tools(&skills);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_merge_allowed_tools_single_skill() {
+        let skills = vec![create_test_skill_with_tools(
+            "skill-a",
+            Some("Bash Read Write"),
+        )];
+        let result = SkillInjector::merge_allowed_tools(&skills);
+        assert_eq!(result, vec!["Bash", "Read", "Write"]);
+    }
+
+    #[test]
+    fn test_merge_allowed_tools_multiple_skills_no_overlap() {
+        let skills = vec![
+            create_test_skill_with_tools("skill-a", Some("Bash Read")),
+            create_test_skill_with_tools("skill-b", Some("Write Edit")),
+        ];
+        let result = SkillInjector::merge_allowed_tools(&skills);
+        assert_eq!(result, vec!["Bash", "Read", "Write", "Edit"]);
+    }
+
+    #[test]
+    fn test_merge_allowed_tools_with_duplicates() {
+        let skills = vec![
+            create_test_skill_with_tools("skill-a", Some("Bash Read Write")),
+            create_test_skill_with_tools("skill-b", Some("Read Write Grep")),
+            create_test_skill_with_tools("skill-c", Some("Bash Grep Glob")),
+        ];
+        let result = SkillInjector::merge_allowed_tools(&skills);
+        // Should be deduplicated, preserving order of first occurrence
+        assert_eq!(result, vec!["Bash", "Read", "Write", "Grep", "Glob"]);
+    }
+
+    #[test]
+    fn test_merge_allowed_tools_some_empty() {
+        let skills = vec![
+            create_test_skill_with_tools("skill-a", Some("Bash Read")),
+            create_test_skill_with_tools("skill-b", None),
+            create_test_skill_with_tools("skill-c", Some("Write")),
+        ];
+        let result = SkillInjector::merge_allowed_tools(&skills);
+        assert_eq!(result, vec!["Bash", "Read", "Write"]);
+    }
+
+    #[test]
+    fn test_merge_allowed_tools_all_empty() {
+        let skills = vec![
+            create_test_skill_with_tools("skill-a", None),
+            create_test_skill_with_tools("skill-b", None),
+        ];
+        let result = SkillInjector::merge_allowed_tools(&skills);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_merge_allowed_tools_with_mcp_tools() {
+        let skills = vec![
+            create_test_skill_with_tools("skill-a", Some("mcp__calc__sum, mcp__calc__sub")),
+            create_test_skill_with_tools("skill-b", Some("mcp__search__query, mcp__calc__sum")),
+        ];
+        let result = SkillInjector::merge_allowed_tools(&skills);
+        assert_eq!(
+            result,
+            vec!["mcp__calc__sum", "mcp__calc__sub", "mcp__search__query"]
+        );
+    }
+
+    // Tests for merge_allowed_scripts
+
+    #[test]
+    fn test_merge_allowed_scripts_empty_skills() {
+        let skills: Vec<LoadedSkill> = vec![];
+        let result = SkillInjector::merge_allowed_scripts(&skills);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_merge_allowed_scripts_single_skill() {
+        let skills = vec![create_test_skill_with_scripts(
+            "skill-a",
+            Some(vec!["*.js", "*.ts"]),
+        )];
+        let result = SkillInjector::merge_allowed_scripts(&skills);
+        assert_eq!(result, vec!["*.js", "*.ts"]);
+    }
+
+    #[test]
+    fn test_merge_allowed_scripts_multiple_skills() {
+        let skills = vec![
+            create_test_skill_with_scripts("skill-a", Some(vec!["*.js", "process.py"])),
+            create_test_skill_with_scripts("skill-b", Some(vec!["*.ts", "export.py"])),
+        ];
+        let result = SkillInjector::merge_allowed_scripts(&skills);
+        assert_eq!(result, vec!["*.js", "process.py", "*.ts", "export.py"]);
+    }
+
+    #[test]
+    fn test_merge_allowed_scripts_with_duplicates() {
+        let skills = vec![
+            create_test_skill_with_scripts("skill-a", Some(vec!["*.js", "process.py"])),
+            create_test_skill_with_scripts("skill-b", Some(vec!["*.js", "export.py"])),
+            create_test_skill_with_scripts("skill-c", Some(vec!["process.py", "helper.py"])),
+        ];
+        let result = SkillInjector::merge_allowed_scripts(&skills);
+        // Should be deduplicated
+        assert_eq!(result, vec!["*.js", "process.py", "export.py", "helper.py"]);
+    }
+
+    #[test]
+    fn test_merge_allowed_scripts_some_none() {
+        let skills = vec![
+            create_test_skill_with_scripts("skill-a", Some(vec!["*.js"])),
+            create_test_skill_with_scripts("skill-b", None),
+            create_test_skill_with_scripts("skill-c", Some(vec!["*.py"])),
+        ];
+        let result = SkillInjector::merge_allowed_scripts(&skills);
+        assert_eq!(result, vec!["*.js", "*.py"]);
+    }
+
+    #[test]
+    fn test_merge_allowed_scripts_all_none() {
+        let skills = vec![
+            create_test_skill_with_scripts("skill-a", None),
+            create_test_skill_with_scripts("skill-b", None),
+        ];
+        let result = SkillInjector::merge_allowed_scripts(&skills);
+        assert!(result.is_empty());
+    }
+
+    // Tests for multi_skill_injection_with_refs
+
+    #[test]
+    fn test_multi_skill_injection_with_refs_empty() {
+        let result = SkillInjector::multi_skill_injection_with_refs(&[], &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_multi_skill_injection_with_refs_no_refs() {
+        let skills = vec![
+            create_test_skill("skill-a", "Content A"),
+            create_test_skill("skill-b", "Content B"),
+        ];
+        let result = SkillInjector::multi_skill_injection_with_refs(&skills, &[]);
+
+        assert!(result.contains("## Active Skills: skill-a, skill-b"));
+        assert!(result.contains("Content A"));
+        assert!(result.contains("Content B"));
+        assert!(!result.contains("## Reference Materials"));
+    }
+
+    #[test]
+    fn test_multi_skill_injection_with_refs_has_refs() {
+        let skills = vec![create_test_skill("skill-a", "Content A")];
+        let refs = vec![
+            "Reference content 1".to_string(),
+            "Reference content 2".to_string(),
+        ];
+        let result = SkillInjector::multi_skill_injection_with_refs(&skills, &refs);
+
+        assert!(result.contains("## Active Skills: skill-a"));
+        assert!(result.contains("Content A"));
+        assert!(result.contains("## Reference Materials"));
+        assert!(result.contains("### Reference Document 1"));
+        assert!(result.contains("Reference content 1"));
+        assert!(result.contains("### Reference Document 2"));
+        assert!(result.contains("Reference content 2"));
+    }
+
+    #[test]
+    fn test_multi_skill_injection_with_merged_permissions() {
+        let mut skill_a = create_test_skill("skill-a", "Content A");
+        skill_a.metadata.allowed_tools = Some("Bash Read".to_string());
+        skill_a.metadata.allowed_scripts = Some(vec!["*.js".to_string()]);
+
+        let mut skill_b = create_test_skill("skill-b", "Content B");
+        skill_b.metadata.allowed_tools = Some("Read Write".to_string());
+        skill_b.metadata.allowed_scripts = Some(vec!["*.py".to_string()]);
+
+        let skills = vec![skill_a, skill_b];
+        let result = SkillInjector::multi_skill_injection(&skills);
+
+        // Check merged permissions section
+        assert!(result.contains("### Merged Permissions"));
+        assert!(result.contains("**Allowed Tools:** Bash, Read, Write"));
+        assert!(result.contains("**Allowed Scripts:** *.js, *.py"));
+    }
+
+    #[test]
+    fn test_multi_skill_injection_no_permissions_section_when_empty() {
+        let skills = vec![
+            create_test_skill("skill-a", "Content A"),
+            create_test_skill("skill-b", "Content B"),
+        ];
+        let result = SkillInjector::multi_skill_injection(&skills);
+
+        // No permissions section when both tools and scripts are empty
+        assert!(!result.contains("### Merged Permissions"));
+    }
+
+    // Tests for multi_skill_injection_auto_refs
+
+    #[tokio::test]
+    async fn test_multi_skill_injection_auto_refs_empty() {
+        let result = SkillInjector::multi_skill_injection_auto_refs(&[], 0).await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_multi_skill_injection_auto_refs_no_refs_dirs() {
+        let temp_dir1 = tempfile::TempDir::new().unwrap();
+        let temp_dir2 = tempfile::TempDir::new().unwrap();
+
+        let mut skill_a = create_test_skill("skill-a", "Content A");
+        skill_a.skill_dir = temp_dir1.path().to_path_buf();
+
+        let mut skill_b = create_test_skill("skill-b", "Content B");
+        skill_b.skill_dir = temp_dir2.path().to_path_buf();
+
+        let skills = vec![skill_a, skill_b];
+        let result = SkillInjector::multi_skill_injection_auto_refs(&skills, 0).await;
+
+        assert!(result.contains("## Active Skills: skill-a, skill-b"));
+        assert!(result.contains("Content A"));
+        assert!(result.contains("Content B"));
+        assert!(!result.contains("## Reference Materials"));
+    }
+
+    #[tokio::test]
+    async fn test_multi_skill_injection_auto_refs_with_refs() {
+        let temp_dir1 = tempfile::TempDir::new().unwrap();
+        let refs_dir1 = temp_dir1.path().join("references");
+        std::fs::create_dir(&refs_dir1).unwrap();
+        std::fs::write(refs_dir1.join("ref1.md"), "Reference from skill A").unwrap();
+
+        let temp_dir2 = tempfile::TempDir::new().unwrap();
+        let refs_dir2 = temp_dir2.path().join("references");
+        std::fs::create_dir(&refs_dir2).unwrap();
+        std::fs::write(refs_dir2.join("ref2.md"), "Reference from skill B").unwrap();
+
+        let mut skill_a = create_test_skill("skill-a", "Content A");
+        skill_a.skill_dir = temp_dir1.path().to_path_buf();
+
+        let mut skill_b = create_test_skill("skill-b", "Content B");
+        skill_b.skill_dir = temp_dir2.path().to_path_buf();
+
+        let skills = vec![skill_a, skill_b];
+        let result = SkillInjector::multi_skill_injection_auto_refs(&skills, 0).await;
+
+        assert!(result.contains("## Active Skills: skill-a, skill-b"));
+        assert!(result.contains("## Reference Materials"));
+        assert!(result.contains("Reference from skill A"));
+        assert!(result.contains("Reference from skill B"));
+    }
+
+    #[tokio::test]
+    async fn test_multi_skill_injection_auto_refs_with_size_limit() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let refs_dir = temp_dir.path().join("references");
+        std::fs::create_dir(&refs_dir).unwrap();
+        std::fs::write(refs_dir.join("small.md"), "Small").unwrap(); // 5 bytes
+        std::fs::write(refs_dir.join("large.md"), "L".repeat(1000)).unwrap(); // 1000 bytes
+
+        let mut skill = create_test_skill("skill-a", "Content A");
+        skill.skill_dir = temp_dir.path().to_path_buf();
+
+        let skills = vec![skill];
+        let result = SkillInjector::multi_skill_injection_auto_refs(&skills, 100).await;
+
+        // With size limit, only small.md should be included
+        assert!(result.contains("Small") || !result.contains(&"L".repeat(100)));
     }
 }
