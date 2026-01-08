@@ -19,7 +19,8 @@ pub struct SkillLoader;
 impl SkillLoader {
     /// Load reference documents from the references/ directory
     ///
-    /// Reads all .md and .txt files from the references/ subdirectory
+    /// Reads .md and .txt files from the references/ subdirectory.
+    /// If patterns are specified, only matching files are loaded.
     ///
     /// # Arguments
     /// * `skill_dir` - The skill directory path
@@ -27,6 +28,24 @@ impl SkillLoader {
     /// # Returns
     /// A vector of file contents
     pub async fn load_references(skill_dir: &Path) -> Vec<String> {
+        Self::load_references_with_patterns(skill_dir, None).await
+    }
+
+    /// Load reference documents with optional pattern filtering
+    ///
+    /// Reads files from the references/ subdirectory that match the given patterns.
+    /// If no patterns are specified, all .md and .txt files are loaded.
+    ///
+    /// # Arguments
+    /// * `skill_dir` - The skill directory path
+    /// * `patterns` - Optional list of glob patterns to filter files
+    ///
+    /// # Returns
+    /// A vector of file contents
+    pub async fn load_references_with_patterns(
+        skill_dir: &Path,
+        patterns: Option<&[String]>,
+    ) -> Vec<String> {
         let refs_dir = skill_dir.join("references");
         if !refs_dir.exists() {
             return Vec::new();
@@ -38,11 +57,20 @@ impl SkillLoader {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() {
+                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-                    if (ext == "md" || ext == "txt")
-                        && let Ok(content) = tokio::fs::read_to_string(&path).await
-                    {
+                    // Check if file should be loaded
+                    let should_load = match patterns {
+                        // With patterns: file must match at least one pattern
+                        Some(pats) if !pats.is_empty() => pats
+                            .iter()
+                            .any(|pattern| Self::glob_match(pattern, filename)),
+                        // Without patterns: load all .md and .txt files
+                        _ => ext == "md" || ext == "txt",
+                    };
+
+                    if should_load && let Ok(content) = tokio::fs::read_to_string(&path).await {
                         references.push(content);
                     }
                 }
@@ -50,6 +78,47 @@ impl SkillLoader {
         }
 
         references
+    }
+
+    /// Simple glob pattern matching
+    ///
+    /// Supports:
+    /// - `*` matches any sequence of characters (including empty)
+    /// - `?` matches exactly one character
+    fn glob_match(pattern: &str, text: &str) -> bool {
+        let p: Vec<char> = pattern.chars().collect();
+        let t: Vec<char> = text.chars().collect();
+        let (m, n) = (p.len(), t.len());
+
+        // dp[i][j] = true if pattern[0..i] matches text[0..j]
+        let mut dp = vec![vec![false; n + 1]; m + 1];
+
+        // Empty pattern matches empty text
+        dp[0][0] = true;
+
+        // Handle patterns starting with *
+        for i in 1..=m {
+            if p[i - 1] == '*' {
+                dp[i][0] = dp[i - 1][0];
+            } else {
+                break;
+            }
+        }
+
+        // Fill the DP table
+        for i in 1..=m {
+            for j in 1..=n {
+                if p[i - 1] == '*' {
+                    // * can match empty (dp[i-1][j]) or match one more char (dp[i][j-1])
+                    dp[i][j] = dp[i - 1][j] || dp[i][j - 1];
+                } else if p[i - 1] == '?' || p[i - 1] == t[j - 1] {
+                    // ? matches any single char, or exact char match
+                    dp[i][j] = dp[i - 1][j - 1];
+                }
+            }
+        }
+
+        dp[m][n]
     }
 
     /// List available scripts from the scripts/ directory
@@ -384,5 +453,124 @@ mod tests {
         let unsupported = SkillLoader::filter_unsupported_scripts(&scripts);
         // Check it doesn't panic and returns a valid vector
         assert!(unsupported.len() <= scripts.len());
+    }
+
+    // Tests for load_references_with_patterns
+
+    #[tokio::test]
+    async fn test_load_references_with_patterns_no_patterns() {
+        let temp_dir = TempDir::new().unwrap();
+        let refs_dir = temp_dir.path().join("references");
+        std::fs::create_dir(&refs_dir).unwrap();
+
+        std::fs::write(refs_dir.join("doc1.md"), "# Document 1").unwrap();
+        std::fs::write(refs_dir.join("doc2.txt"), "Plain text").unwrap();
+        std::fs::write(refs_dir.join("ignored.json"), "{}").unwrap();
+
+        // Without patterns, should load .md and .txt files
+        let refs = SkillLoader::load_references_with_patterns(temp_dir.path(), None).await;
+        assert_eq!(refs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_load_references_with_patterns_specific_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let refs_dir = temp_dir.path().join("references");
+        std::fs::create_dir(&refs_dir).unwrap();
+
+        std::fs::write(refs_dir.join("api.md"), "API docs").unwrap();
+        std::fs::write(refs_dir.join("guide.md"), "User guide").unwrap();
+        std::fs::write(refs_dir.join("notes.txt"), "Notes").unwrap();
+
+        // With specific pattern
+        let patterns = vec!["api.md".to_string()];
+        let refs =
+            SkillLoader::load_references_with_patterns(temp_dir.path(), Some(&patterns)).await;
+        assert_eq!(refs.len(), 1);
+        assert!(refs[0].contains("API docs"));
+    }
+
+    #[tokio::test]
+    async fn test_load_references_with_patterns_glob() {
+        let temp_dir = TempDir::new().unwrap();
+        let refs_dir = temp_dir.path().join("references");
+        std::fs::create_dir(&refs_dir).unwrap();
+
+        std::fs::write(refs_dir.join("api-v1.md"), "API v1").unwrap();
+        std::fs::write(refs_dir.join("api-v2.md"), "API v2").unwrap();
+        std::fs::write(refs_dir.join("guide.md"), "User guide").unwrap();
+
+        // With glob pattern
+        let patterns = vec!["api-*.md".to_string()];
+        let refs =
+            SkillLoader::load_references_with_patterns(temp_dir.path(), Some(&patterns)).await;
+        assert_eq!(refs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_load_references_with_patterns_multiple() {
+        let temp_dir = TempDir::new().unwrap();
+        let refs_dir = temp_dir.path().join("references");
+        std::fs::create_dir(&refs_dir).unwrap();
+
+        std::fs::write(refs_dir.join("api.md"), "API docs").unwrap();
+        std::fs::write(refs_dir.join("config.yaml"), "config: true").unwrap();
+        std::fs::write(refs_dir.join("notes.txt"), "Notes").unwrap();
+
+        // With multiple patterns
+        let patterns = vec!["api.md".to_string(), "notes.txt".to_string()];
+        let refs =
+            SkillLoader::load_references_with_patterns(temp_dir.path(), Some(&patterns)).await;
+        assert_eq!(refs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_load_references_with_patterns_empty_list() {
+        let temp_dir = TempDir::new().unwrap();
+        let refs_dir = temp_dir.path().join("references");
+        std::fs::create_dir(&refs_dir).unwrap();
+
+        std::fs::write(refs_dir.join("doc.md"), "Document").unwrap();
+        std::fs::write(refs_dir.join("notes.txt"), "Notes").unwrap();
+
+        // Empty patterns should behave like None
+        let patterns: Vec<String> = vec![];
+        let refs =
+            SkillLoader::load_references_with_patterns(temp_dir.path(), Some(&patterns)).await;
+        assert_eq!(refs.len(), 2);
+    }
+
+    // Tests for glob_match
+
+    #[test]
+    fn test_glob_match_exact() {
+        assert!(SkillLoader::glob_match("api.md", "api.md"));
+        assert!(!SkillLoader::glob_match("api.md", "api.txt"));
+    }
+
+    #[test]
+    fn test_glob_match_star() {
+        assert!(SkillLoader::glob_match("*.md", "api.md"));
+        assert!(SkillLoader::glob_match("*.md", "guide.md"));
+        assert!(!SkillLoader::glob_match("*.md", "api.txt"));
+        assert!(SkillLoader::glob_match("api-*.md", "api-v1.md"));
+        assert!(SkillLoader::glob_match("api-*.md", "api-v2.md"));
+        assert!(!SkillLoader::glob_match("api-*.md", "guide.md"));
+    }
+
+    #[test]
+    fn test_glob_match_question() {
+        assert!(SkillLoader::glob_match("api?.md", "api1.md"));
+        assert!(SkillLoader::glob_match("api?.md", "apix.md"));
+        assert!(!SkillLoader::glob_match("api?.md", "api.md"));
+        assert!(!SkillLoader::glob_match("api?.md", "api12.md"));
+    }
+
+    #[test]
+    fn test_glob_match_complex() {
+        assert!(SkillLoader::glob_match("*-*-*.md", "a-b-c.md"));
+        assert!(SkillLoader::glob_match("*api*", "myapi.md"));
+        assert!(SkillLoader::glob_match("*api*", "api"));
+        assert!(SkillLoader::glob_match("doc?.txt", "doc1.txt"));
     }
 }

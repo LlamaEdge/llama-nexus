@@ -2,9 +2,12 @@
 //!
 //! Injects skill information into system prompts:
 //! - Phase 1: Skill summaries (name + description) in table format
-//! - Phase 2: Full skill content when activated
+//! - Phase 2: Full skill content when activated (with optional references)
 
-use crate::skills::types::{LoadedSkill, SkillSummary};
+use crate::skills::{
+    loader::SkillLoader,
+    types::{LoadedSkill, SkillSummary},
+};
 
 /// Skill injector for enhancing system prompts
 ///
@@ -63,6 +66,39 @@ Example: <use_skill>skill-name</use_skill>
     /// # Returns
     /// Formatted text with skill name and full content
     pub fn phase2_injection(skill: &LoadedSkill) -> String {
+        Self::phase2_injection_with_refs(skill, &[])
+    }
+
+    /// Generate Phase 2 injection text with full skill content and references
+    ///
+    /// Injects the complete SKILL.md content along with any reference documents
+    /// from the skill's references/ directory.
+    ///
+    /// # Arguments
+    /// * `skill` - The fully loaded skill to inject
+    /// * `references` - Reference documents to include
+    ///
+    /// # Returns
+    /// Formatted text with skill name, full content, and references
+    pub fn phase2_injection_with_refs(skill: &LoadedSkill, references: &[String]) -> String {
+        let refs_section = if references.is_empty() {
+            String::new()
+        } else {
+            let refs_content = references
+                .iter()
+                .enumerate()
+                .map(|(i, content)| {
+                    format!("### Reference Document {}\n\n{}", i + 1, content.trim())
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+
+            format!(
+                "\n\n## Reference Materials\n\nThe following reference documents provide additional context:\n\n{}",
+                refs_content
+            )
+        };
+
         format!(
             r#"## Active Skill: {}
 
@@ -70,9 +106,58 @@ The following skill instructions guide how to complete this task:
 
 ---
 {}
----"#,
-            skill.metadata.name, skill.content
+---{}"#,
+            skill.metadata.name, skill.content, refs_section
         )
+    }
+
+    /// Generate Phase 2 injection text with auto-loaded references
+    ///
+    /// Automatically loads reference documents from the skill's references/ directory
+    /// and includes them in the injection. Respects the skill's `references` field
+    /// for filtering which files to load.
+    ///
+    /// # Arguments
+    /// * `skill` - The fully loaded skill to inject
+    /// * `max_total_size` - Maximum total size of all references in bytes (0 = no limit)
+    ///
+    /// # Returns
+    /// Formatted text with skill name, full content, and auto-loaded references
+    pub async fn phase2_injection_auto_refs(skill: &LoadedSkill, max_total_size: usize) -> String {
+        // Load references with optional pattern filtering from skill metadata
+        let references = SkillLoader::load_references_with_patterns(
+            &skill.skill_dir,
+            skill.metadata.references.as_deref(),
+        )
+        .await;
+
+        // Apply size limit if specified
+        let filtered_refs = if max_total_size > 0 {
+            Self::filter_by_size(&references, max_total_size)
+        } else {
+            references
+        };
+
+        Self::phase2_injection_with_refs(skill, &filtered_refs)
+    }
+
+    /// Filter references by total size limit
+    ///
+    /// Includes references until the total size exceeds the limit.
+    /// Documents are included in order, so earlier documents have priority.
+    fn filter_by_size(references: &[String], max_size: usize) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut total_size = 0;
+
+        for content in references {
+            let content_size = content.len();
+            if total_size + content_size <= max_size {
+                result.push(content.clone());
+                total_size += content_size;
+            }
+        }
+
+        result
     }
 
     /// Generate injection text for multiple skills
@@ -161,6 +246,7 @@ mod tests {
                 model: None,
                 allowed_scripts: None,
                 execution_limits: None,
+                references: None,
             },
             content: content.to_string(),
             raw_content: String::new(),
@@ -461,5 +547,202 @@ fn main() {
         // Check table formatting (new format uses tables)
         assert!(result.contains("| test | desc |"));
         assert!(result.contains("| Skill | Description |"));
+    }
+
+    // Tests for phase2_injection_with_refs
+
+    #[test]
+    fn test_phase2_injection_with_refs_empty() {
+        let skill = create_test_skill("test-skill", "Main content");
+        let result = SkillInjector::phase2_injection_with_refs(&skill, &[]);
+
+        assert!(result.contains("## Active Skill: test-skill"));
+        assert!(result.contains("Main content"));
+        // No reference section when empty
+        assert!(!result.contains("## Reference Materials"));
+    }
+
+    #[test]
+    fn test_phase2_injection_with_refs_single() {
+        let skill = create_test_skill("test-skill", "Main content");
+        let refs = vec!["# Reference Doc\n\nSome reference content.".to_string()];
+        let result = SkillInjector::phase2_injection_with_refs(&skill, &refs);
+
+        assert!(result.contains("## Active Skill: test-skill"));
+        assert!(result.contains("Main content"));
+        assert!(result.contains("## Reference Materials"));
+        assert!(result.contains("### Reference Document 1"));
+        assert!(result.contains("# Reference Doc"));
+        assert!(result.contains("Some reference content."));
+    }
+
+    #[test]
+    fn test_phase2_injection_with_refs_multiple() {
+        let skill = create_test_skill("test-skill", "Main content");
+        let refs = vec![
+            "First reference".to_string(),
+            "Second reference".to_string(),
+            "Third reference".to_string(),
+        ];
+        let result = SkillInjector::phase2_injection_with_refs(&skill, &refs);
+
+        assert!(result.contains("## Reference Materials"));
+        assert!(result.contains("### Reference Document 1"));
+        assert!(result.contains("### Reference Document 2"));
+        assert!(result.contains("### Reference Document 3"));
+        assert!(result.contains("First reference"));
+        assert!(result.contains("Second reference"));
+        assert!(result.contains("Third reference"));
+
+        // Check order
+        let pos1 = result.find("First reference").unwrap();
+        let pos2 = result.find("Second reference").unwrap();
+        let pos3 = result.find("Third reference").unwrap();
+        assert!(pos1 < pos2);
+        assert!(pos2 < pos3);
+    }
+
+    #[test]
+    fn test_phase2_injection_with_refs_trims_whitespace() {
+        let skill = create_test_skill("test-skill", "Main content");
+        let refs = vec!["\n\n  Reference with whitespace  \n\n".to_string()];
+        let result = SkillInjector::phase2_injection_with_refs(&skill, &refs);
+
+        assert!(result.contains("Reference with whitespace"));
+        // Check that leading/trailing whitespace is trimmed
+        assert!(!result.contains("\n\n  Reference"));
+    }
+
+    // Tests for filter_by_size
+
+    #[test]
+    fn test_filter_by_size_all_fit() {
+        let refs = vec![
+            "Short".to_string(),       // 5 bytes
+            "Medium text".to_string(), // 11 bytes
+        ];
+        let result = SkillInjector::filter_by_size(&refs, 100);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "Short");
+        assert_eq!(result[1], "Medium text");
+    }
+
+    #[test]
+    fn test_filter_by_size_partial_fit() {
+        let refs = vec![
+            "Short".to_string(),               // 5 bytes
+            "Medium text".to_string(),         // 11 bytes (total: 16)
+            "Very long text here".to_string(), // 19 bytes (would exceed)
+        ];
+        let result = SkillInjector::filter_by_size(&refs, 20);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "Short");
+        assert_eq!(result[1], "Medium text");
+    }
+
+    #[test]
+    fn test_filter_by_size_none_fit() {
+        let refs = vec!["This is too long".to_string()];
+        let result = SkillInjector::filter_by_size(&refs, 5);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_filter_by_size_empty_refs() {
+        let refs: Vec<String> = vec![];
+        let result = SkillInjector::filter_by_size(&refs, 100);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_filter_by_size_exact_limit() {
+        let refs = vec![
+            "12345".to_string(), // 5 bytes
+            "67890".to_string(), // 5 bytes (total: 10)
+        ];
+        let result = SkillInjector::filter_by_size(&refs, 10);
+
+        assert_eq!(result.len(), 2);
+    }
+
+    // Tests for phase2_injection_auto_refs (async tests)
+
+    #[tokio::test]
+    async fn test_phase2_injection_auto_refs_no_refs_dir() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let mut skill = create_test_skill("test-skill", "Main content");
+        skill.skill_dir = temp_dir.path().to_path_buf();
+
+        let result = SkillInjector::phase2_injection_auto_refs(&skill, 0).await;
+
+        assert!(result.contains("## Active Skill: test-skill"));
+        assert!(result.contains("Main content"));
+        // No references when directory doesn't exist
+        assert!(!result.contains("## Reference Materials"));
+    }
+
+    #[tokio::test]
+    async fn test_phase2_injection_auto_refs_with_files() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let refs_dir = temp_dir.path().join("references");
+        std::fs::create_dir(&refs_dir).unwrap();
+
+        // Create test reference files
+        std::fs::write(refs_dir.join("doc1.md"), "# Document 1\n\nFirst reference.").unwrap();
+        std::fs::write(refs_dir.join("doc2.txt"), "Plain text reference.").unwrap();
+
+        let mut skill = create_test_skill("test-skill", "Main content");
+        skill.skill_dir = temp_dir.path().to_path_buf();
+
+        let result = SkillInjector::phase2_injection_auto_refs(&skill, 0).await;
+
+        assert!(result.contains("## Active Skill: test-skill"));
+        assert!(result.contains("Main content"));
+        assert!(result.contains("## Reference Materials"));
+        // Should include both references (order may vary due to filesystem)
+        assert!(result.contains("Document 1") || result.contains("Plain text reference"));
+    }
+
+    #[tokio::test]
+    async fn test_phase2_injection_auto_refs_with_size_limit() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let refs_dir = temp_dir.path().join("references");
+        std::fs::create_dir(&refs_dir).unwrap();
+
+        // Create test files with known sizes
+        std::fs::write(refs_dir.join("small.md"), "Small").unwrap(); // 5 bytes
+        std::fs::write(refs_dir.join("large.md"), "A".repeat(1000)).unwrap(); // 1000 bytes
+
+        let mut skill = create_test_skill("test-skill", "Content");
+        skill.skill_dir = temp_dir.path().to_path_buf();
+
+        // With size limit of 100, only small.md should be included
+        let result = SkillInjector::phase2_injection_auto_refs(&skill, 100).await;
+
+        assert!(result.contains("Small") || !result.contains(&"A".repeat(100)));
+    }
+
+    #[tokio::test]
+    async fn test_phase2_injection_auto_refs_ignores_non_md_txt() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let refs_dir = temp_dir.path().join("references");
+        std::fs::create_dir(&refs_dir).unwrap();
+
+        // Create files with different extensions
+        std::fs::write(refs_dir.join("doc.md"), "Markdown file").unwrap();
+        std::fs::write(refs_dir.join("doc.json"), r#"{"ignored": true}"#).unwrap();
+        std::fs::write(refs_dir.join("doc.yaml"), "ignored: true").unwrap();
+
+        let mut skill = create_test_skill("test-skill", "Content");
+        skill.skill_dir = temp_dir.path().to_path_buf();
+
+        let result = SkillInjector::phase2_injection_auto_refs(&skill, 0).await;
+
+        assert!(result.contains("Markdown file"));
+        assert!(!result.contains("ignored"));
     }
 }

@@ -69,6 +69,21 @@ pub struct SkillMetadata {
     /// Any field not specified inherits from the global default.
     #[serde(rename = "execution-limits", default)]
     pub execution_limits: Option<SkillResourceLimits>,
+
+    /// Reference documents to load (optional, extension field)
+    ///
+    /// Specifies which files from the references/ directory to load.
+    /// Supports glob patterns.
+    ///
+    /// - If None or empty: all .md and .txt files are loaded (default behavior)
+    /// - If Some with patterns: only matching files are loaded
+    ///
+    /// Examples:
+    /// - `["api-docs.md"]` - load only specific file
+    /// - `["*.md"]` - load all markdown files
+    /// - `["guide-*.txt", "api.md"]` - load files matching patterns
+    #[serde(default)]
+    pub references: Option<Vec<String>>,
 }
 
 /// Skill-specific resource limits configuration
@@ -652,6 +667,7 @@ mod tests {
             model: None,
             allowed_scripts: None,
             execution_limits: None,
+            references: None,
         }
     }
 

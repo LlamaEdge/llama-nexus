@@ -1086,6 +1086,11 @@ pub struct SkillConfig {
     /// Script execution configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionConfig>,
+
+    /// Maximum total size of reference documents to load per skill (in bytes)
+    /// Set to 0 for no limit. Default: 102400 (100KB)
+    #[serde(default = "default_max_reference_size")]
+    pub max_reference_size: usize,
 }
 
 fn default_skills_enabled() -> bool {
@@ -1096,12 +1101,17 @@ fn default_skills_directories() -> Vec<String> {
     vec![".skills".to_string(), "~/.llama-nexus/skills".to_string()]
 }
 
+fn default_max_reference_size() -> usize {
+    102400 // 100KB
+}
+
 impl Default for SkillConfig {
     fn default() -> Self {
         Self {
             enabled: default_skills_enabled(),
             directories: default_skills_directories(),
             execution: None,
+            max_reference_size: default_max_reference_size(),
         }
     }
 }

@@ -607,6 +607,16 @@ async fn execute_subtask_with_react(
     let start_time = Instant::now();
     let tool_call_retry_delay = Duration::from_millis(tool_call_retry_delay_ms);
 
+    // Get max_reference_size from config
+    let max_reference_size = state
+        .config
+        .read()
+        .await
+        .skill
+        .as_ref()
+        .map(|s| s.max_reference_size)
+        .unwrap_or(102400); // Default 100KB
+
     // Track the active skill for Phase 2
     let mut active_skill: Option<LoadedSkill> = None;
 
@@ -617,7 +627,9 @@ async fn execute_subtask_with_react(
         available_tools,
         skills_summaries,
         None, // No active skill in initial context
-    );
+        max_reference_size,
+    )
+    .await;
 
     // React loop
     let mut iteration_count: u32 = 0;
@@ -902,7 +914,9 @@ async fn execute_subtask_with_react(
                                 available_tools,
                                 None, // No need for summaries in Phase 2
                                 Some(&loaded_skill),
-                            );
+                                max_reference_size,
+                            )
+                            .await;
 
                             // Finalize iteration trace and continue loop
                             iter_trace.duration = iter_start.elapsed();
@@ -1375,13 +1389,22 @@ fn filter_tools_by_skills<'a>(
 ///
 /// This function supports two-phase skill loading:
 /// - Phase 1 (no active_skill): Injects skills summaries, allows LLM to request a skill
-/// - Phase 2 (with active_skill): Injects full skill content and filtered tools
-fn build_context_for_react(
+/// - Phase 2 (with active_skill): Injects full skill content, references, and filtered tools
+///
+/// # Arguments
+/// * `subtask` - The current subtask being executed
+/// * `previous_results` - Results from dependent subtasks
+/// * `available_tools` - List of available MCP tools
+/// * `skills_summaries` - Optional skill summaries for Phase 1
+/// * `active_skill` - Optional active skill for Phase 2
+/// * `max_reference_size` - Maximum total size of reference documents to load (0 = no limit)
+async fn build_context_for_react(
     subtask: &SubTask,
     previous_results: &[(usize, String)],
     available_tools: &[ToolDescription],
     skills_summaries: Option<&[SkillSummary]>,
     active_skill: Option<&LoadedSkill>,
+    max_reference_size: usize,
 ) -> Vec<ChatCompletionRequestMessage> {
     let mut messages = Vec::new();
 
@@ -1401,9 +1424,10 @@ fn build_context_for_react(
 
     // Build the system prompt based on whether we have an active skill
     let system_prompt = match active_skill {
-        // Phase 2: Active skill - inject full skill content using SkillInjector
+        // Phase 2: Active skill - inject full skill content with references using SkillInjector
         Some(skill) => {
-            let skill_section = SkillInjector::phase2_injection(skill);
+            let skill_section =
+                SkillInjector::phase2_injection_auto_refs(skill, max_reference_size).await;
             format!(
                 r#"You are an AI assistant executing a specific subtask as part of a larger plan.
 
@@ -1837,6 +1861,26 @@ mod tests {
     use super::*;
     use crate::chat::planner::{SubTask, SubTaskStatus};
 
+    /// Test helper: synchronous wrapper for build_context_for_react
+    fn build_context_for_react_sync(
+        subtask: &SubTask,
+        previous_results: &[(usize, String)],
+        available_tools: &[ToolDescription],
+        skills_summaries: Option<&[SkillSummary]>,
+        active_skill: Option<&LoadedSkill>,
+    ) -> Vec<ChatCompletionRequestMessage> {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(build_context_for_react(
+                subtask,
+                previous_results,
+                available_tools,
+                skills_summaries,
+                active_skill,
+                0, // No reference size limit in tests
+            ))
+    }
+
     #[test]
     fn test_build_context_for_react_no_dependencies() {
         let subtask = SubTask::new(0, "Query weather".to_string());
@@ -1847,7 +1891,7 @@ mod tests {
         }];
 
         let messages =
-            build_context_for_react(&subtask, &previous_results, &available_tools, None, None);
+            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, None);
 
         // Should have system message + user message with task
         assert_eq!(messages.len(), 2);
@@ -1864,7 +1908,7 @@ mod tests {
         let available_tools = vec![];
 
         let messages =
-            build_context_for_react(&subtask, &previous_results, &available_tools, None, None);
+            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, None);
 
         // Should have system message + context message + task message
         assert_eq!(messages.len(), 3);
@@ -1884,7 +1928,7 @@ mod tests {
             allowed_tools: vec![],
         }];
 
-        let messages = build_context_for_react(
+        let messages = build_context_for_react_sync(
             &subtask,
             &previous_results,
             &available_tools,
@@ -1929,6 +1973,7 @@ mod tests {
                 model: None,
                 allowed_scripts: None,
                 execution_limits: None,
+                references: None,
             },
             content: "Use the weather tool to query weather.".to_string(),
             raw_content: "".to_string(),
@@ -1939,7 +1984,7 @@ mod tests {
             scripts: Vec::new(),
         };
 
-        let messages = build_context_for_react(
+        let messages = build_context_for_react_sync(
             &subtask,
             &previous_results,
             &available_tools,
@@ -2246,7 +2291,7 @@ mod tests {
         let available_tools = vec![];
 
         let messages =
-            build_context_for_react(&subtask, &previous_results, &available_tools, None, None);
+            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, None);
 
         // Should have system message + context message (with partial deps) + task message
         assert_eq!(messages.len(), 3);
@@ -2262,7 +2307,7 @@ mod tests {
         }];
 
         let messages =
-            build_context_for_react(&subtask, &previous_results, &available_tools, None, None);
+            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, None);
 
         // Check system message contains task description
         if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
@@ -2280,7 +2325,7 @@ mod tests {
         let available_tools: Vec<ToolDescription> = vec![];
 
         let messages =
-            build_context_for_react(&subtask, &previous_results, &available_tools, None, None);
+            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, None);
 
         assert_eq!(messages.len(), 2);
         // System message should still exist even without tools
@@ -2371,7 +2416,7 @@ mod tests {
         ];
 
         let messages =
-            build_context_for_react(&subtask, &previous_results, &tools, Some(&skills), None);
+            build_context_for_react_sync(&subtask, &previous_results, &tools, Some(&skills), None);
 
         // Verify system message contains skills information
         if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
@@ -2402,7 +2447,7 @@ mod tests {
         }];
         let empty_skills: Vec<SkillSummary> = vec![];
 
-        let messages = build_context_for_react(
+        let messages = build_context_for_react_sync(
             &subtask,
             &previous_results,
             &tools,
@@ -2455,7 +2500,7 @@ mod tests {
 
         // Phase 1: no active skill
         let messages =
-            build_context_for_react(&subtask, &previous_results, &tools, Some(&skills), None);
+            build_context_for_react_sync(&subtask, &previous_results, &tools, Some(&skills), None);
 
         if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
             let content = sys_msg.content();
@@ -2504,6 +2549,7 @@ mod tests {
                 model: None,
                 allowed_scripts: None,
                 execution_limits: None,
+                references: None,
             },
             content: r#"# Git Workflow
 
@@ -2527,7 +2573,7 @@ git commit -m "feat: add new feature"
         };
 
         // Phase 2: with active skill
-        let messages = build_context_for_react(
+        let messages = build_context_for_react_sync(
             &subtask,
             &previous_results,
             &tools,
@@ -2595,6 +2641,7 @@ git commit -m "feat: add new feature"
                 model: None,
                 allowed_scripts: None,
                 execution_limits: None,
+                references: None,
             },
             content: "Git skill content".to_string(),
             raw_content: String::new(),
@@ -2804,6 +2851,7 @@ git commit -m "feat: add new feature"
                 model: None,
                 allowed_scripts: None,
                 execution_limits: None,
+                references: None,
             },
             content: "Git workflow instructions".to_string(),
             raw_content: String::new(),
@@ -2840,7 +2888,7 @@ git commit -m "feat: add new feature"
         // Step 6: Build context with active skill
         let subtask = SubTask::new(0, "Git task".to_string());
         let messages =
-            build_context_for_react(&subtask, &[], &all_tools, None, Some(&loaded_skill));
+            build_context_for_react_sync(&subtask, &[], &all_tools, None, Some(&loaded_skill));
 
         // Verify context includes skill
         if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
@@ -3036,6 +3084,7 @@ git commit -m "feat: add new feature"
                 model: None,
                 allowed_scripts: None,
                 execution_limits: None,
+                references: None,
             },
             content: "Calculator instructions".to_string(),
             raw_content: String::new(),
@@ -3086,6 +3135,7 @@ git commit -m "feat: add new feature"
                 model: None,
                 allowed_scripts: None,
                 execution_limits: None,
+                references: None,
             },
             content: "Skill content".to_string(),
             raw_content: String::new(),
@@ -3138,6 +3188,7 @@ git commit -m "feat: add new feature"
                 model: None,
                 allowed_scripts: None,
                 execution_limits: None,
+                references: None,
             },
             content: "Calculator".to_string(),
             raw_content: String::new(),
