@@ -84,6 +84,28 @@ pub struct SkillMetadata {
     /// - `["guide-*.txt", "api.md"]` - load files matching patterns
     #[serde(default)]
     pub references: Option<Vec<String>>,
+
+    /// Skill priority for multi-skill resolution (optional, extension field)
+    ///
+    /// Higher priority skills take precedence in conflict resolution.
+    /// Default priority is 0. Range: -100 to 100.
+    ///
+    /// Examples:
+    /// - `priority: 10` - higher priority, loaded first
+    /// - `priority: -5` - lower priority, loaded after higher priority skills
+    #[serde(default)]
+    pub priority: Option<i32>,
+
+    /// Conflicting skills (optional, extension field)
+    ///
+    /// Lists skills that cannot be active simultaneously with this skill.
+    /// When conflict is detected, the higher priority skill wins.
+    ///
+    /// Examples:
+    /// - `conflicts: ["other-skill"]` - conflicts with specific skill
+    /// - `conflicts: ["skill-a", "skill-b"]` - conflicts with multiple skills
+    #[serde(default)]
+    pub conflicts: Option<Vec<String>>,
 }
 
 /// Skill-specific resource limits configuration
@@ -668,6 +690,8 @@ mod tests {
             allowed_scripts: None,
             execution_limits: None,
             references: None,
+            priority: None,
+            conflicts: None,
         }
     }
 

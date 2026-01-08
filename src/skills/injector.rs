@@ -247,6 +247,8 @@ mod tests {
                 allowed_scripts: None,
                 execution_limits: None,
                 references: None,
+                priority: None,
+                conflicts: None,
             },
             content: content.to_string(),
             raw_content: String::new(),

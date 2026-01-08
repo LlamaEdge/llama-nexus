@@ -2,15 +2,24 @@
 //!
 //! Detects `<use_skill>skill-name</use_skill>` tags in LLM output
 //! to trigger Phase 2 skill loading.
+//!
+//! ## Features
+//! - Single skill detection: `<use_skill>skill-name</use_skill>`
+//! - Multiple skills (comma-separated): `<use_skill>skill-a, skill-b</use_skill>`
+//! - Priority resolution: Sort skills by priority when metadata available
+//! - Conflict detection: Remove conflicting skills based on priority
 
-use std::sync::LazyLock;
+use std::{collections::HashSet, sync::LazyLock};
 
 use regex::Regex;
 
+use super::types::LoadedSkill;
+
 /// Regex pattern for detecting skill usage tags
 /// Matches: <use_skill>skill-name</use_skill>
+/// Also matches comma-separated skills: <use_skill>skill-a, skill-b</use_skill>
 static USE_SKILL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<use_skill>\s*([a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9])\s*</use_skill>")
+    Regex::new(r"<use_skill>\s*([a-z0-9][a-z0-9-]*[a-z0-9](?:\s*,\s*[a-z0-9][a-z0-9-]*[a-z0-9])*|[a-z0-9])\s*</use_skill>")
         .expect("Invalid regex pattern")
 });
 
@@ -24,16 +33,32 @@ pub struct SkillDetector;
 impl SkillDetector {
     /// Detect all skill names requested in the text
     ///
+    /// Supports both single skills and comma-separated skill lists:
+    /// - `<use_skill>skill-a</use_skill>` -> ["skill-a"]
+    /// - `<use_skill>skill-a, skill-b</use_skill>` -> ["skill-a", "skill-b"]
+    ///
     /// # Arguments
     /// * `text` - The LLM response text to scan
     ///
     /// # Returns
-    /// A vector of skill names found in the text
+    /// A vector of unique skill names found in the text (deduplicated)
     pub fn detect(text: &str) -> Vec<String> {
-        USE_SKILL_PATTERN
-            .captures_iter(text)
-            .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
-            .collect()
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+
+        for cap in USE_SKILL_PATTERN.captures_iter(text) {
+            if let Some(m) = cap.get(1) {
+                // Handle comma-separated skills
+                for skill in m.as_str().split(',') {
+                    let skill = skill.trim();
+                    if !skill.is_empty() && seen.insert(skill.to_string()) {
+                        result.push(skill.to_string());
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     /// Detect the first skill name in the text
@@ -79,6 +104,142 @@ impl SkillDetector {
         let skills = Self::detect(text);
         let cleaned = Self::strip_tags(text);
         (skills, cleaned)
+    }
+
+    /// Resolve skills by priority, returning sorted list (highest priority first)
+    ///
+    /// # Arguments
+    /// * `skill_names` - List of detected skill names
+    /// * `loaded_skills` - Available loaded skills with metadata
+    ///
+    /// # Returns
+    /// Skills sorted by priority (highest first). Skills not found in
+    /// loaded_skills are assigned default priority 0.
+    pub fn resolve_by_priority(
+        skill_names: &[String],
+        loaded_skills: &[LoadedSkill],
+    ) -> Vec<String> {
+        let mut skills_with_priority: Vec<(String, i32)> = skill_names
+            .iter()
+            .map(|name| {
+                let priority = loaded_skills
+                    .iter()
+                    .find(|s| &s.metadata.name == name)
+                    .and_then(|s| s.metadata.priority)
+                    .unwrap_or(0);
+                (name.clone(), priority)
+            })
+            .collect();
+
+        // Sort by priority descending (higher priority first)
+        skills_with_priority.sort_by(|a, b| b.1.cmp(&a.1));
+
+        skills_with_priority
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// Detect and resolve conflicts between skills
+    ///
+    /// When skills conflict, the higher priority skill is kept and
+    /// conflicting lower priority skills are removed.
+    ///
+    /// # Arguments
+    /// * `skill_names` - List of skill names (should be priority-sorted)
+    /// * `loaded_skills` - Available loaded skills with metadata
+    ///
+    /// # Returns
+    /// Tuple of (resolved skills, removed conflicts as (skill, reason) pairs)
+    pub fn resolve_conflicts(
+        skill_names: &[String],
+        loaded_skills: &[LoadedSkill],
+    ) -> (Vec<String>, Vec<(String, String)>) {
+        let mut resolved: Vec<String> = Vec::new();
+        let mut removed: Vec<(String, String)> = Vec::new();
+        // Track which skills are excluded and which higher-priority skill caused the exclusion
+        let mut excluded: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        for skill_name in skill_names {
+            // Check if already excluded due to conflict from a higher-priority skill
+            if let Some(conflicting_skill) = excluded.get(skill_name) {
+                removed.push((
+                    skill_name.clone(),
+                    format!(
+                        "conflicts with higher priority skill '{}'",
+                        conflicting_skill
+                    ),
+                ));
+                continue;
+            }
+
+            // Find the skill metadata
+            if let Some(skill) = loaded_skills
+                .iter()
+                .find(|s| &s.metadata.name == skill_name)
+            {
+                // Check if this skill conflicts with any already resolved skill
+                let mut has_conflict = false;
+                for resolved_skill in &resolved {
+                    if let Some(resolved_meta) = loaded_skills
+                        .iter()
+                        .find(|s| &s.metadata.name == resolved_skill)
+                        && let Some(ref conflicts) = resolved_meta.metadata.conflicts
+                        && conflicts.contains(skill_name)
+                    {
+                        // This skill conflicts with an already resolved higher-priority skill
+                        removed.push((
+                            skill_name.clone(),
+                            format!("conflicts with higher priority skill '{}'", resolved_skill),
+                        ));
+                        has_conflict = true;
+                        break;
+                    }
+                }
+
+                if !has_conflict {
+                    // Add this skill to resolved
+                    resolved.push(skill_name.clone());
+
+                    // Mark skills that this skill conflicts with as excluded
+                    if let Some(ref conflicts) = skill.metadata.conflicts {
+                        for conflict in conflicts {
+                            excluded.insert(conflict.clone(), skill_name.clone());
+                        }
+                    }
+                }
+            } else {
+                // Skill not found in loaded_skills, keep it anyway (no conflict info available)
+                resolved.push(skill_name.clone());
+            }
+        }
+
+        (resolved, removed)
+    }
+
+    /// Detect skills, resolve by priority, and handle conflicts
+    ///
+    /// This is the main entry point for multi-skill detection with
+    /// full priority and conflict resolution.
+    ///
+    /// # Arguments
+    /// * `text` - The LLM response text to scan
+    /// * `loaded_skills` - Available loaded skills with metadata
+    ///
+    /// # Returns
+    /// Tuple of (resolved skills, removed skills with reasons)
+    pub fn detect_and_resolve(
+        text: &str,
+        loaded_skills: &[LoadedSkill],
+    ) -> (Vec<String>, Vec<(String, String)>) {
+        let detected = Self::detect(text);
+        if detected.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let prioritized = Self::resolve_by_priority(&detected, loaded_skills);
+        Self::resolve_conflicts(&prioritized, loaded_skills)
     }
 }
 
@@ -342,5 +503,316 @@ mod tests {
         let skills = SkillDetector::detect(&text);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0], long_name);
+    }
+
+    // ==========================================================================
+    // Multi-skill Detection Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_comma_separated_skills() {
+        let text = "<use_skill>skill-a, skill-b</use_skill>";
+        let skills = SkillDetector::detect(text);
+        assert_eq!(skills, vec!["skill-a", "skill-b"]);
+    }
+
+    #[test]
+    fn test_comma_separated_skills_no_spaces() {
+        let text = "<use_skill>skill-a,skill-b,skill-c</use_skill>";
+        let skills = SkillDetector::detect(text);
+        assert_eq!(skills, vec!["skill-a", "skill-b", "skill-c"]);
+    }
+
+    #[test]
+    fn test_comma_separated_skills_extra_spaces() {
+        let text = "<use_skill>  skill-a  ,   skill-b  </use_skill>";
+        let skills = SkillDetector::detect(text);
+        assert_eq!(skills, vec!["skill-a", "skill-b"]);
+    }
+
+    #[test]
+    fn test_deduplicate_skills() {
+        // Same skill in comma-separated list
+        let text1 = "<use_skill>skill-a, skill-a</use_skill>";
+        let skills1 = SkillDetector::detect(text1);
+        assert_eq!(skills1, vec!["skill-a"]);
+
+        // Same skill in separate tags
+        let text2 = "<use_skill>skill-a</use_skill> and <use_skill>skill-a</use_skill>";
+        let skills2 = SkillDetector::detect(text2);
+        assert_eq!(skills2, vec!["skill-a"]);
+
+        // Mixed
+        let text3 = "<use_skill>skill-a, skill-b</use_skill> and <use_skill>skill-b</use_skill>";
+        let skills3 = SkillDetector::detect(text3);
+        assert_eq!(skills3, vec!["skill-a", "skill-b"]);
+    }
+
+    #[test]
+    fn test_mixed_single_and_comma_separated() {
+        let text = "<use_skill>first</use_skill> then <use_skill>second, third</use_skill>";
+        let skills = SkillDetector::detect(text);
+        assert_eq!(skills, vec!["first", "second", "third"]);
+    }
+
+    // ==========================================================================
+    // Priority Resolution Tests
+    // ==========================================================================
+
+    fn create_test_loaded_skill(
+        name: &str,
+        priority: Option<i32>,
+        conflicts: Option<Vec<String>>,
+    ) -> LoadedSkill {
+        use std::path::PathBuf;
+
+        use chrono::Utc;
+
+        use crate::skills::SkillMetadata;
+
+        LoadedSkill {
+            metadata: SkillMetadata {
+                name: name.to_string(),
+                description: format!("Test skill {}", name),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: None,
+                model: None,
+                allowed_scripts: None,
+                execution_limits: None,
+                references: None,
+                priority,
+                conflicts,
+            },
+            content: format!("Content for {}", name),
+            raw_content: String::new(),
+            skill_dir: PathBuf::new(),
+            file_path: String::new(),
+            enabled: true,
+            loaded_at: Utc::now(),
+            scripts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_by_priority_basic() {
+        let loaded_skills = vec![
+            create_test_loaded_skill("low-priority", Some(-10), None),
+            create_test_loaded_skill("high-priority", Some(50), None),
+            create_test_loaded_skill("medium-priority", Some(10), None),
+        ];
+
+        let skill_names = vec![
+            "low-priority".to_string(),
+            "high-priority".to_string(),
+            "medium-priority".to_string(),
+        ];
+
+        let sorted = SkillDetector::resolve_by_priority(&skill_names, &loaded_skills);
+
+        assert_eq!(
+            sorted,
+            vec!["high-priority", "medium-priority", "low-priority"]
+        );
+    }
+
+    #[test]
+    fn test_resolve_by_priority_default_zero() {
+        let loaded_skills = vec![
+            create_test_loaded_skill("with-priority", Some(10), None),
+            create_test_loaded_skill("no-priority", None, None),
+        ];
+
+        let skill_names = vec!["no-priority".to_string(), "with-priority".to_string()];
+
+        let sorted = SkillDetector::resolve_by_priority(&skill_names, &loaded_skills);
+
+        // with-priority (10) > no-priority (0)
+        assert_eq!(sorted, vec!["with-priority", "no-priority"]);
+    }
+
+    #[test]
+    fn test_resolve_by_priority_unknown_skill() {
+        let loaded_skills = vec![create_test_loaded_skill("known", Some(10), None)];
+
+        let skill_names = vec!["known".to_string(), "unknown".to_string()];
+
+        let sorted = SkillDetector::resolve_by_priority(&skill_names, &loaded_skills);
+
+        // known (10) > unknown (0 default)
+        assert_eq!(sorted, vec!["known", "unknown"]);
+    }
+
+    #[test]
+    fn test_resolve_by_priority_equal_priority() {
+        let loaded_skills = vec![
+            create_test_loaded_skill("skill-a", Some(10), None),
+            create_test_loaded_skill("skill-b", Some(10), None),
+        ];
+
+        let skill_names = vec!["skill-a".to_string(), "skill-b".to_string()];
+
+        let sorted = SkillDetector::resolve_by_priority(&skill_names, &loaded_skills);
+
+        // Both have same priority, order should be stable
+        assert_eq!(sorted.len(), 2);
+        assert!(sorted.contains(&"skill-a".to_string()));
+        assert!(sorted.contains(&"skill-b".to_string()));
+    }
+
+    // ==========================================================================
+    // Conflict Resolution Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_resolve_conflicts_no_conflicts() {
+        let loaded_skills = vec![
+            create_test_loaded_skill("skill-a", Some(10), None),
+            create_test_loaded_skill("skill-b", Some(5), None),
+        ];
+
+        let skill_names = vec!["skill-a".to_string(), "skill-b".to_string()];
+
+        let (resolved, removed) = SkillDetector::resolve_conflicts(&skill_names, &loaded_skills);
+
+        assert_eq!(resolved, vec!["skill-a", "skill-b"]);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_conflicts_basic() {
+        let loaded_skills = vec![
+            create_test_loaded_skill("high", Some(20), Some(vec!["low".to_string()])),
+            create_test_loaded_skill("low", Some(5), None),
+        ];
+
+        // high conflicts with low, high has higher priority
+        let skill_names = vec!["high".to_string(), "low".to_string()];
+
+        let (resolved, removed) = SkillDetector::resolve_conflicts(&skill_names, &loaded_skills);
+
+        assert_eq!(resolved, vec!["high"]);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, "low");
+        assert!(
+            removed[0]
+                .1
+                .contains("conflicts with higher priority skill 'high'")
+        );
+    }
+
+    #[test]
+    fn test_resolve_conflicts_bidirectional() {
+        // Both skills declare conflict with each other
+        let loaded_skills = vec![
+            create_test_loaded_skill("skill-a", Some(20), Some(vec!["skill-b".to_string()])),
+            create_test_loaded_skill("skill-b", Some(10), Some(vec!["skill-a".to_string()])),
+        ];
+
+        let skill_names = vec!["skill-a".to_string(), "skill-b".to_string()];
+
+        let (resolved, removed) = SkillDetector::resolve_conflicts(&skill_names, &loaded_skills);
+
+        // skill-a (higher priority) wins
+        assert_eq!(resolved, vec!["skill-a"]);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, "skill-b");
+    }
+
+    #[test]
+    fn test_resolve_conflicts_chain() {
+        // A conflicts with B, B conflicts with C
+        let loaded_skills = vec![
+            create_test_loaded_skill("skill-a", Some(30), Some(vec!["skill-b".to_string()])),
+            create_test_loaded_skill("skill-b", Some(20), Some(vec!["skill-c".to_string()])),
+            create_test_loaded_skill("skill-c", Some(10), None),
+        ];
+
+        let skill_names = vec![
+            "skill-a".to_string(),
+            "skill-b".to_string(),
+            "skill-c".to_string(),
+        ];
+
+        let (resolved, removed) = SkillDetector::resolve_conflicts(&skill_names, &loaded_skills);
+
+        // A excludes B, C remains (no direct conflict with A)
+        assert_eq!(resolved, vec!["skill-a", "skill-c"]);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, "skill-b");
+    }
+
+    #[test]
+    fn test_resolve_conflicts_unknown_skill() {
+        let loaded_skills = vec![create_test_loaded_skill(
+            "known",
+            Some(10),
+            Some(vec!["unknown".to_string()]),
+        )];
+
+        let skill_names = vec!["known".to_string(), "unknown".to_string()];
+
+        let (resolved, removed) = SkillDetector::resolve_conflicts(&skill_names, &loaded_skills);
+
+        // known excludes unknown
+        assert_eq!(resolved, vec!["known"]);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, "unknown");
+        assert!(
+            removed[0]
+                .1
+                .contains("conflicts with higher priority skill 'known'")
+        );
+    }
+
+    // ==========================================================================
+    // Full Detection and Resolution Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_detect_and_resolve_basic() {
+        let loaded_skills = vec![
+            create_test_loaded_skill("high-priority", Some(20), None),
+            create_test_loaded_skill("low-priority", Some(5), None),
+        ];
+
+        let text = "<use_skill>low-priority, high-priority</use_skill>";
+
+        let (resolved, removed) = SkillDetector::detect_and_resolve(text, &loaded_skills);
+
+        // Should be sorted by priority
+        assert_eq!(resolved, vec!["high-priority", "low-priority"]);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_detect_and_resolve_with_conflict() {
+        let loaded_skills = vec![
+            create_test_loaded_skill("primary", Some(20), Some(vec!["secondary".to_string()])),
+            create_test_loaded_skill("secondary", Some(10), None),
+            create_test_loaded_skill("unrelated", Some(5), None),
+        ];
+
+        let text = "<use_skill>secondary, primary, unrelated</use_skill>";
+
+        let (resolved, removed) = SkillDetector::detect_and_resolve(text, &loaded_skills);
+
+        // primary wins over secondary due to conflict, unrelated stays
+        assert_eq!(resolved, vec!["primary", "unrelated"]);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, "secondary");
+    }
+
+    #[test]
+    fn test_detect_and_resolve_empty() {
+        let loaded_skills = vec![create_test_loaded_skill("skill-a", Some(10), None)];
+
+        let text = "No skills here";
+
+        let (resolved, removed) = SkillDetector::detect_and_resolve(text, &loaded_skills);
+
+        assert!(resolved.is_empty());
+        assert!(removed.is_empty());
     }
 }
