@@ -52,7 +52,8 @@ use crate::{
     },
     server::{RoutingPolicy, ServerKind},
     skills::{
-        LoadedSkill, ScriptContext, SkillDetector, SkillInjector, SkillRegistry, SkillSummary,
+        LoadedSkill, ScriptContext, SkillDetector, SkillInjector, SkillLoader, SkillRegistry,
+        SkillSummary,
     },
 };
 
@@ -65,6 +66,9 @@ const INTERNAL_TOOL_PREFIX: &str = "internal";
 
 /// Skill script execution tool name
 const SKILL_RUN_SCRIPT_TOOL: &str = "skill_run_script";
+
+/// Skill asset loading tool name
+const SKILL_LOAD_ASSET_TOOL: &str = "skill_load_asset";
 
 /// Full name for the skill_run_script internal tool
 fn internal_tool_name(tool_name: &str) -> String {
@@ -564,11 +568,15 @@ async fn get_available_tools() -> Vec<ToolDescription> {
         }
     }
 
-    // Add internal skill_run_script tool (only available when skills are loaded)
+    // Add internal tools (only available when skills are loaded)
     if SkillRegistry::global().is_ok() {
         tools.push(ToolDescription {
             name: internal_tool_name(SKILL_RUN_SCRIPT_TOOL),
             description: "Execute a script from an active skill. Use this tool to run scripts in the skill's scripts/ directory.".to_string(),
+        });
+        tools.push(ToolDescription {
+            name: internal_tool_name(SKILL_LOAD_ASSET_TOOL),
+            description: "Load an asset file from the active skill's assets/ directory. Supports template variable replacement and JSON/YAML parsing.".to_string(),
         });
     }
 
@@ -1131,6 +1139,10 @@ async fn execute_tool_call(
 /// - `internal__skill_run_script`: Execute a script from the active skill
 ///   - Arguments: `script_name` (required), `args` (optional array)
 ///   - Requires an active skill to be loaded
+///
+/// - `internal__skill_load_asset`: Load an asset file from the active skill
+///   - Arguments: `asset_name` (required), `variables` (optional object), `parse_as` (optional)
+///   - Requires an active skill to be loaded
 async fn execute_internal_tool(
     full_tool_name: &str,
     tool_args: serde_json::Value,
@@ -1157,6 +1169,17 @@ async fn execute_internal_tool(
                 tool_args,
                 active_skill,
                 conv_id,
+                request_id,
+                &mut tool_trace,
+                iter_trace,
+                start_time,
+            )
+            .await
+        }
+        SKILL_LOAD_ASSET_TOOL => {
+            execute_skill_load_asset(
+                tool_args,
+                active_skill,
                 request_id,
                 &mut tool_trace,
                 iter_trace,
@@ -1284,6 +1307,194 @@ async fn execute_skill_run_script(
             Err(ServerError::Operation(err_msg))
         }
     }
+}
+
+/// Executes the skill_load_asset internal tool.
+///
+/// # Arguments Schema
+/// ```json
+/// {
+///   "asset_name": "template.md",  // Required: name of the asset file
+///   "variables": {                 // Optional: variables for template replacement
+///     "name": "John",
+///     "date": "2024-01-15"
+///   },
+///   "parse_as": "json"            // Optional: parse content as "json", "yaml", or "markdown"
+/// }
+/// ```
+///
+/// # Returns
+/// The asset content as a formatted string, optionally with variables replaced
+/// and/or parsed as structured data.
+async fn execute_skill_load_asset(
+    tool_args: serde_json::Value,
+    active_skill: Option<&LoadedSkill>,
+    request_id: &str,
+    tool_trace: &mut ToolCallTrace,
+    iter_trace: &mut IterationTrace,
+    start_time: Instant,
+) -> ServerResult<String> {
+    // Require an active skill
+    let skill = active_skill.ok_or_else(|| {
+        let err_msg =
+            "skill_load_asset requires an active skill. Use <use_skill> to activate a skill first.";
+        tool_trace.set_error(err_msg.to_string(), start_time.elapsed());
+        iter_trace.add_tool_call(tool_trace.clone());
+        ServerError::Operation(err_msg.to_string())
+    })?;
+
+    // Parse arguments
+    let asset_name = tool_args
+        .get("asset_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            let err_msg = "skill_load_asset requires 'asset_name' argument";
+            tool_trace.set_error(err_msg.to_string(), start_time.elapsed());
+            iter_trace.add_tool_call(tool_trace.clone());
+            ServerError::Operation(err_msg.to_string())
+        })?;
+
+    let variables = tool_args
+        .get("variables")
+        .and_then(|v| v.as_object())
+        .cloned();
+
+    let parse_as = tool_args
+        .get("parse_as")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase());
+
+    dual_info!(
+        "📦 Loading skill asset: {} (skill: {}, parse_as: {:?}) - request_id: {}",
+        asset_name,
+        skill.metadata.name,
+        parse_as,
+        request_id
+    );
+
+    // Load asset content
+    let content = SkillLoader::load_asset_string(&skill.skill_dir, asset_name)
+        .await
+        .ok_or_else(|| {
+            let err_msg = format!(
+                "Asset '{}' not found in skill '{}'",
+                asset_name, skill.metadata.name
+            );
+            tool_trace.set_error(err_msg.clone(), start_time.elapsed());
+            iter_trace.add_tool_call(tool_trace.clone());
+            ServerError::Operation(err_msg)
+        })?;
+
+    // Apply template variable replacement if variables provided
+    let content = if let Some(vars) = variables {
+        apply_template_variables(&content, &vars)
+    } else {
+        content
+    };
+
+    // Parse content if requested
+    let result = match parse_as.as_deref() {
+        Some("json") => parse_as_json(&content, asset_name)?,
+        Some("yaml") => parse_as_yaml(&content, asset_name)?,
+        Some("markdown") | Some("md") => format_as_markdown(&content, asset_name),
+        Some(unknown) => {
+            let err_msg = format!(
+                "Unknown parse_as format '{}'. Supported: json, yaml, markdown",
+                unknown
+            );
+            tool_trace.set_error(err_msg.clone(), start_time.elapsed());
+            iter_trace.add_tool_call(tool_trace.clone());
+            return Err(ServerError::Operation(err_msg));
+        }
+        None => format!(
+            "Asset '{}' loaded successfully.\n\nContent:\n{}",
+            asset_name, content
+        ),
+    };
+
+    dual_info!(
+        "✅ Asset loaded: {} (size: {} bytes) - request_id: {}",
+        asset_name,
+        result.len(),
+        request_id
+    );
+
+    tool_trace.set_result(result.clone(), start_time.elapsed());
+    iter_trace.add_tool_call(tool_trace.clone());
+    Ok(result)
+}
+
+/// Apply template variable replacement using {{variable}} syntax.
+///
+/// Replaces occurrences of `{{variable_name}}` with the corresponding value
+/// from the variables map. Variables that are not found remain unchanged.
+fn apply_template_variables(
+    content: &str,
+    variables: &serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let mut result = content.to_string();
+
+    for (key, value) in variables {
+        let placeholder = format!("{{{{{}}}}}", key); // {{key}}
+        let replacement = match value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => "null".to_string(),
+            _ => value.to_string(), // For arrays/objects, use JSON representation
+        };
+        result = result.replace(&placeholder, &replacement);
+    }
+
+    result
+}
+
+/// Parse content as JSON and format for display.
+fn parse_as_json(content: &str, asset_name: &str) -> ServerResult<String> {
+    let parsed: serde_json::Value = serde_json::from_str(content).map_err(|e| {
+        ServerError::Operation(format!("Failed to parse '{}' as JSON: {}", asset_name, e))
+    })?;
+
+    let formatted = serde_json::to_string_pretty(&parsed).map_err(|e| {
+        ServerError::Operation(format!(
+            "Failed to format JSON from '{}': {}",
+            asset_name, e
+        ))
+    })?;
+
+    Ok(format!(
+        "Asset '{}' loaded and parsed as JSON.\n\nContent:\n```json\n{}\n```",
+        asset_name, formatted
+    ))
+}
+
+/// Parse content as YAML and format for display.
+fn parse_as_yaml(content: &str, asset_name: &str) -> ServerResult<String> {
+    // Parse YAML to validate it
+    let parsed: serde_yaml::Value = serde_yaml::from_str(content).map_err(|e| {
+        ServerError::Operation(format!("Failed to parse '{}' as YAML: {}", asset_name, e))
+    })?;
+
+    // Re-serialize for consistent formatting
+    let formatted = serde_yaml::to_string(&parsed).map_err(|e| {
+        ServerError::Operation(format!(
+            "Failed to format YAML from '{}': {}",
+            asset_name, e
+        ))
+    })?;
+
+    Ok(format!(
+        "Asset '{}' loaded and parsed as YAML.\n\nContent:\n```yaml\n{}\n```",
+        asset_name, formatted
+    ))
+}
+
+/// Format content as Markdown for display.
+fn format_as_markdown(content: &str, asset_name: &str) -> String {
+    format!(
+        "Asset '{}' loaded as Markdown.\n\nContent:\n\n{}",
+        asset_name, content
+    )
 }
 
 /// Determines if an error is retryable for subtask execution.
@@ -1460,9 +1671,22 @@ async fn build_context_for_react(
 <thought>I need to run a script from the skill to process data</thought>
 <action>{{"name": "internal__skill_run_script", "arguments": {{"script_name": "process.py", "args": ["--input", "data.csv", "--output", "result.json"]}}}}</action>
 
-**Important**: When using `internal__skill_run_script`:
-- `script_name`: Just the filename (e.g., "convert.py"), not the full path
-- `args`: Array of command line arguments to pass to the script
+### Example 3: Load an Asset with Template Variables
+<thought>I need to load a template and fill in the variables</thought>
+<action>{{"name": "internal__skill_load_asset", "arguments": {{"asset_name": "report-template.md", "variables": {{"title": "Monthly Report", "date": "2024-01-15"}}}}}}</action>
+
+### Example 4: Load and Parse a JSON Configuration
+<thought>I need to read the configuration file as structured data</thought>
+<action>{{"name": "internal__skill_load_asset", "arguments": {{"asset_name": "config.json", "parse_as": "json"}}}}</action>
+
+**Important**: When using internal tools:
+- `internal__skill_run_script`:
+  - `script_name`: Just the filename (e.g., "convert.py"), not the full path
+  - `args`: Array of command line arguments to pass to the script
+- `internal__skill_load_asset`:
+  - `asset_name`: Just the filename in the assets/ directory
+  - `variables`: Object with key-value pairs to replace {{key}} in the template
+  - `parse_as`: Optional format ("json", "yaml", "markdown") for structured parsing
 
 After receiving the observation, provide your final answer:
 <thought>I received the result</thought>
@@ -1622,7 +1846,7 @@ fn match_wildcard_pattern(pattern: &str, tool_name: &str) -> bool {
 /// Builds the tools JSON for the LLM request.
 ///
 /// If `allowed_patterns` is provided, only tools matching the patterns are included.
-/// Internal tools (like `skill_run_script`) get custom parameter schemas.
+/// Internal tools (like `skill_run_script`, `skill_load_asset`) get custom parameter schemas.
 fn build_tools_json(
     available_tools: &[ToolDescription],
     allowed_patterns: Option<&[String]>,
@@ -1632,8 +1856,9 @@ fn build_tools_json(
     let tools: Vec<serde_json::Value> = filtered_tools
         .iter()
         .map(|tool| {
-            // Check if this is the skill_run_script internal tool
+            // Check if this is an internal tool with custom schema
             let is_skill_run_script = tool.name == internal_tool_name(SKILL_RUN_SCRIPT_TOOL);
+            let is_skill_load_asset = tool.name == internal_tool_name(SKILL_LOAD_ASSET_TOOL);
 
             let parameters = if is_skill_run_script {
                 // Custom schema for skill_run_script
@@ -1651,6 +1876,27 @@ fn build_tools_json(
                         }
                     },
                     "required": ["script_name"]
+                })
+            } else if is_skill_load_asset {
+                // Custom schema for skill_load_asset
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "asset_name": {
+                            "type": "string",
+                            "description": "Name of the asset file to load (e.g., 'template.md', 'config.json')"
+                        },
+                        "variables": {
+                            "type": "object",
+                            "description": "Optional variables for template replacement. Use {{variable}} syntax in the template."
+                        },
+                        "parse_as": {
+                            "type": "string",
+                            "enum": ["json", "yaml", "markdown"],
+                            "description": "Optional format to parse the content as. If not specified, returns raw content."
+                        }
+                    },
+                    "required": ["asset_name"]
                 })
             } else {
                 // Default schema for MCP tools
@@ -3220,5 +3466,176 @@ git commit -m "feat: add new feature"
 
         let filtered = filter_tools_by_skills(&tools, Some(&skills), None);
         assert!(filtered.is_empty());
+    }
+
+    // ============================================================================
+    // Template Variable Replacement Tests
+    // ============================================================================
+
+    #[test]
+    fn test_apply_template_variables_string() {
+        let mut vars = serde_json::Map::new();
+        vars.insert("name".to_string(), serde_json::json!("John"));
+        vars.insert("age".to_string(), serde_json::json!(30));
+
+        let content = "Hello, {{name}}! You are {{age}} years old.";
+        let result = apply_template_variables(content, &vars);
+
+        assert_eq!(result, "Hello, John! You are 30 years old.");
+    }
+
+    #[test]
+    fn test_apply_template_variables_multiple_same_var() {
+        let mut vars = serde_json::Map::new();
+        vars.insert("item".to_string(), serde_json::json!("apple"));
+
+        let content = "Buy {{item}}, eat {{item}}, enjoy {{item}}.";
+        let result = apply_template_variables(content, &vars);
+
+        assert_eq!(result, "Buy apple, eat apple, enjoy apple.");
+    }
+
+    #[test]
+    fn test_apply_template_variables_missing_var() {
+        let vars = serde_json::Map::new();
+
+        let content = "Hello, {{name}}!";
+        let result = apply_template_variables(content, &vars);
+
+        // Missing variables remain unchanged
+        assert_eq!(result, "Hello, {{name}}!");
+    }
+
+    #[test]
+    fn test_apply_template_variables_bool_and_null() {
+        let mut vars = serde_json::Map::new();
+        vars.insert("active".to_string(), serde_json::json!(true));
+        vars.insert("empty".to_string(), serde_json::json!(null));
+
+        let content = "Active: {{active}}, Empty: {{empty}}";
+        let result = apply_template_variables(content, &vars);
+
+        assert_eq!(result, "Active: true, Empty: null");
+    }
+
+    #[test]
+    fn test_apply_template_variables_array_object() {
+        let mut vars = serde_json::Map::new();
+        vars.insert("list".to_string(), serde_json::json!([1, 2, 3]));
+        vars.insert("obj".to_string(), serde_json::json!({"key": "value"}));
+
+        let content = "List: {{list}}, Obj: {{obj}}";
+        let result = apply_template_variables(content, &vars);
+
+        assert!(result.contains("[1,2,3]"));
+        assert!(result.contains(r#"{"key":"value"}"#));
+    }
+
+    #[test]
+    fn test_apply_template_variables_empty_content() {
+        let mut vars = serde_json::Map::new();
+        vars.insert("name".to_string(), serde_json::json!("John"));
+
+        let content = "";
+        let result = apply_template_variables(content, &vars);
+
+        assert_eq!(result, "");
+    }
+
+    // ============================================================================
+    // JSON/YAML Parsing Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_as_json_valid() {
+        let content = r#"{"name": "test", "value": 42}"#;
+        let result = parse_as_json(content, "config.json").unwrap();
+
+        assert!(result.contains("config.json"));
+        assert!(result.contains("parsed as JSON"));
+        assert!(result.contains("\"name\": \"test\""));
+        assert!(result.contains("\"value\": 42"));
+    }
+
+    #[test]
+    fn test_parse_as_json_invalid() {
+        let content = "not valid json {";
+        let result = parse_as_json(content, "bad.json");
+
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Failed to parse"));
+        }
+    }
+
+    #[test]
+    fn test_parse_as_yaml_valid() {
+        let content = "name: test\nvalue: 42";
+        let result = parse_as_yaml(content, "config.yaml").unwrap();
+
+        assert!(result.contains("config.yaml"));
+        assert!(result.contains("parsed as YAML"));
+        assert!(result.contains("name:"));
+        assert!(result.contains("test"));
+    }
+
+    #[test]
+    fn test_parse_as_yaml_invalid() {
+        let content = ":\n  invalid: [unclosed";
+        let result = parse_as_yaml(content, "bad.yaml");
+
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Failed to parse"));
+        }
+    }
+
+    #[test]
+    fn test_format_as_markdown() {
+        let content = "# Title\n\nSome content here.";
+        let result = format_as_markdown(content, "doc.md");
+
+        assert!(result.contains("doc.md"));
+        assert!(result.contains("loaded as Markdown"));
+        assert!(result.contains("# Title"));
+        assert!(result.contains("Some content here."));
+    }
+
+    // ============================================================================
+    // Internal Tool Name Tests
+    // ============================================================================
+
+    #[test]
+    fn test_internal_tool_names() {
+        assert_eq!(
+            internal_tool_name(SKILL_RUN_SCRIPT_TOOL),
+            "internal__skill_run_script"
+        );
+        assert_eq!(
+            internal_tool_name(SKILL_LOAD_ASSET_TOOL),
+            "internal__skill_load_asset"
+        );
+    }
+
+    #[test]
+    fn test_is_internal_tool() {
+        assert!(is_internal_tool("internal__skill_run_script"));
+        assert!(is_internal_tool("internal__skill_load_asset"));
+        assert!(is_internal_tool("internal__any_tool"));
+        assert!(!is_internal_tool("mcp__server__tool"));
+        assert!(!is_internal_tool("some_tool"));
+    }
+
+    #[test]
+    fn test_parse_internal_tool_name() {
+        assert_eq!(
+            parse_internal_tool_name("internal__skill_run_script"),
+            Some("skill_run_script")
+        );
+        assert_eq!(
+            parse_internal_tool_name("internal__skill_load_asset"),
+            Some("skill_load_asset")
+        );
+        assert_eq!(parse_internal_tool_name("mcp__server__tool"), None);
     }
 }
