@@ -123,6 +123,7 @@ The following skill instructions guide how to complete this task:
     ///
     /// # Returns
     /// Formatted text with skill name, full content, and auto-loaded references
+    #[allow(dead_code)]
     pub async fn phase2_injection_auto_refs(skill: &LoadedSkill, max_total_size: usize) -> String {
         // Load references with optional pattern filtering from skill metadata
         let references = SkillLoader::load_references_with_patterns(

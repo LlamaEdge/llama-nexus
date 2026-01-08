@@ -239,9 +239,9 @@ pub struct SubtaskTrace {
     pub retry_count: u32,
     /// History of retry attempts with their error messages.
     pub retry_history: Vec<RetryAttempt>,
-    /// Active skill used during execution (if any).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_skill: Option<String>,
+    /// Active skills used during execution (supports multi-skill activation).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_skills: Vec<String>,
 }
 
 /// Information about a single retry attempt.
@@ -273,7 +273,7 @@ impl SubtaskTrace {
             result: None,
             retry_count: 0,
             retry_history: Vec::new(),
-            active_skill: None,
+            active_skills: Vec::new(),
         }
     }
 
@@ -283,9 +283,30 @@ impl SubtaskTrace {
         self.status = SubTaskStatus::InProgress;
     }
 
-    /// Sets the active skill being used for this subtask.
-    pub fn set_active_skill(&mut self, skill_name: String) {
-        self.active_skill = Some(skill_name);
+    /// Adds an active skill to this subtask (supports multi-skill activation).
+    /// If the skill is already active, it will not be added again.
+    #[allow(dead_code)]
+    pub fn add_active_skill(&mut self, skill_name: String) {
+        if !self.active_skills.contains(&skill_name) {
+            self.active_skills.push(skill_name);
+        }
+    }
+
+    /// Sets the active skills for this subtask (replaces all existing skills).
+    pub fn set_active_skills(&mut self, skill_names: Vec<String>) {
+        self.active_skills = skill_names;
+    }
+
+    /// Returns true if the subtask has any active skills.
+    #[allow(dead_code)]
+    pub fn has_active_skills(&self) -> bool {
+        !self.active_skills.is_empty()
+    }
+
+    /// Returns the active skills as a slice.
+    #[allow(dead_code)]
+    pub fn get_active_skills(&self) -> &[String] {
+        &self.active_skills
     }
 
     /// Marks the subtask as completed successfully.
@@ -349,11 +370,13 @@ impl SubtaskTrace {
     /// Returns a summary of the subtask trace for logging.
     pub fn summary(&self) -> String {
         let tokens = self.total_tokens();
-        let skill_info = self
-            .active_skill
-            .as_ref()
-            .map(|s| format!(", skill={}", s))
-            .unwrap_or_default();
+        let skill_info = if self.active_skills.is_empty() {
+            String::new()
+        } else if self.active_skills.len() == 1 {
+            format!(", skill={}", self.active_skills[0])
+        } else {
+            format!(", skills=[{}]", self.active_skills.join(", "))
+        };
         format!(
             "SubtaskTrace[id={}, iterations={}, tokens={}, retries={}, duration={:?}, status={:?}{}]",
             self.subtask_id,
@@ -426,7 +449,7 @@ impl Default for SubtaskTrace {
             result: None,
             retry_count: 0,
             retry_history: Vec::new(),
-            active_skill: None,
+            active_skills: Vec::new(),
         }
     }
 }
@@ -1094,5 +1117,156 @@ mod tests {
         // Format: "subtasks=1/2 completed, failed=1"
         assert!(summary.contains("subtasks=1/2 completed"));
         assert!(summary.contains("failed=1"));
+    }
+
+    // ========================================================================
+    // Multi-skill tracing tests
+    // ========================================================================
+
+    #[test]
+    fn test_subtask_trace_add_single_skill() {
+        let mut trace = SubtaskTrace::new(1, "Test subtask".to_string());
+        assert!(trace.active_skills.is_empty());
+        assert!(!trace.has_active_skills());
+
+        trace.add_active_skill("git-workflow".to_string());
+        assert_eq!(trace.active_skills.len(), 1);
+        assert!(trace.has_active_skills());
+        assert_eq!(trace.get_active_skills(), &["git-workflow"]);
+    }
+
+    #[test]
+    fn test_subtask_trace_add_multiple_skills() {
+        let mut trace = SubtaskTrace::new(1, "Test subtask".to_string());
+
+        trace.add_active_skill("git-workflow".to_string());
+        trace.add_active_skill("code-review".to_string());
+        trace.add_active_skill("documentation".to_string());
+
+        assert_eq!(trace.active_skills.len(), 3);
+        assert_eq!(
+            trace.get_active_skills(),
+            &["git-workflow", "code-review", "documentation"]
+        );
+    }
+
+    #[test]
+    fn test_subtask_trace_add_duplicate_skill() {
+        let mut trace = SubtaskTrace::new(1, "Test subtask".to_string());
+
+        trace.add_active_skill("git-workflow".to_string());
+        trace.add_active_skill("git-workflow".to_string()); // Duplicate
+        trace.add_active_skill("code-review".to_string());
+        trace.add_active_skill("git-workflow".to_string()); // Another duplicate
+
+        // Should only have 2 unique skills
+        assert_eq!(trace.active_skills.len(), 2);
+        assert_eq!(trace.get_active_skills(), &["git-workflow", "code-review"]);
+    }
+
+    #[test]
+    fn test_subtask_trace_set_active_skills() {
+        let mut trace = SubtaskTrace::new(1, "Test subtask".to_string());
+
+        trace.add_active_skill("initial-skill".to_string());
+        assert_eq!(trace.active_skills.len(), 1);
+
+        // Replace all skills
+        trace.set_active_skills(vec![
+            "skill-a".to_string(),
+            "skill-b".to_string(),
+            "skill-c".to_string(),
+        ]);
+
+        assert_eq!(trace.active_skills.len(), 3);
+        assert_eq!(
+            trace.get_active_skills(),
+            &["skill-a", "skill-b", "skill-c"]
+        );
+    }
+
+    #[test]
+    fn test_subtask_trace_summary_no_skills() {
+        let trace = SubtaskTrace::new(1, "Test subtask".to_string());
+        let summary = trace.summary();
+
+        // Should not contain skill info when no skills active
+        assert!(!summary.contains("skill"));
+        assert!(!summary.contains("skills"));
+    }
+
+    #[test]
+    fn test_subtask_trace_summary_single_skill() {
+        let mut trace = SubtaskTrace::new(1, "Test subtask".to_string());
+        trace.add_active_skill("git-workflow".to_string());
+
+        let summary = trace.summary();
+
+        // Single skill uses singular format: "skill=name"
+        assert!(summary.contains("skill=git-workflow"));
+        assert!(!summary.contains("skills="));
+    }
+
+    #[test]
+    fn test_subtask_trace_summary_multiple_skills() {
+        let mut trace = SubtaskTrace::new(1, "Test subtask".to_string());
+        trace.add_active_skill("git-workflow".to_string());
+        trace.add_active_skill("code-review".to_string());
+
+        let summary = trace.summary();
+
+        // Multiple skills use plural format: "skills=[name1, name2]"
+        assert!(summary.contains("skills=[git-workflow, code-review]"));
+        assert!(!summary.contains(", skill="));
+    }
+
+    #[test]
+    fn test_subtask_trace_multi_skill_serialization() {
+        let mut trace = SubtaskTrace::new(1, "Multi-skill task".to_string());
+        trace.start();
+        trace.add_active_skill("skill-1".to_string());
+        trace.add_active_skill("skill-2".to_string());
+        trace.complete("Done".to_string());
+
+        // Serialize
+        let json = serde_json::to_string(&trace).expect("Failed to serialize");
+
+        // Deserialize
+        let deserialized: SubtaskTrace =
+            serde_json::from_str(&json).expect("Failed to deserialize");
+
+        assert_eq!(deserialized.active_skills.len(), 2);
+        assert_eq!(deserialized.get_active_skills(), &["skill-1", "skill-2"]);
+    }
+
+    #[test]
+    fn test_subtask_trace_empty_skills_not_serialized() {
+        let trace = SubtaskTrace::new(1, "No skills task".to_string());
+
+        // Serialize
+        let json = serde_json::to_string(&trace).expect("Failed to serialize");
+
+        // Empty active_skills should be skipped in serialization
+        assert!(!json.contains("active_skills"));
+    }
+
+    #[test]
+    fn test_subtask_trace_skills_serialized_when_present() {
+        let mut trace = SubtaskTrace::new(1, "With skills task".to_string());
+        trace.add_active_skill("test-skill".to_string());
+
+        // Serialize
+        let json = serde_json::to_string(&trace).expect("Failed to serialize");
+
+        // Non-empty active_skills should be present in serialization
+        assert!(json.contains("active_skills"));
+        assert!(json.contains("test-skill"));
+    }
+
+    #[test]
+    fn test_subtask_trace_default_has_empty_skills() {
+        let trace = SubtaskTrace::default();
+        assert!(trace.active_skills.is_empty());
+        assert!(!trace.has_active_skills());
     }
 }

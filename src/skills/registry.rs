@@ -151,6 +151,20 @@ impl SkillRegistry {
             .collect()
     }
 
+    /// Get all loaded and enabled skills
+    ///
+    /// Returns the full LoadedSkill objects for all enabled skills.
+    /// This is useful for multi-skill detection and conflict resolution.
+    pub async fn get_all_loaded(&self) -> Vec<LoadedSkill> {
+        self.skills
+            .read()
+            .await
+            .values()
+            .filter(|s| s.enabled)
+            .cloned()
+            .collect()
+    }
+
     /// Get all skill names
     #[allow(dead_code)]
     pub async fn list_names(&self) -> Vec<String> {

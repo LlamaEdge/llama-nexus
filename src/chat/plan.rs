@@ -625,16 +625,16 @@ async fn execute_subtask_with_react(
         .map(|s| s.max_reference_size)
         .unwrap_or(102400); // Default 100KB
 
-    // Track the active skill for Phase 2
-    let mut active_skill: Option<LoadedSkill> = None;
+    // Track active skills for Phase 2 (supports multi-skill activation)
+    let mut active_skills: Vec<LoadedSkill> = Vec::new();
 
-    // Build initial messages for React loop (Phase 1: no active skill yet)
+    // Build initial messages for React loop (Phase 1: no active skills yet)
     let mut messages = build_context_for_react(
         subtask,
         previous_results,
         available_tools,
         skills_summaries,
-        None, // No active skill in initial context
+        &[], // No active skills in initial context
         max_reference_size,
     )
     .await;
@@ -711,10 +711,12 @@ async fn execute_subtask_with_react(
             client = client.header(AUTHORIZATION, auth_str);
         }
 
-        // Build request with tools (filtered by active skill if any)
-        let allowed_patterns = active_skill
-            .as_ref()
-            .map(|skill| skill.metadata.get_allowed_tools());
+        // Build request with tools (filtered by active skills if any)
+        let allowed_patterns = if active_skills.is_empty() {
+            None
+        } else {
+            Some(SkillInjector::merge_allowed_tools(&active_skills))
+        };
         let tools_json = build_tools_json(available_tools, allowed_patterns.as_deref());
         let request_json = serde_json::json!({
             "model": model,
@@ -787,7 +789,7 @@ async fn execute_subtask_with_react(
                     let tool_result = execute_tool_call(
                         state,
                         tool_call,
-                        active_skill.as_ref(),
+                        &active_skills,
                         conv_id,
                         tool_call_max_retries,
                         tool_call_retry_delay,
@@ -844,7 +846,7 @@ async fn execute_subtask_with_react(
                     let tool_result = execute_tool_call(
                         state,
                         &tool_call,
-                        active_skill.as_ref(),
+                        &active_skills,
                         conv_id,
                         tool_call_max_retries,
                         tool_call_retry_delay,
@@ -886,42 +888,87 @@ async fn execute_subtask_with_react(
                 }
 
                 // Check for skill request (Phase 1 -> Phase 2 transition)
-                if active_skill.is_none()
-                    && let Some(skill_name) = SkillDetector::detect_first(content)
+                // Supports multi-skill activation with priority and conflict resolution
+                if active_skills.is_empty()
+                    && let Ok(registry) = SkillRegistry::global()
                 {
-                    dual_info!(
-                        "🎯 Subtask {} requested skill: {} - request_id: {}",
-                        subtask.id,
-                        skill_name,
-                        request_id
-                    );
+                    // Get all loaded skills for priority/conflict resolution
+                    let all_loaded_skills = registry.get_all_loaded().await;
 
-                    // Try to load the requested skill
-                    if let Ok(registry) = SkillRegistry::global() {
-                        if let Some(loaded_skill) = registry.get(&skill_name).await {
+                    // Detect and resolve skills (priority sorting + conflict resolution)
+                    let (resolved_skills, removed_skills) =
+                        SkillDetector::detect_and_resolve(content, &all_loaded_skills);
+
+                    if !resolved_skills.is_empty() {
+                        // Log resolved skills
+                        if resolved_skills.len() == 1 {
                             dual_info!(
-                                "📖 Loaded skill '{}' for subtask {} - request_id: {}",
-                                skill_name,
+                                "🎯 Subtask {} requested skill: {} - request_id: {}",
                                 subtask.id,
+                                resolved_skills[0],
                                 request_id
                             );
+                        } else {
+                            dual_info!(
+                                "🎯 Subtask {} requested {} skills: [{}] - request_id: {}",
+                                subtask.id,
+                                resolved_skills.len(),
+                                resolved_skills.join(", "),
+                                request_id
+                            );
+                        }
 
-                            // Record skill request in iteration trace (successful load)
-                            iter_trace.set_skill_request(skill_name.clone(), true);
+                        // Log removed skills (if any)
+                        for (removed, reason) in &removed_skills {
+                            dual_warn!(
+                                "⚠️ Skill '{}' removed: {} - request_id: {}",
+                                removed,
+                                reason,
+                                request_id
+                            );
+                        }
 
-                            // Record skill activation in subtask trace
-                            subtask_trace.set_active_skill(skill_name.clone());
+                        // Load all resolved skills
+                        let mut loaded_skills_list: Vec<LoadedSkill> = Vec::new();
+                        let mut skill_names_loaded: Vec<String> = Vec::new();
 
-                            // Store the active skill
-                            active_skill = Some(loaded_skill.clone());
+                        for skill_name in &resolved_skills {
+                            if let Some(loaded_skill) = registry.get(skill_name).await {
+                                dual_info!(
+                                    "📖 Loaded skill '{}' for subtask {} - request_id: {}",
+                                    skill_name,
+                                    subtask.id,
+                                    request_id
+                                );
+                                skill_names_loaded.push(skill_name.clone());
+                                loaded_skills_list.push(loaded_skill);
+                            } else {
+                                dual_warn!(
+                                    "⚠️ Skill '{}' not found, skipping - request_id: {}",
+                                    skill_name,
+                                    request_id
+                                );
+                            }
+                        }
 
-                            // Rebuild context with the active skill (Phase 2)
+                        if !loaded_skills_list.is_empty() {
+                            // Record skill request in iteration trace
+                            // For multi-skill, we record the primary (first) skill
+                            iter_trace.set_skill_request(skill_names_loaded[0].clone(), true);
+
+                            // Record skill activation in subtask trace (using set_active_skills for multi-skill)
+                            subtask_trace.set_active_skills(skill_names_loaded.clone());
+
+                            // Store the active skills
+                            active_skills = loaded_skills_list;
+
+                            // Rebuild context with the active skills (Phase 2)
                             messages = build_context_for_react(
                                 subtask,
                                 previous_results,
                                 available_tools,
                                 None, // No need for summaries in Phase 2
-                                Some(&loaded_skill),
+                                &active_skills,
                                 max_reference_size,
                             )
                             .await;
@@ -930,15 +977,6 @@ async fn execute_subtask_with_react(
                             iter_trace.duration = iter_start.elapsed();
                             subtask_trace.add_iteration(iter_trace);
                             continue;
-                        } else {
-                            // Record skill request in iteration trace (failed to load)
-                            iter_trace.set_skill_request(skill_name.clone(), false);
-
-                            dual_warn!(
-                                "⚠️ Skill '{}' not found, continuing without skill - request_id: {}",
-                                skill_name,
-                                request_id
-                            );
                         }
                     }
                 }
@@ -991,7 +1029,7 @@ async fn execute_subtask_with_react(
 async fn execute_tool_call(
     _state: &Arc<AppState>,
     tool_call: &endpoints::chat::ToolCall,
-    active_skill: Option<&LoadedSkill>,
+    active_skills: &[LoadedSkill],
     conv_id: Option<&str>,
     max_retries: u32,
     retry_delay: Duration,
@@ -1007,7 +1045,7 @@ async fn execute_tool_call(
         return execute_internal_tool(
             &tool_call.function.name,
             tool_args,
-            active_skill,
+            active_skills,
             conv_id,
             request_id,
             iter_trace,
@@ -1146,7 +1184,7 @@ async fn execute_tool_call(
 async fn execute_internal_tool(
     full_tool_name: &str,
     tool_args: serde_json::Value,
-    active_skill: Option<&LoadedSkill>,
+    active_skills: &[LoadedSkill],
     conv_id: Option<&str>,
     request_id: &str,
     iter_trace: &mut IterationTrace,
@@ -1167,7 +1205,7 @@ async fn execute_internal_tool(
         SKILL_RUN_SCRIPT_TOOL => {
             execute_skill_run_script(
                 tool_args,
-                active_skill,
+                active_skills,
                 conv_id,
                 request_id,
                 &mut tool_trace,
@@ -1179,7 +1217,7 @@ async fn execute_internal_tool(
         SKILL_LOAD_ASSET_TOOL => {
             execute_skill_load_asset(
                 tool_args,
-                active_skill,
+                active_skills,
                 request_id,
                 &mut tool_trace,
                 iter_trace,
@@ -1210,15 +1248,16 @@ async fn execute_internal_tool(
 /// The script output as a formatted string including stdout, stderr, and exit code.
 async fn execute_skill_run_script(
     tool_args: serde_json::Value,
-    active_skill: Option<&LoadedSkill>,
+    active_skills: &[LoadedSkill],
     conv_id: Option<&str>,
     request_id: &str,
     tool_trace: &mut ToolCallTrace,
     iter_trace: &mut IterationTrace,
     start_time: Instant,
 ) -> ServerResult<String> {
-    // Require an active skill
-    let skill = active_skill.ok_or_else(|| {
+    // Require at least one active skill
+    // For multi-skill scenarios, use the first skill that has the requested script
+    let skill = active_skills.first().ok_or_else(|| {
         let err_msg =
             "skill_run_script requires an active skill. Use <use_skill> to activate a skill first.";
         tool_trace.set_error(err_msg.to_string(), start_time.elapsed());
@@ -1328,14 +1367,15 @@ async fn execute_skill_run_script(
 /// and/or parsed as structured data.
 async fn execute_skill_load_asset(
     tool_args: serde_json::Value,
-    active_skill: Option<&LoadedSkill>,
+    active_skills: &[LoadedSkill],
     request_id: &str,
     tool_trace: &mut ToolCallTrace,
     iter_trace: &mut IterationTrace,
     start_time: Instant,
 ) -> ServerResult<String> {
-    // Require an active skill
-    let skill = active_skill.ok_or_else(|| {
+    // Require at least one active skill
+    // For multi-skill scenarios, use the first skill that has the requested asset
+    let skill = active_skills.first().ok_or_else(|| {
         let err_msg =
             "skill_load_asset requires an active skill. Use <use_skill> to activate a skill first.";
         tool_trace.set_error(err_msg.to_string(), start_time.elapsed());
@@ -1521,106 +1561,119 @@ fn is_retryable_error(error: &ServerError) -> bool {
     )
 }
 
-/// Filters tools based on skill's allowed_tools.
+/// Filters tools based on skills' allowed_tools.
 ///
-/// - Phase 1 (no active_skill): Filters out tools that are covered by any skill's allowed_tools
-/// - Phase 2 (with active_skill): Only shows tools declared in the skill's allowed_tools (if any)
+/// - Phase 1 (no active_skills): Filters out tools that are covered by any skill's allowed_tools
+/// - Phase 2 (with active_skills): Only shows tools declared in the skills' merged allowed_tools (if any)
 ///
 /// This prevents redundancy between skill descriptions and tool listings.
 fn filter_tools_by_skills<'a>(
     tools: &'a [ToolDescription],
     skills_summaries: Option<&[SkillSummary]>,
-    active_skill: Option<&LoadedSkill>,
+    active_skills: &[LoadedSkill],
 ) -> Vec<&'a ToolDescription> {
-    match active_skill {
-        // Phase 2: Only show skill-related tools (if skill has allowed_tools)
-        Some(skill) => {
-            let skill_tools = skill.metadata.get_allowed_tools();
-            if skill_tools.is_empty() {
-                // No allowed-tools specified, show all tools (backward compatibility)
-                tools.iter().collect()
-            } else {
-                // Only show tools declared in skill's allowed-tools
-                let skill_tools_set: HashSet<&str> =
-                    skill_tools.iter().map(|s| s.as_str()).collect();
+    if !active_skills.is_empty() {
+        // Phase 2: Only show skill-related tools (merged from all active skills)
+        let merged_tools = SkillInjector::merge_allowed_tools(active_skills);
+        if merged_tools.is_empty() {
+            // No allowed-tools specified in any skill, show all tools (backward compatibility)
+            tools.iter().collect()
+        } else {
+            // Only show tools declared in merged allowed-tools
+            let skill_tools_set: HashSet<&str> = merged_tools.iter().map(|s| s.as_str()).collect();
 
-                let filtered: Vec<&ToolDescription> = tools
-                    .iter()
-                    .filter(|t| skill_tools_set.contains(t.name.as_str()))
-                    .collect();
+            let filtered: Vec<&ToolDescription> = tools
+                .iter()
+                .filter(|t| skill_tools_set.contains(t.name.as_str()))
+                .collect();
 
+            if active_skills.len() == 1 {
                 dual_debug!(
                     "Phase 2 tool filtering: skill '{}' allows {} tools, showing {} of {} available",
-                    skill.metadata.name,
-                    skill_tools.len(),
+                    active_skills[0].metadata.name,
+                    merged_tools.len(),
                     filtered.len(),
                     tools.len()
                 );
-
-                filtered
+            } else {
+                let skill_names: Vec<&str> = active_skills
+                    .iter()
+                    .map(|s| s.metadata.name.as_str())
+                    .collect();
+                dual_debug!(
+                    "Phase 2 tool filtering: {} skills [{}] allow {} merged tools, showing {} of {} available",
+                    active_skills.len(),
+                    skill_names.join(", "),
+                    merged_tools.len(),
+                    filtered.len(),
+                    tools.len()
+                );
             }
-        }
-
-        // Phase 1: Filter out tools covered by skills
-        None => {
-            // Collect all tools covered by any skill
-            let covered_tools: HashSet<&str> = skills_summaries
-                .map(|summaries| {
-                    summaries
-                        .iter()
-                        .flat_map(|s| s.allowed_tools.iter().map(|t| t.as_str()))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            if covered_tools.is_empty() {
-                // No tools to filter, show all
-                return tools.iter().collect();
-            }
-
-            // Filter out covered tools
-            let filtered: Vec<&ToolDescription> = tools
-                .iter()
-                .filter(|t| !covered_tools.contains(t.name.as_str()))
-                .collect();
-
-            dual_debug!(
-                "Phase 1 tool filtering: {} tools covered by skills, showing {} of {} available",
-                covered_tools.len(),
-                filtered.len(),
-                tools.len()
-            );
 
             filtered
         }
+    } else {
+        // Phase 1: Filter out tools covered by skills
+        // Collect all tools covered by any skill
+        let covered_tools: HashSet<&str> = skills_summaries
+            .map(|summaries| {
+                summaries
+                    .iter()
+                    .flat_map(|s| s.allowed_tools.iter().map(|t| t.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if covered_tools.is_empty() {
+            // No tools to filter, show all
+            return tools.iter().collect();
+        }
+
+        // Filter out covered tools
+        let filtered: Vec<&ToolDescription> = tools
+            .iter()
+            .filter(|t| !covered_tools.contains(t.name.as_str()))
+            .collect();
+
+        dual_debug!(
+            "Phase 1 tool filtering: {} tools covered by skills, showing {} of {} available",
+            covered_tools.len(),
+            filtered.len(),
+            tools.len()
+        );
+
+        filtered
     }
 }
 
 /// Builds the initial context messages for React loop execution.
 ///
 /// This function supports two-phase skill loading:
-/// - Phase 1 (no active_skill): Injects skills summaries, allows LLM to request a skill
-/// - Phase 2 (with active_skill): Injects full skill content, references, and filtered tools
+/// - Phase 1 (no active_skills): Injects skills summaries, allows LLM to request skills
+/// - Phase 2 (with active_skills): Injects full skill content, references, and filtered tools
+///
+/// Supports multi-skill activation: when multiple skills are active, their content
+/// is merged using `SkillInjector::multi_skill_injection_auto_refs()`.
 ///
 /// # Arguments
 /// * `subtask` - The current subtask being executed
 /// * `previous_results` - Results from dependent subtasks
 /// * `available_tools` - List of available MCP tools
 /// * `skills_summaries` - Optional skill summaries for Phase 1
-/// * `active_skill` - Optional active skill for Phase 2
+/// * `active_skills` - Active skills for Phase 2 (empty slice for Phase 1)
 /// * `max_reference_size` - Maximum total size of reference documents to load (0 = no limit)
 async fn build_context_for_react(
     subtask: &SubTask,
     previous_results: &[(usize, String)],
     available_tools: &[ToolDescription],
     skills_summaries: Option<&[SkillSummary]>,
-    active_skill: Option<&LoadedSkill>,
+    active_skills: &[LoadedSkill],
     max_reference_size: usize,
 ) -> Vec<ChatCompletionRequestMessage> {
     let mut messages = Vec::new();
 
     // Filter tools based on skills' allowed_tools
-    let filtered_tools = filter_tools_by_skills(available_tools, skills_summaries, active_skill);
+    let filtered_tools = filter_tools_by_skills(available_tools, skills_summaries, active_skills);
 
     // Build tools description from filtered list
     let tools_desc = if filtered_tools.is_empty() {
@@ -1633,14 +1686,14 @@ async fn build_context_for_react(
             .join("\n")
     };
 
-    // Build the system prompt based on whether we have an active skill
-    let system_prompt = match active_skill {
-        // Phase 2: Active skill - inject full skill content with references using SkillInjector
-        Some(skill) => {
-            let skill_section =
-                SkillInjector::phase2_injection_auto_refs(skill, max_reference_size).await;
-            format!(
-                r#"You are an AI assistant executing a specific subtask as part of a larger plan.
+    // Build the system prompt based on whether we have active skills
+    let system_prompt = if !active_skills.is_empty() {
+        // Phase 2: Active skills - inject full skill content with references
+        // For multi-skill, use multi_skill_injection_auto_refs to merge all skills
+        let skill_section =
+            SkillInjector::multi_skill_injection_auto_refs(active_skills, max_reference_size).await;
+        format!(
+            r#"You are an AI assistant executing a specific subtask as part of a larger plan.
 
 ## Your Task
 {}
@@ -1693,19 +1746,18 @@ After receiving the observation, provide your final answer:
 <final_answer>The task is complete.</final_answer>
 
 Remember: Focus only on this specific subtask. Follow the skill instructions carefully."#,
-                subtask.description, skill_section, tools_desc
-            )
-        }
-        // Phase 1: No active skill - show skills summaries if available using SkillInjector
-        None => {
-            // Build skills section using SkillInjector
-            let skills_section = match skills_summaries {
-                Some(summaries) => SkillInjector::phase1_injection(summaries),
-                None => String::new(),
-            };
+            subtask.description, skill_section, tools_desc
+        )
+    } else {
+        // Phase 1: No active skills - show skills summaries if available using SkillInjector
+        // Build skills section using SkillInjector
+        let skills_section = match skills_summaries {
+            Some(summaries) => SkillInjector::phase1_injection(summaries),
+            None => String::new(),
+        };
 
-            format!(
-                r#"You are an AI assistant executing a specific subtask as part of a larger plan.
+        format!(
+            r#"You are an AI assistant executing a specific subtask as part of a larger plan.
 
 ## Your Task
 {}
@@ -1716,6 +1768,7 @@ Remember: Focus only on this specific subtask. Follow the skill instructions car
 ## Instructions
 1. Analyze the task and think about how to accomplish it
 2. If a skill would help, request it using <use_skill>skill-name</use_skill> tags
+   - You can request multiple skills: <use_skill>skill-a, skill-b</use_skill>
 3. Use the available tools as needed to complete the task
 4. When you have completed the task, provide your final answer wrapped in <final_answer></final_answer> tags
 
@@ -1731,9 +1784,8 @@ When you need to call a tool, output like this:
 <action>{{"name": "mcp__search__query", "arguments": {{"query": "example search"}}}}</action>
 
 Remember: Focus only on this specific subtask. Use the context from previous results if needed."#,
-                subtask.description, skills_section, tools_desc
-            )
-        }
+            subtask.description, skills_section, tools_desc
+        )
     };
 
     messages.push(ChatCompletionRequestMessage::System(
@@ -2113,7 +2165,7 @@ mod tests {
         previous_results: &[(usize, String)],
         available_tools: &[ToolDescription],
         skills_summaries: Option<&[SkillSummary]>,
-        active_skill: Option<&LoadedSkill>,
+        active_skills: &[LoadedSkill],
     ) -> Vec<ChatCompletionRequestMessage> {
         tokio::runtime::Runtime::new()
             .unwrap()
@@ -2122,7 +2174,7 @@ mod tests {
                 previous_results,
                 available_tools,
                 skills_summaries,
-                active_skill,
+                active_skills,
                 0, // No reference size limit in tests
             ))
     }
@@ -2137,7 +2189,7 @@ mod tests {
         }];
 
         let messages =
-            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, None);
+            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, &[]);
 
         // Should have system message + user message with task
         assert_eq!(messages.len(), 2);
@@ -2154,7 +2206,7 @@ mod tests {
         let available_tools = vec![];
 
         let messages =
-            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, None);
+            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, &[]);
 
         // Should have system message + context message + task message
         assert_eq!(messages.len(), 3);
@@ -2179,7 +2231,7 @@ mod tests {
             &previous_results,
             &available_tools,
             Some(&skills),
-            None,
+            &[],
         );
 
         // Should have system message + user message with task
@@ -2237,7 +2289,7 @@ mod tests {
             &previous_results,
             &available_tools,
             None,
-            Some(&active_skill),
+            &[active_skill],
         );
 
         // Should have system message + user message with task
@@ -2246,7 +2298,8 @@ mod tests {
         // Verify skill content is injected in system prompt
         if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
             let content = sys_msg.content();
-            assert!(content.contains("Active Skill: weather-query"));
+            // Multi-skill format uses "Active Skills:" header
+            assert!(content.contains("Active Skills: weather-query"));
             assert!(content.contains("Use the weather tool to query weather."));
         } else {
             panic!("Expected system message");
@@ -2539,7 +2592,7 @@ mod tests {
         let available_tools = vec![];
 
         let messages =
-            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, None);
+            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, &[]);
 
         // Should have system message + context message (with partial deps) + task message
         assert_eq!(messages.len(), 3);
@@ -2555,7 +2608,7 @@ mod tests {
         }];
 
         let messages =
-            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, None);
+            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, &[]);
 
         // Check system message contains task description
         if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
@@ -2573,7 +2626,7 @@ mod tests {
         let available_tools: Vec<ToolDescription> = vec![];
 
         let messages =
-            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, None);
+            build_context_for_react_sync(&subtask, &previous_results, &available_tools, None, &[]);
 
         assert_eq!(messages.len(), 2);
         // System message should still exist even without tools
@@ -2664,7 +2717,7 @@ mod tests {
         ];
 
         let messages =
-            build_context_for_react_sync(&subtask, &previous_results, &tools, Some(&skills), None);
+            build_context_for_react_sync(&subtask, &previous_results, &tools, Some(&skills), &[]);
 
         // Verify system message contains skills information
         if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
@@ -2700,7 +2753,7 @@ mod tests {
             &previous_results,
             &tools,
             Some(&empty_skills),
-            None,
+            &[],
         );
 
         // Verify system message does NOT contain skills table section
@@ -2748,7 +2801,7 @@ mod tests {
 
         // Phase 1: no active skill
         let messages =
-            build_context_for_react_sync(&subtask, &previous_results, &tools, Some(&skills), None);
+            build_context_for_react_sync(&subtask, &previous_results, &tools, Some(&skills), &[]);
 
         if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
             let content = sys_msg.content();
@@ -2828,13 +2881,13 @@ git commit -m "feat: add new feature"
             &previous_results,
             &tools,
             None, // No summaries needed in phase 2
-            Some(&active_skill),
+            &[active_skill],
         );
 
         if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
             let content = sys_msg.content();
-            // Should show active skill section
-            assert!(content.contains("Active Skill: git-workflow"));
+            // Should show active skills section (multi-skill format)
+            assert!(content.contains("Active Skills: git-workflow"));
             // Should contain skill content
             assert!(content.contains("Git Workflow"));
             assert!(content.contains("Commit Guidelines"));
@@ -3059,12 +3112,15 @@ git commit -m "feat: add new feature"
     fn test_integration_subtask_trace_active_skill() {
         let mut subtask_trace = SubtaskTrace::new(0, "Test task".to_string());
 
-        // Initially no active skill
-        assert!(subtask_trace.active_skill.is_none());
+        // Initially no active skills
+        assert!(subtask_trace.active_skills.is_empty());
 
-        // Set active skill
-        subtask_trace.set_active_skill("git-workflow".to_string());
-        assert_eq!(subtask_trace.active_skill, Some("git-workflow".to_string()));
+        // Add active skill
+        subtask_trace.add_active_skill("git-workflow".to_string());
+        assert_eq!(
+            subtask_trace.active_skills,
+            vec!["git-workflow".to_string()]
+        );
 
         // Verify summary includes skill info
         let summary = subtask_trace.summary();
@@ -3142,16 +3198,16 @@ git commit -m "feat: add new feature"
         // Step 6: Build context with active skill
         let subtask = SubTask::new(0, "Git task".to_string());
         let messages =
-            build_context_for_react_sync(&subtask, &[], &all_tools, None, Some(&loaded_skill));
+            build_context_for_react_sync(&subtask, &[], &all_tools, None, &[loaded_skill.clone()]);
 
-        // Verify context includes skill
+        // Verify context includes skill (multi-skill format)
         if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
-            assert!(sys_msg.content().contains("Active Skill: git-workflow"));
+            assert!(sys_msg.content().contains("Active Skills: git-workflow"));
         }
 
         // Step 7: Record in trace
         let mut subtask_trace = SubtaskTrace::new(0, "Git task".to_string());
-        subtask_trace.set_active_skill("git-workflow".to_string());
+        subtask_trace.set_active_skills(vec!["git-workflow".to_string()]);
 
         let mut iter_trace = IterationTrace::new(1);
         iter_trace.set_skill_request("git-workflow".to_string(), true);
@@ -3174,6 +3230,221 @@ git commit -m "feat: add new feature"
         assert_eq!(skills, vec!["code-review"]);
         assert_eq!(cleaned, "I will use  to help you.");
         assert!(!cleaned.contains("<use_skill>"));
+    }
+
+    // ==========================================================================
+    // Multi-Skill Integration Tests
+    // ==========================================================================
+
+    /// Test multi-skill context building with merged tools
+    #[test]
+    fn test_integration_multi_skill_context() {
+        use std::path::PathBuf;
+
+        use chrono::Utc;
+
+        let subtask = SubTask::new(0, "Review and document code".to_string());
+        let previous_results: Vec<(usize, String)> = vec![];
+
+        // Create tools
+        let tools = vec![
+            ToolDescription {
+                name: "tool-a".to_string(),
+                description: "Tool A".to_string(),
+            },
+            ToolDescription {
+                name: "tool-b".to_string(),
+                description: "Tool B".to_string(),
+            },
+            ToolDescription {
+                name: "tool-c".to_string(),
+                description: "Tool C".to_string(),
+            },
+        ];
+
+        // Create two skills with different allowed tools
+        let skill_a = LoadedSkill {
+            metadata: crate::skills::SkillMetadata {
+                name: "skill-a".to_string(),
+                description: "Skill A".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: Some("tool-a".to_string()),
+                model: None,
+                allowed_scripts: None,
+                execution_limits: None,
+                references: None,
+                priority: None,
+                conflicts: None,
+            },
+            content: "Skill A content".to_string(),
+            raw_content: String::new(),
+            skill_dir: PathBuf::new(),
+            file_path: String::new(),
+            enabled: true,
+            loaded_at: Utc::now(),
+            scripts: Vec::new(),
+        };
+
+        let skill_b = LoadedSkill {
+            metadata: crate::skills::SkillMetadata {
+                name: "skill-b".to_string(),
+                description: "Skill B".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: Some("tool-b".to_string()),
+                model: None,
+                allowed_scripts: None,
+                execution_limits: None,
+                references: None,
+                priority: None,
+                conflicts: None,
+            },
+            content: "Skill B content".to_string(),
+            raw_content: String::new(),
+            skill_dir: PathBuf::new(),
+            file_path: String::new(),
+            enabled: true,
+            loaded_at: Utc::now(),
+            scripts: Vec::new(),
+        };
+
+        let active_skills = vec![skill_a, skill_b];
+
+        // Build context with multiple active skills
+        let messages =
+            build_context_for_react_sync(&subtask, &previous_results, &tools, None, &active_skills);
+
+        // Verify multi-skill format in system prompt
+        if let ChatCompletionRequestMessage::System(sys_msg) = &messages[0] {
+            let content = sys_msg.content();
+            // Should show both skills
+            assert!(content.contains("Active Skills: skill-a, skill-b"));
+            // Should contain both skill contents
+            assert!(content.contains("Skill A content"));
+            assert!(content.contains("Skill B content"));
+        } else {
+            panic!("Expected system message");
+        }
+    }
+
+    /// Test multi-skill tool filtering (merged allowed_tools)
+    #[test]
+    fn test_integration_multi_skill_tool_filtering() {
+        use std::path::PathBuf;
+
+        use chrono::Utc;
+
+        let tools = vec![
+            ToolDescription {
+                name: "tool-a".to_string(),
+                description: "Tool A".to_string(),
+            },
+            ToolDescription {
+                name: "tool-b".to_string(),
+                description: "Tool B".to_string(),
+            },
+            ToolDescription {
+                name: "tool-c".to_string(),
+                description: "Tool C".to_string(),
+            },
+            ToolDescription {
+                name: "tool-shared".to_string(),
+                description: "Shared Tool".to_string(),
+            },
+        ];
+
+        // Skill A allows tool-a and tool-shared
+        let skill_a = LoadedSkill {
+            metadata: crate::skills::SkillMetadata {
+                name: "skill-a".to_string(),
+                description: "Skill A".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: Some("tool-a tool-shared".to_string()),
+                model: None,
+                allowed_scripts: None,
+                execution_limits: None,
+                references: None,
+                priority: None,
+                conflicts: None,
+            },
+            content: "Content A".to_string(),
+            raw_content: String::new(),
+            skill_dir: PathBuf::new(),
+            file_path: String::new(),
+            enabled: true,
+            loaded_at: Utc::now(),
+            scripts: Vec::new(),
+        };
+
+        // Skill B allows tool-b and tool-shared
+        let skill_b = LoadedSkill {
+            metadata: crate::skills::SkillMetadata {
+                name: "skill-b".to_string(),
+                description: "Skill B".to_string(),
+                license: None,
+                compatibility: None,
+                metadata: None,
+                allowed_tools: Some("tool-b tool-shared".to_string()),
+                model: None,
+                allowed_scripts: None,
+                execution_limits: None,
+                references: None,
+                priority: None,
+                conflicts: None,
+            },
+            content: "Content B".to_string(),
+            raw_content: String::new(),
+            skill_dir: PathBuf::new(),
+            file_path: String::new(),
+            enabled: true,
+            loaded_at: Utc::now(),
+            scripts: Vec::new(),
+        };
+
+        let active_skills = vec![skill_a, skill_b];
+
+        // Filter with multiple skills - should get merged allowed_tools
+        let filtered = filter_tools_by_skills(&tools, None, &active_skills);
+
+        // Should have tool-a, tool-b, tool-shared (merged, deduplicated)
+        assert_eq!(filtered.len(), 3);
+        let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"tool-a"));
+        assert!(names.contains(&"tool-b"));
+        assert!(names.contains(&"tool-shared"));
+        // tool-c should NOT be included
+        assert!(!names.contains(&"tool-c"));
+    }
+
+    /// Test multi-skill tracing with set_active_skills
+    #[test]
+    fn test_integration_multi_skill_tracing() {
+        let mut subtask_trace = SubtaskTrace::new(0, "Multi-skill task".to_string());
+
+        // Initially empty
+        assert!(subtask_trace.active_skills.is_empty());
+
+        // Set multiple skills at once
+        subtask_trace.set_active_skills(vec![
+            "skill-a".to_string(),
+            "skill-b".to_string(),
+            "skill-c".to_string(),
+        ]);
+
+        assert_eq!(subtask_trace.active_skills.len(), 3);
+        assert_eq!(
+            subtask_trace.active_skills,
+            vec!["skill-a", "skill-b", "skill-c"]
+        );
+
+        // Verify summary shows multi-skill format
+        let summary = subtask_trace.summary();
+        assert!(summary.contains("skills=[skill-a, skill-b, skill-c]"));
     }
 
     // ==========================================================================
@@ -3205,7 +3476,7 @@ git commit -m "feat: add new feature"
         }];
 
         // Phase 1: no active skill, with skill summaries
-        let filtered = filter_tools_by_skills(&tools, Some(&skills), None);
+        let filtered = filter_tools_by_skills(&tools, Some(&skills), &[]);
 
         // Only search tool should remain (calc tools are covered by skill)
         assert_eq!(filtered.len(), 1);
@@ -3247,7 +3518,7 @@ git commit -m "feat: add new feature"
             },
         ];
 
-        let filtered = filter_tools_by_skills(&tools, Some(&skills), None);
+        let filtered = filter_tools_by_skills(&tools, Some(&skills), &[]);
 
         // Only git and generic tools should remain
         assert_eq!(filtered.len(), 2);
@@ -3271,12 +3542,12 @@ git commit -m "feat: add new feature"
         ];
 
         // No skills = all tools shown
-        let filtered = filter_tools_by_skills(&tools, None, None);
+        let filtered = filter_tools_by_skills(&tools, None, &[]);
         assert_eq!(filtered.len(), 2);
 
         // Empty skills = all tools shown
         let empty_skills: Vec<SkillSummary> = vec![];
-        let filtered = filter_tools_by_skills(&tools, Some(&empty_skills), None);
+        let filtered = filter_tools_by_skills(&tools, Some(&empty_skills), &[]);
         assert_eq!(filtered.len(), 2);
     }
 
@@ -3301,7 +3572,7 @@ git commit -m "feat: add new feature"
             allowed_tools: vec![],
         }];
 
-        let filtered = filter_tools_by_skills(&tools, Some(&skills), None);
+        let filtered = filter_tools_by_skills(&tools, Some(&skills), &[]);
         assert_eq!(filtered.len(), 2);
     }
 
@@ -3352,7 +3623,7 @@ git commit -m "feat: add new feature"
         };
 
         // Phase 2: active skill present
-        let filtered = filter_tools_by_skills(&tools, None, Some(&active_skill));
+        let filtered = filter_tools_by_skills(&tools, None, &[active_skill]);
 
         // Only calc tools should be shown
         assert_eq!(filtered.len(), 2);
@@ -3405,7 +3676,7 @@ git commit -m "feat: add new feature"
         };
 
         // Phase 2 with no restrictions = all tools shown
-        let filtered = filter_tools_by_skills(&tools, None, Some(&active_skill));
+        let filtered = filter_tools_by_skills(&tools, None, &[active_skill]);
         assert_eq!(filtered.len(), 2);
     }
 
@@ -3460,7 +3731,7 @@ git commit -m "feat: add new feature"
         };
 
         // Phase 2: only show skill's allowed tools
-        let filtered = filter_tools_by_skills(&tools, Some(&skills), Some(&active_skill));
+        let filtered = filter_tools_by_skills(&tools, Some(&skills), &[active_skill]);
 
         // Only calc tool should be shown (Phase 2 filtering)
         assert_eq!(filtered.len(), 1);
@@ -3478,7 +3749,7 @@ git commit -m "feat: add new feature"
             allowed_tools: vec!["some_tool".to_string()],
         }];
 
-        let filtered = filter_tools_by_skills(&tools, Some(&skills), None);
+        let filtered = filter_tools_by_skills(&tools, Some(&skills), &[]);
         assert!(filtered.is_empty());
     }
 
