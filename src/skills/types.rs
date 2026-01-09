@@ -589,20 +589,22 @@ impl LoadedSkill {
     /// Returns skill-level limits merged with global defaults,
     /// or None to use global defaults directly.
     fn resolve_resource_limits(&self) -> Option<ResourceLimits> {
-        self.metadata.get_execution_limits().and_then(|skill_limits| {
-            // Only create merged limits if skill has custom limits
-            if skill_limits.is_empty() {
-                return None;
-            }
+        self.metadata
+            .get_execution_limits()
+            .and_then(|skill_limits| {
+                // Only create merged limits if skill has custom limits
+                if skill_limits.is_empty() {
+                    return None;
+                }
 
-            // Get global defaults from executor manager
-            EXECUTOR_MANAGER.get().map(|_manager| {
-                // Access the default limits from manager
-                // For now, use ResourceLimits::default() as the base
-                // In production, this should come from manager's configured defaults
-                skill_limits.merge_with(&ResourceLimits::default())
+                // Get global defaults from executor manager
+                EXECUTOR_MANAGER.get().map(|_manager| {
+                    // Access the default limits from manager
+                    // For now, use ResourceLimits::default() as the base
+                    // In production, this should come from manager's configured defaults
+                    skill_limits.merge_with(&ResourceLimits::default())
+                })
             })
-        })
     }
 
     /// List all available scripts in this skill
@@ -1284,7 +1286,10 @@ mod tests {
         let metadata = test_metadata_with_extensions(
             "test",
             "test",
-            HashMap::from([("allowed-scripts".to_string(), "process.js, export.py".to_string())]),
+            HashMap::from([(
+                "allowed-scripts".to_string(),
+                "process.js, export.py".to_string(),
+            )]),
         );
 
         // Exact matches
@@ -1386,7 +1391,10 @@ mod tests {
         let metadata = test_metadata_with_extensions(
             "test",
             "test",
-            HashMap::from([("allowed-scripts".to_string(), "*.js, process.py".to_string())]),
+            HashMap::from([(
+                "allowed-scripts".to_string(),
+                "*.js, process.py".to_string(),
+            )]),
         );
 
         let scripts = metadata.get_allowed_scripts();

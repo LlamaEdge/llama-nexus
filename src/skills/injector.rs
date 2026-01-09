@@ -1123,15 +1123,17 @@ fn main() {
     fn test_multi_skill_injection_with_merged_permissions() {
         let skill_a = create_test_skill_with_tools("skill-a", Some("Bash Read"));
         let mut skill_a = skill_a;
-        skill_a.metadata.metadata = Some(std::collections::HashMap::from([
-            ("allowed-scripts".to_string(), "*.js".to_string()),
-        ]));
+        skill_a.metadata.metadata = Some(std::collections::HashMap::from([(
+            "allowed-scripts".to_string(),
+            "*.js".to_string(),
+        )]));
 
         let skill_b = create_test_skill_with_tools("skill-b", Some("Read Write"));
         let mut skill_b = skill_b;
-        skill_b.metadata.metadata = Some(std::collections::HashMap::from([
-            ("allowed-scripts".to_string(), "*.py".to_string()),
-        ]));
+        skill_b.metadata.metadata = Some(std::collections::HashMap::from([(
+            "allowed-scripts".to_string(),
+            "*.py".to_string(),
+        )]));
 
         let skills = vec![skill_a, skill_b];
         let result = SkillInjector::multi_skill_injection(&skills);

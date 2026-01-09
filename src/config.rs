@@ -1095,6 +1095,23 @@ pub struct SkillConfig {
     /// API configuration for Skills management endpoints
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api: Option<SkillApiConfig>,
+
+    /// Skills marketplace configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market: Option<SkillMarketConfig>,
+}
+
+impl SkillConfig {
+    /// Get the primary skills directory (first in the list)
+    ///
+    /// Returns the first directory from `directories`, expanding `~`.
+    /// Falls back to "~/.llama-nexus/skills" if empty.
+    pub fn directory(&self) -> String {
+        self.directories
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "~/.llama-nexus/skills".to_string())
+    }
 }
 
 /// Skills API configuration for authentication and rate limiting
@@ -1181,8 +1198,51 @@ impl Default for SkillConfig {
             execution: None,
             max_reference_size: default_max_reference_size(),
             api: None,
+            market: None,
         }
     }
+}
+
+/// Skills marketplace configuration
+///
+/// Configures access to skills marketplace (skillsmp.com) for remote skill installation.
+///
+/// # Example Configuration
+///
+/// ```toml
+/// [skill.market]
+/// url = "https://skillsmp.com/api/v1"
+/// api_key = "sk_live_your_api_key"
+/// ```
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SkillMarketConfig {
+    /// Base URL for the skills marketplace API
+    /// Default: https://skillsmp.com/api/v1
+    #[serde(default = "default_market_url")]
+    pub url: String,
+
+    /// API key for authenticating marketplace requests
+    /// Can also be set via SKILLSMP_API_KEY environment variable
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Cache directory for downloaded skills
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<String>,
+}
+
+impl Default for SkillMarketConfig {
+    fn default() -> Self {
+        Self {
+            url: default_market_url(),
+            api_key: None,
+            cache_dir: None,
+        }
+    }
+}
+
+fn default_market_url() -> String {
+    "https://skillsmp.com/api/v1".to_string()
 }
 
 /// Script execution configuration

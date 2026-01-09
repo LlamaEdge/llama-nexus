@@ -1,4 +1,5 @@
 mod chat;
+mod cli;
 mod config;
 mod error;
 mod executor;
@@ -50,28 +51,7 @@ use crate::{
 // Global health check interval for downstream servers in seconds
 pub(crate) static HEALTH_CHECK_INTERVAL: OnceCell<u64> = OnceCell::new();
 
-#[derive(Debug, Parser)]
-#[command(version = env!("CARGO_PKG_VERSION"), about = "LlamaEdge Nexus - A gateway service for LLM backends")]
-struct Cli {
-    /// Path to the config file
-    #[arg(long, default_value = "config.toml", value_parser = clap::value_parser!(PathBuf))]
-    config: PathBuf,
-    /// Enable health check for downstream servers
-    #[arg(long, default_value = "false")]
-    check_health: bool,
-    /// Health check interval for downstream servers in seconds
-    #[arg(long, default_value = "60")]
-    check_health_interval: u64,
-    /// Root path for the Web UI files
-    #[arg(long, default_value = "chatbot-ui")]
-    web_ui: PathBuf,
-    /// Log destination: "stdout", "file", or "both"
-    #[arg(long, default_value = "stdout")]
-    log_destination: String,
-    /// Log file path (required when log_destination is "file" or "both")
-    #[arg(long)]
-    log_file: Option<String>,
-}
+use cli::{Cli, Command};
 
 #[tokio::main]
 async fn main() -> ServerResult<()> {
@@ -88,7 +68,14 @@ async fn main() -> ServerResult<()> {
     // parse the command line arguments
     let cli = Cli::parse();
 
-    // Validate log configuration
+    // Handle subcommands first (they don't need full server initialization)
+    if let Some(command) = cli.command {
+        return match command {
+            Command::Skill(skill_cmd) => skill_cmd.execute(&cli.config).await,
+        };
+    }
+
+    // Server mode: validate log configuration
     if (cli.log_destination == "file" || cli.log_destination == "both") && cli.log_file.is_none() {
         eprintln!("Error: --log-file is required when --log-destination is 'file' or 'both'");
         return Err(ServerError::Operation("Missing log file path".to_string()));

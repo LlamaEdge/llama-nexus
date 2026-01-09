@@ -80,6 +80,13 @@ directories = [                             # Directories to scan for Skills
     "~/.llama-nexus/skills"                 # User-level skills
 ]
 
+# Skills marketplace configuration (skillsmp.com)
+# Use: llama-nexus skill install skillsmp:<name>
+[skill.market]
+# url = "https://skillsmp.com/api/v1"       # API URL (default)
+# api_key = "your-api-key"                  # API key (or set SKILLSMP_API_KEY env var)
+# cache_dir = "~/.llama-nexus/cache/skills" # Download cache directory (optional)
+
 # Script execution configuration for Skills
 [skill.execution]
 enabled = true                              # Enable script execution
