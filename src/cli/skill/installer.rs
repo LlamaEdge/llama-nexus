@@ -96,6 +96,8 @@ impl SkillInstaller {
     ///
     /// Returns the installed skill name
     pub async fn install(&self, source: &SkillSource) -> ServerResult<String> {
+        use super::lockfile::SkillLockFile;
+
         // Ensure installation directory exists
         tokio::fs::create_dir_all(&self.install_dir)
             .await
@@ -107,12 +109,33 @@ impl SkillInstaller {
                 ))
             })?;
 
-        match source {
+        let (skill_name, version) = match source {
             SkillSource::Skillsmp { name, version } => {
-                self.install_from_skillsmp(name, version.as_deref()).await
+                let skill_name = self.install_from_skillsmp(name, version.as_deref()).await?;
+                (skill_name, version.clone())
             }
-            SkillSource::Url(url) => self.install_from_url(url).await,
+            SkillSource::Url(url) => {
+                let skill_name = self.install_from_url(url).await?;
+                (skill_name, None)
+            }
+        };
+
+        // Create skill.lock file for version tracking
+        let lock_file = SkillLockFile::new(skill_name.clone(), source.display_name());
+        let lock_file = if let Some(ver) = version {
+            lock_file.with_version(ver)
+        } else {
+            lock_file
+        };
+
+        let lock_path = self.install_dir.join(&skill_name).join("skill.lock");
+        if let Err(e) = lock_file.save(&lock_path).await {
+            println!("  Warning: Failed to create skill.lock: {}", e);
+        } else {
+            println!("  Created skill.lock for version tracking");
         }
+
+        Ok(skill_name)
     }
 
     /// Install a skill from skillsmp.com

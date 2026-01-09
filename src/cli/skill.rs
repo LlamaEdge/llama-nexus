@@ -32,6 +32,24 @@ pub enum SkillCommand {
         enable: bool,
     },
 
+    /// Search for skills on skillsmp.com
+    ///
+    /// Examples:
+    ///   llama-nexus skill search "code review"
+    ///   llama-nexus skill search --category development
+    Search {
+        /// Search query
+        query: String,
+
+        /// Category filter (e.g., development, security, documentation)
+        #[arg(long, short = 'c')]
+        category: Option<String>,
+
+        /// Number of results to show
+        #[arg(long, short = 'n', default_value = "10")]
+        limit: usize,
+    },
+
     /// List installed skills
     ///
     /// Examples:
@@ -60,6 +78,39 @@ pub enum SkillCommand {
         /// Skill name or source (e.g., code-review, skillsmp:code-review)
         name: String,
     },
+
+    /// Update installed skills
+    ///
+    /// Examples:
+    ///   llama-nexus skill update code-review
+    ///   llama-nexus skill update --all
+    Update {
+        /// Skill name to update (omit for --all)
+        name: Option<String>,
+
+        /// Update all installed skills
+        #[arg(long, short = 'a')]
+        all: bool,
+    },
+
+    /// Check for outdated skills
+    ///
+    /// Examples:
+    ///   llama-nexus skill outdated
+    Outdated,
+
+    /// Uninstall a skill
+    ///
+    /// Examples:
+    ///   llama-nexus skill uninstall code-review
+    Uninstall {
+        /// Skill name to uninstall
+        name: String,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 impl SkillCommand {
@@ -71,12 +122,22 @@ impl SkillCommand {
                 dir,
                 enable,
             } => install_skill(&source, dir.as_ref(), enable, config_path).await,
+            SkillCommand::Search {
+                query,
+                category,
+                limit,
+            } => search_skills(&query, category.as_deref(), limit, config_path).await,
             SkillCommand::List {
                 remote,
                 category,
                 limit,
             } => list_skills(remote, category.as_deref(), limit, config_path).await,
             SkillCommand::Info { name } => show_skill_info(&name, config_path).await,
+            SkillCommand::Update { name, all } => {
+                update_skills(name.as_deref(), all, config_path).await
+            }
+            SkillCommand::Outdated => check_outdated_skills(config_path).await,
+            SkillCommand::Uninstall { name, yes } => uninstall_skill(&name, yes, config_path).await,
         }
     }
 }
@@ -366,6 +427,303 @@ async fn show_local_skill_info(
     Ok(())
 }
 
+/// Search for skills on skillsmp.com
+async fn search_skills(
+    query: &str,
+    category: Option<&str>,
+    limit: usize,
+    config_path: &PathBuf,
+) -> ServerResult<()> {
+    use crate::{cli::skill::marketplace::SkillsMarketplace, config::Config};
+
+    let config = Config::load(config_path).await?;
+
+    // Get API key from config or environment
+    let api_key = config
+        .skill
+        .as_ref()
+        .and_then(|c| c.market.as_ref())
+        .and_then(|m| m.api_key.clone())
+        .or_else(|| std::env::var("SKILLSMP_API_KEY").ok());
+
+    let marketplace = SkillsMarketplace::new(api_key);
+
+    // Construct search query with category filter if provided
+    let search_query = if let Some(cat) = category {
+        format!("{} category:{}", query, cat)
+    } else {
+        query.to_string()
+    };
+
+    println!("Searching skillsmp.com for '{}'...\n", query);
+
+    let skills = marketplace.search(&search_query, limit).await?;
+
+    if skills.is_empty() {
+        println!("No skills found matching '{}'.", query);
+        return Ok(());
+    }
+
+    println!("{:<30} {:<50}", "NAME", "DESCRIPTION");
+    println!("{}", "-".repeat(80));
+
+    for skill in &skills {
+        let desc = if skill.description.len() > 47 {
+            format!("{}...", &skill.description[..47])
+        } else {
+            skill.description.clone()
+        };
+        println!("{:<30} {:<50}", skill.name, desc);
+    }
+
+    println!("\nFound {} skill(s).", skills.len());
+    println!("Install a skill with: llama-nexus skill install skillsmp:<name>");
+
+    Ok(())
+}
+
+/// Update installed skills
+async fn update_skills(name: Option<&str>, all: bool, config_path: &PathBuf) -> ServerResult<()> {
+    use crate::{
+        cli::skill::{installer::SkillInstaller, lockfile::SkillLockFile},
+        config::Config,
+    };
+
+    let config = Config::load(config_path).await?;
+
+    let skills_dir = if let Some(skill_config) = &config.skill {
+        PathBuf::from(shellexpand::tilde(&skill_config.directory()).to_string())
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(format!("{}/.llama-nexus/skills", home))
+    };
+
+    if !skills_dir.exists() {
+        println!("No skills directory found at: {}", skills_dir.display());
+        return Ok(());
+    }
+
+    // Discover installed skills with lock files
+    let skills_to_update = if all {
+        discover_updatable_skills(&skills_dir).await
+    } else if let Some(skill_name) = name {
+        let skill_path = skills_dir.join(skill_name);
+        if !skill_path.exists() {
+            println!("Skill '{}' not found.", skill_name);
+            return Ok(());
+        }
+        let lock_path = skill_path.join("skill.lock");
+        if lock_path.exists() {
+            if let Ok(lock) = SkillLockFile::load(&lock_path).await {
+                vec![(skill_name.to_string(), lock)]
+            } else {
+                println!(
+                    "Skill '{}' has no valid lock file, cannot update.",
+                    skill_name
+                );
+                return Ok(());
+            }
+        } else {
+            println!(
+                "Skill '{}' was not installed from marketplace (no skill.lock).",
+                skill_name
+            );
+            println!(
+                "To reinstall from marketplace: llama-nexus skill install skillsmp:{}",
+                skill_name
+            );
+            return Ok(());
+        }
+    } else {
+        println!("Please specify a skill name or use --all to update all skills.");
+        return Ok(());
+    };
+
+    if skills_to_update.is_empty() {
+        println!("No updatable skills found.");
+        return Ok(());
+    }
+
+    let installer = SkillInstaller::new(skills_dir.clone(), config.skill.as_ref());
+    let mut updated_count = 0;
+
+    for (skill_name, lock) in skills_to_update {
+        println!("Checking '{}' for updates...", skill_name);
+
+        // Get source from lock file
+        if let Some(source) = &lock.source {
+            // Remove old skill directory
+            let skill_path = skills_dir.join(&skill_name);
+            if let Err(e) = tokio::fs::remove_dir_all(&skill_path).await {
+                println!("  Warning: Failed to remove old version: {}", e);
+            }
+
+            // Reinstall from source
+            match crate::cli::skill::installer::SkillSource::parse(source) {
+                Ok(skill_source) => match installer.install(&skill_source).await {
+                    Ok(new_name) => {
+                        println!("  Updated '{}' successfully.", new_name);
+                        updated_count += 1;
+                    }
+                    Err(e) => {
+                        println!("  Failed to update '{}': {}", skill_name, e);
+                    }
+                },
+                Err(e) => {
+                    println!("  Invalid source in lock file: {}", e);
+                }
+            }
+        } else {
+            println!("  No source information in lock file, skipping.");
+        }
+    }
+
+    println!("\nUpdated {} skill(s).", updated_count);
+
+    Ok(())
+}
+
+/// Check for outdated skills
+async fn check_outdated_skills(config_path: &PathBuf) -> ServerResult<()> {
+    use crate::config::Config;
+
+    let config = Config::load(config_path).await?;
+
+    let skills_dir = if let Some(skill_config) = &config.skill {
+        PathBuf::from(shellexpand::tilde(&skill_config.directory()).to_string())
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(format!("{}/.llama-nexus/skills", home))
+    };
+
+    if !skills_dir.exists() {
+        println!("No skills directory found at: {}", skills_dir.display());
+        return Ok(());
+    }
+
+    // Discover installed skills with lock files
+    let skills = discover_updatable_skills(&skills_dir).await;
+
+    if skills.is_empty() {
+        println!("No skills with version tracking found.");
+        println!(
+            "Skills installed from marketplace will have a skill.lock file for version tracking."
+        );
+        return Ok(());
+    }
+
+    println!("{:<25} {:<15} {:<40}", "SKILL", "VERSION", "SOURCE");
+    println!("{}", "-".repeat(80));
+
+    for (name, lock) in &skills {
+        let version = lock.version.as_deref().unwrap_or("unknown");
+        let source = lock.source.as_deref().unwrap_or("unknown");
+        let source_display = if source.len() > 37 {
+            format!("{}...", &source[..37])
+        } else {
+            source.to_string()
+        };
+        println!("{:<25} {:<15} {:<40}", name, version, source_display);
+    }
+
+    println!("\nTotal: {} skill(s) with version tracking.", skills.len());
+    println!("\nNote: Version comparison with remote is not yet implemented.");
+    println!("Use 'llama-nexus skill update <name>' to reinstall from the latest source.");
+
+    Ok(())
+}
+
+/// Discover skills that have lock files (updatable)
+async fn discover_updatable_skills(
+    skills_dir: &PathBuf,
+) -> Vec<(String, crate::cli::skill::lockfile::SkillLockFile)> {
+    use crate::cli::skill::lockfile::SkillLockFile;
+
+    let mut skills = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(skills_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let lock_path = path.join("skill.lock");
+                if lock_path.exists()
+                    && let Ok(lock) = SkillLockFile::load(&lock_path).await
+                    && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                {
+                    skills.push((name.to_string(), lock));
+                }
+            }
+        }
+    }
+
+    skills.sort_by(|a, b| a.0.cmp(&b.0));
+    skills
+}
+
+/// Uninstall a skill
+async fn uninstall_skill(
+    name: &str,
+    skip_confirm: bool,
+    config_path: &PathBuf,
+) -> ServerResult<()> {
+    use crate::config::Config;
+
+    let config = Config::load(config_path).await?;
+
+    let skills_dir = if let Some(skill_config) = &config.skill {
+        PathBuf::from(shellexpand::tilde(&skill_config.directory()).to_string())
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(format!("{}/.llama-nexus/skills", home))
+    };
+
+    let skill_path = skills_dir.join(name);
+
+    if !skill_path.exists() {
+        println!("Skill '{}' not found in: {}", name, skills_dir.display());
+        return Ok(());
+    }
+
+    // Confirmation prompt (unless --yes is provided)
+    if !skip_confirm {
+        println!("This will remove the skill '{}' from:", name);
+        println!("  {}", skill_path.display());
+        println!();
+        print!("Are you sure? [y/N] ");
+
+        use std::io::{self, Write};
+        io::stdout().flush().ok();
+
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_ok() {
+            let input = input.trim().to_lowercase();
+            if input != "y" && input != "yes" {
+                println!("Cancelled.");
+                return Ok(());
+            }
+        } else {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Remove the skill directory
+    match tokio::fs::remove_dir_all(&skill_path).await {
+        Ok(_) => {
+            println!("Skill '{}' uninstalled successfully.", name);
+        }
+        Err(e) => {
+            return Err(crate::error::ServerError::Operation(format!(
+                "Failed to remove skill '{}': {}",
+                name, e
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 // Submodules for skill management
 pub mod installer;
+pub mod lockfile;
 pub mod marketplace;
