@@ -13,6 +13,7 @@ pub mod error;
 pub mod handlers;
 pub mod injector;
 pub mod loader;
+pub mod middleware;
 pub mod parser;
 pub mod registry;
 pub mod types;

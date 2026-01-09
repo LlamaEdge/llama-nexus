@@ -233,6 +233,9 @@ async fn main() -> ServerResult<()> {
         dual_debug!("Skills system is only available in Plan Mode");
     }
 
+    // Save skill API config before moving config into AppState
+    let skill_api_config = config.skill.as_ref().and_then(|s| s.api.clone());
+
     // Initialize application state
     let mut state = AppState::new(config, ServerInfo::default());
 
@@ -314,9 +317,27 @@ async fn main() -> ServerResult<()> {
     }
 
     // Add skills API endpoints if skills system is initialized
-    if SkillRegistry::global().is_ok() {
+    let skills_router: Option<Router> = if SkillRegistry::global().is_ok() {
         dual_info!("Skills API endpoints are enabled");
-        main_router = main_router
+
+        // Initialize rate limiter if configured
+        if let Some(ref cfg) = skill_api_config {
+            skills::middleware::init_rate_limiter(cfg);
+        }
+
+        // Create middleware state
+        let skills_api_state =
+            skills::middleware::SkillsApiState::from_config(skill_api_config.as_ref());
+
+        if skills_api_state.api_key.is_some() {
+            dual_info!("Skills API authentication is enabled");
+        }
+        if skills_api_state.rate_limiting_enabled {
+            dual_info!("Skills API rate limiting is enabled");
+        }
+
+        // Create skills router with middleware
+        let router = Router::new()
             .route("/api/skills", get(skills::handlers::list_skills_handler))
             .route(
                 "/api/skills/reload",
@@ -333,10 +354,17 @@ async fn main() -> ServerResult<()> {
             .route(
                 "/api/skills/{name}/reload",
                 post(skills::handlers::reload_skill_handler),
-            );
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                skills_api_state,
+                skills::middleware::skills_api_middleware,
+            ));
+
+        Some(router)
     } else {
         dual_info!("Skills API endpoints are disabled (skills system not initialized)");
-    }
+        None
+    };
 
     // Add state to main router
     let main_router = main_router.with_state(state.clone());
@@ -347,11 +375,16 @@ async fn main() -> ServerResult<()> {
         .route("/health", get(responses::health_handler))
         .with_state(responses_state);
 
+    // Build final app router
+    let mut app = Router::new().merge(main_router).merge(responses_router);
+
+    // Merge skills router if available
+    if let Some(skills_router) = skills_router {
+        app = app.merge(skills_router);
+    }
+
     let app =
-        Router::new()
-            .merge(main_router)
-            .merge(responses_router)
-            .layer(cors)
+        app.layer(cors)
             .layer(TraceLayer::new_for_http())
             .layer(axum::middleware::from_fn(
                 |mut req: Request<Body>, next: axum::middleware::Next| async move {

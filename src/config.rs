@@ -1091,6 +1091,74 @@ pub struct SkillConfig {
     /// Set to 0 for no limit. Default: 102400 (100KB)
     #[serde(default = "default_max_reference_size")]
     pub max_reference_size: usize,
+
+    /// API configuration for Skills management endpoints
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api: Option<SkillApiConfig>,
+}
+
+/// Skills API configuration for authentication and rate limiting
+///
+/// Controls access to Skills management API endpoints.
+///
+/// # Example Configuration
+///
+/// ```toml
+/// [skill.api]
+/// api_key = "sk-your-secret-key"
+/// rate_limit_requests = 100
+/// rate_limit_window_secs = 60
+/// ```
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SkillApiConfig {
+    /// API key for authenticating Skills API requests.
+    /// If empty, no authentication is required.
+    /// Can also be set via SKILLS_API_KEY environment variable.
+    #[serde(default)]
+    api_key: String,
+
+    /// Maximum number of requests allowed within the rate limit window.
+    /// Set to 0 to disable rate limiting. Default: 100
+    #[serde(default = "default_rate_limit_requests")]
+    pub rate_limit_requests: u32,
+
+    /// Rate limit window duration in seconds. Default: 60
+    #[serde(default = "default_rate_limit_window_secs")]
+    pub rate_limit_window_secs: u64,
+}
+
+impl SkillApiConfig {
+    /// Get the API key, checking environment variable as fallback
+    pub fn get_api_key(&self) -> Option<String> {
+        if !self.api_key.is_empty() {
+            Some(self.api_key.clone())
+        } else {
+            std::env::var("SKILLS_API_KEY").ok()
+        }
+    }
+
+    /// Check if rate limiting is enabled
+    pub fn rate_limiting_enabled(&self) -> bool {
+        self.rate_limit_requests > 0
+    }
+}
+
+impl Default for SkillApiConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            rate_limit_requests: default_rate_limit_requests(),
+            rate_limit_window_secs: default_rate_limit_window_secs(),
+        }
+    }
+}
+
+fn default_rate_limit_requests() -> u32 {
+    100 // 100 requests per window
+}
+
+fn default_rate_limit_window_secs() -> u64 {
+    60 // 60 seconds window
 }
 
 fn default_skills_enabled() -> bool {
@@ -1112,6 +1180,7 @@ impl Default for SkillConfig {
             directories: default_skills_directories(),
             execution: None,
             max_reference_size: default_max_reference_size(),
+            api: None,
         }
     }
 }
