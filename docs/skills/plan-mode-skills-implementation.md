@@ -40,6 +40,8 @@
       - [任务 3.1：实现 SkillDetector (`detector.rs`)](#任务-31实现-skilldetector-detectorrs)
       - [任务 3.2：实现 SkillInjector (`injector.rs`)](#任务-32实现-skillinjector-injectorrs)
       - [任务 3.3：修改 build\_context\_for\_react (`plan.rs` 修改)](#任务-33修改-build_context_for_react-planrs-修改)
+      - [任务 3.3.1：实现 References 自动注入 ✅](#任务-331实现-references-自动注入-)
+      - [任务 3.3.2：实现内部工具支持 ✅](#任务-332实现内部工具支持-)
       - [任务 3.4：修改 execute\_subtask\_with\_react (`plan.rs` 修改)](#任务-34修改-execute_subtask_with_react-planrs-修改)
       - [任务 3.5：实现工具过滤](#任务-35实现工具过滤)
       - [任务 3.6：扩展执行跟踪 (`trace.rs` 修改) ✅](#任务-36扩展执行跟踪-tracers-修改-)
@@ -454,8 +456,13 @@ sequenceDiagram
   - 检查文件是否可执行
 - [x] 实现 `load_asset(skill_dir: &Path, asset_name: &str) -> Option<Vec<u8>>` 方法
   - 从 `assets/` 目录加载资源文件
+- [x] 实现 `load_asset_string(skill_dir: &Path, asset_name: &str) -> Option<String>` 方法
+  - 从 `assets/` 目录加载文本资源文件
 - [x] 实现 `has_resources(skill_dir: &Path) -> bool` 方法
   - 检查 Skill 是否有附加资源
+- [x] 实现 `run_script()` 方法
+  - 执行 scripts/ 目录中的脚本（.js, .py, .sh）
+  - 支持超时控制和参数传递
   ```rust
   // src/skills/loader.rs
 
@@ -593,6 +600,27 @@ sequenceDiagram
 - [x] 实现两阶段逻辑：
   - 无 active_skill 时：注入 Skills 摘要，提示使用 `<use_skill>` 标签
   - 有 active_skill 时：注入完整 Skill 内容和工具
+
+#### 任务 3.3.1：实现 References 自动注入 ✅
+
+- [x] 在 Skill 激活时自动加载 `references/` 目录内容
+- [x] 将参考文档附加到 Skill 内容之后
+- [x] 支持 `.md` 和 `.txt` 文件格式
+
+#### 任务 3.3.2：实现内部工具支持 ✅
+
+- [x] 实现 `internal__skill_run_script` 工具
+  - 执行 Skill `scripts/` 目录中的脚本
+  - 支持脚本权限控制（`allow-scripts` 元数据字段）
+  - 支持超时控制（`script-timeout` 元数据字段）
+  - 支持命令行参数传递
+- [x] 实现 `internal__skill_load_asset` 工具
+  - 从 `assets/` 目录加载资源文件
+  - 支持模板变量替换（`{{variable}}` 语法）
+  - 支持格式解析（`json`、`yaml`、`markdown`）
+- [x] 在 `get_available_tools()` 中注册内部工具
+- [x] 在 `execute_internal_tool()` 中实现工具调用逻辑
+- [x] 在 `build_tools_json()` 中添加自定义参数 schema
 
 #### 任务 3.4：修改 execute_subtask_with_react (`plan.rs` 修改)
 
@@ -1396,10 +1424,10 @@ ID: {subtask_id}
 
 ## 文档版本
 
-- **版本**: 1.1
+- **版本**: 1.2
 - **创建日期**: 2024
-- **最后更新**: 2024-12-30
-- **适用项目版本**: llama-nexus
+- **最后更新**: 2025-01-08
+- **适用项目版本**: llama-nexus (feat-sandbox)
 - **Agent Skills 标准版本**: [agentskills.io/specification](https://agentskills.io/specification)
 
 ### 版本历史
@@ -1408,3 +1436,4 @@ ID: {subtask_id}
 |------|------------|--------------------------------------|
 | 1.0  | 2024       | 初始版本                             |
 | 1.1  | 2024-12-30 | 调整实现规划以符合 Agent Skills 标准 |
+| 1.2  | 2025-01-08 | 添加内部工具支持（skill_run_script, skill_load_asset） |

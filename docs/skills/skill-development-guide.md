@@ -11,28 +11,43 @@
     - [2.2 元数据字段](#22-元数据字段)
     - [2.3 description 编写指南](#23-description-编写指南)
     - [2.4 allowed-tools 格式](#24-allowed-tools-格式)
-  - [三、创建 Skill 示例：天气查询](#三创建-skill-示例天气查询)
-    - [3.1 场景](#31-场景)
-    - [3.2 创建目录结构](#32-创建目录结构)
-    - [3.3 创建 SKILL.md 文件](#33-创建-skillmd-文件)
-    - [3.4 配置 MCP Server](#34-配置-mcp-server)
-  - [四、工作原理](#四工作原理)
-    - [4.1 触发流程](#41-触发流程)
-    - [4.2 两阶段 Prompt 示例](#42-两阶段-prompt-示例)
+  - [三、Skill 目录结构](#三skill-目录结构)
+    - [3.1 完整目录结构](#31-完整目录结构)
+    - [3.2 scripts/ 目录](#32-scripts-目录)
+    - [3.3 references/ 目录](#33-references-目录)
+    - [3.4 assets/ 目录](#34-assets-目录)
+  - [四、内部工具](#四内部工具)
+    - [4.1 internal\_\_skill\_run\_script](#41-internal__skill_run_script)
+    - [4.2 internal\_\_skill\_load\_asset](#42-internal__skill_load_asset)
+  - [五、创建 Skill 示例：天气查询](#五创建-skill-示例天气查询)
+    - [5.1 场景](#51-场景)
+    - [5.2 创建目录结构](#52-创建目录结构)
+    - [5.3 创建 SKILL.md 文件](#53-创建-skillmd-文件)
+    - [5.4 配置 MCP Server](#54-配置-mcp-server)
+  - [六、工作原理](#六工作原理)
+    - [6.1 触发流程](#61-触发流程)
+    - [6.2 两阶段 Prompt 示例](#62-两阶段-prompt-示例)
       - [阶段一：注入 Skills 摘要](#阶段一注入-skills-摘要)
       - [阶段二：注入完整 Skill 内容](#阶段二注入完整-skill-内容)
-    - [4.3 两阶段加载的优势](#43-两阶段加载的优势)
-  - [五、更多示例](#五更多示例)
-    - [5.1 代码审查 Skill](#51-代码审查-skill)
-    - [5.2 数据库查询 Skill](#52-数据库查询-skill)
-  - [六、最佳实践](#六最佳实践)
-    - [6.1 Skill 设计原则](#61-skill-设计原则)
-    - [6.2 文件组织](#62-文件组织)
-    - [6.3 测试 Skill](#63-测试-skill)
-  - [七、故障排除](#七故障排除)
-    - [7.1 Skill 未被触发](#71-skill-未被触发)
-    - [7.2 MCP 工具调用失败](#72-mcp-工具调用失败)
-    - [7.3 输出格式不正确](#73-输出格式不正确)
+    - [6.3 两阶段加载的优势](#63-两阶段加载的优势)
+  - [七、更多示例](#七更多示例)
+    - [7.1 代码审查 Skill](#71-代码审查-skill)
+    - [7.2 数据库查询 Skill](#72-数据库查询-skill)
+    - [7.3 带脚本的数据处理 Skill](#73-带脚本的数据处理-skill)
+  - [八、多技能支持](#八多技能支持)
+    - [8.1 多技能检测](#81-多技能检测)
+    - [8.2 优先级和冲突解决](#82-优先级和冲突解决)
+    - [8.3 最佳实践](#83-最佳实践)
+  - [九、最佳实践](#九最佳实践)
+    - [9.1 Skill 设计原则](#91-skill-设计原则)
+    - [9.2 文件组织](#92-文件组织)
+    - [9.3 测试 Skill](#93-测试-skill)
+  - [十、故障排除](#十故障排除)
+    - [10.1 Skill 未被触发](#101-skill-未被触发)
+    - [10.2 MCP 工具调用失败](#102-mcp-工具调用失败)
+    - [10.3 脚本执行失败](#103-脚本执行失败)
+    - [10.4 资源文件加载失败](#104-资源文件加载失败)
+    - [10.5 输出格式不正确](#105-输出格式不正确)
 
 ## 一、Skills 概述
 
@@ -77,6 +92,9 @@ name: skill-name
 description: 清晰的描述，包含触发关键词。
 allowed-tools: Tool1 Tool2
 model: optional-model-name
+metadata:                       # 可选：扩展元数据（Agent Skills 标准）
+  priority: "10"                # 技能优先级（字符串格式，-100 到 100）
+  conflicts: "skill-a, skill-b" # 冲突的技能（逗号分隔的字符串）
 ---
 
 # Skill 标题
@@ -101,6 +119,18 @@ assistant: 助手响应
 | `description` | 是 | 清晰的描述，最多 1024 字符，**用于语义匹配触发** |
 | `allowed-tools` | 否 | 限制此 Skill 可用的工具列表（**空格分隔**，符合 Agent Skills 标准） |
 | `model` | 否 | 此 Skill 活跃时使用的模型 |
+| `metadata` | 否 | 扩展元数据（Agent Skills 标准的 `HashMap<String, String>`），可用于存储 `priority` 和 `conflicts` 等扩展字段 |
+
+#### 2.2.1 metadata 扩展字段
+
+通过 `metadata` 字段可以配置以下扩展功能：
+
+| 键 | 值格式 | 说明 |
+|----|--------|------|
+| `priority` | 字符串数字，如 `"10"` | 技能优先级（-100 到 100，默认 0），用于多技能场景下的排序和冲突解决 |
+| `conflicts` | 逗号分隔字符串，如 `"skill-a, skill-b"` | 与此技能冲突的技能名称，当检测到冲突时高优先级技能会被保留 |
+
+> **注意**：根据 [Agent Skills Standard](https://agentskills.io/specification)，`metadata` 字段是官方扩展机制，值必须为字符串类型。
 
 ### 2.3 description 编写指南
 
@@ -124,9 +154,215 @@ allowed-tools: weather---weather-mcp-server forecast---weather-mcp-server
 
 如果不指定，Skill 可以使用所有可用工具。
 
-## 三、创建 Skill 示例：天气查询
+## 三、Skill 目录结构
 
-### 3.1 场景
+### 3.1 完整目录结构
+
+一个完整的 Skill 可以包含以下目录结构：
+
+```
+skills/
+└── my-skill/
+    ├── SKILL.md           # 必需：主 Skill 定义文件
+    ├── scripts/           # 可选：可执行脚本目录
+    │   ├── process.js     # JavaScript 脚本
+    │   ├── export.py      # Python 脚本
+    │   └── analyze.sh     # Shell 脚本
+    ├── references/        # 可选：自动注入的参考文档
+    │   ├── api-spec.md    # API 文档
+    │   └── examples.md    # 示例文档
+    └── assets/            # 可选：按需加载的资源文件
+        ├── template.md    # 模板文件
+        ├── config.json    # 配置文件
+        └── schema.yaml    # Schema 定义
+```
+
+### 3.2 scripts/ 目录
+
+`scripts/` 目录存放可由 LLM 通过 `internal__skill_run_script` 工具执行的脚本文件。
+
+**支持的脚本类型**：
+
+| 扩展名 | 解释器 | 说明 |
+|--------|--------|------|
+| `.js` | `node` | Node.js 脚本 |
+| `.py` | `python3` | Python 脚本 |
+| `.sh` | `bash` | Shell 脚本 |
+
+**脚本权限控制**：
+
+在 `SKILL.md` 的元数据中配置：
+
+```yaml
+---
+name: data-processor
+description: 处理和分析数据
+allow-scripts: true          # 启用脚本执行（默认 false）
+script-timeout: 30           # 脚本超时秒数（默认 30）
+---
+```
+
+**安全限制**：
+
+- 脚本在沙盒环境中执行
+- 不能访问网络（除非特别配置）
+- 工作目录限制在 Skill 目录内
+- 最大执行时间受 `script-timeout` 控制
+
+### 3.3 references/ 目录
+
+`references/` 目录存放参考文档，当 Skill 被激活时**自动注入**到上下文中。
+
+**使用场景**：
+
+- API 规格文档
+- 代码规范说明
+- 常用示例集合
+- 领域知识文档
+
+**注入时机**：
+
+当 LLM 选择使用某个 Skill 时（阶段二），`references/` 下的所有 `.md` 文件内容会自动附加到 Skill 内容之后。
+
+```mermaid
+graph LR
+    ACTIVATE[Skill 被激活] --> LOAD[加载 SKILL.md]
+    LOAD --> REFS[读取 references/*.md]
+    REFS --> INJECT[注入到上下文]
+
+    style REFS fill:#e3f2fd
+```
+
+### 3.4 assets/ 目录
+
+`assets/` 目录存放资源文件，由 LLM 通过 `internal__skill_load_asset` 工具**按需加载**。
+
+**与 references/ 的区别**：
+
+| 特性 | references/ | assets/ |
+|------|-------------|---------|
+| 加载时机 | Skill 激活时自动加载 | LLM 显式调用时加载 |
+| 适用场景 | 必需的参考文档 | 可选的模板/配置 |
+| 上下文占用 | 始终占用 | 按需占用 |
+| 模板变量 | 不支持 | 支持 `{{variable}}` |
+| 格式解析 | 原样注入 | 支持 JSON/YAML/Markdown |
+
+**使用示例**：
+
+```markdown
+<!-- 在 SKILL.md 中引导 LLM 使用 assets -->
+
+当需要生成报告时，使用 `internal__skill_load_asset` 加载模板：
+- `template.md`: 报告模板
+- `config.json`: 输出配置
+```
+
+## 四、内部工具
+
+llama-nexus 为 Skills 提供了内部工具（以 `internal__` 前缀标识），这些工具不是 MCP 工具，而是由系统直接提供的特殊功能。
+
+### 4.1 internal\_\_skill\_run\_script
+
+执行 Skill `scripts/` 目录中的脚本文件。
+
+**参数**：
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `script_name` | string | 是 | 脚本文件名（如 `process.js`） |
+| `args` | array | 否 | 命令行参数数组 |
+
+**返回值**：
+
+- 成功：脚本的标准输出内容
+- 失败：错误信息
+
+**使用条件**：
+
+1. Skill 必须设置 `allow-scripts: true`
+2. 脚本必须存在于 `scripts/` 目录
+3. 脚本扩展名必须是 `.js`、`.py` 或 `.sh`
+
+**示例**：
+
+```json
+{
+  "name": "internal__skill_run_script",
+  "arguments": {
+    "script_name": "process.js",
+    "args": ["--input", "data.csv", "--output", "result.json"]
+  }
+}
+```
+
+### 4.2 internal\_\_skill\_load\_asset
+
+从 Skill `assets/` 目录加载资源文件，支持模板变量替换和格式解析。
+
+**参数**：
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `asset_name` | string | 是 | 资源文件名（如 `template.md`） |
+| `variables` | object | 否 | 模板变量键值对 |
+| `parse_as` | string | 否 | 解析格式：`json`、`yaml` 或 `markdown` |
+
+**模板变量替换**：
+
+使用 `{{variable}}` 语法在模板中定义变量：
+
+```markdown
+# {{title}}
+
+作者：{{author}}
+日期：{{date}}
+
+## 摘要
+
+{{summary}}
+```
+
+调用时传入变量：
+
+```json
+{
+  "name": "internal__skill_load_asset",
+  "arguments": {
+    "asset_name": "template.md",
+    "variables": {
+      "title": "月度报告",
+      "author": "张三",
+      "date": "2025-01-08",
+      "summary": "本月完成了主要开发任务..."
+    }
+  }
+}
+```
+
+**格式解析**：
+
+| parse_as | 行为 |
+|----------|------|
+| 不指定 | 返回原始内容（含变量替换） |
+| `json` | 解析为 JSON 并格式化输出 |
+| `yaml` | 解析为 YAML 并格式化输出 |
+| `markdown` | 添加代码块包装 |
+
+**示例 - 加载配置文件**：
+
+```json
+{
+  "name": "internal__skill_load_asset",
+  "arguments": {
+    "asset_name": "config.json",
+    "parse_as": "json"
+  }
+}
+```
+
+## 五、创建 Skill 示例：天气查询
+
+### 5.1 场景
 
 假设您有一个天气 MCP Server，提供以下工具：
 
@@ -434,7 +670,7 @@ sequenceDiagram
 
 ---
 
-### 4.3 两阶段加载的优势
+### 6.3 两阶段加载的优势
 
 1. **阶段一**：系统将所有 Skill 的 `name` 和 `description` 注入到提示词中
 2. **阶段二**：当 LLM 决定使用某个 Skill 时（通过 `<use_skill>` 标签），系统加载完整内容
@@ -448,9 +684,9 @@ sequenceDiagram
 | **LLM 自主选择** | LLM 根据语义判断是否需要 Skill |
 | **支持多 Skill** | 可以注册大量 Skill 而不会超出上下文限制 |
 
-## 五、更多示例
+## 七、更多示例
 
-### 5.1 代码审查 Skill
+### 7.1 代码审查 Skill
 
 ```markdown
 ---
@@ -513,7 +749,7 @@ assistant: 我来审查当前的代码变更。
 </example>
 ```
 
-### 5.2 数据库查询 Skill
+### 7.2 数据库查询 Skill
 
 ```markdown
 ---
@@ -561,16 +797,191 @@ assistant: 我来查询最近一周的订单统计。
 </example>
 ```
 
-## 六、最佳实践
+### 7.3 带脚本的数据处理 Skill
 
-### 6.1 Skill 设计原则
+这个示例展示如何结合使用脚本和资源文件。
+
+**目录结构**：
+
+```
+skills/
+└── data-processor/
+    ├── SKILL.md
+    ├── scripts/
+    │   ├── analyze.py      # 数据分析脚本
+    │   └── export.js       # 导出脚本
+    └── assets/
+        ├── report-template.md   # 报告模板
+        └── config.json          # 配置文件
+```
+
+**SKILL.md**：
+
+```markdown
+---
+name: data-processor
+description: 处理和分析数据，生成报告。当用户需要分析 CSV 数据、生成统计报告、或导出数据时使用。
+allow-scripts: true
+script-timeout: 60
+---
+
+# Data Processor Skill
+
+## 说明
+
+当用户需要处理数据时，按照以下流程执行：
+
+### 工作流程
+
+1. **理解需求**：确认用户的数据处理需求
+2. **执行分析**：使用 `internal__skill_run_script` 运行分析脚本
+3. **加载模板**：使用 `internal__skill_load_asset` 加载报告模板
+4. **生成报告**：填充模板变量生成最终报告
+
+### 可用脚本
+
+- `analyze.py`: 分析 CSV 数据，输出统计结果
+  - 参数：`--input <file>` 输入文件路径
+  - 参数：`--format <json|text>` 输出格式
+- `export.js`: 导出数据为指定格式
+  - 参数：`--type <csv|json|xlsx>` 导出类型
+
+### 可用资源
+
+- `report-template.md`: 报告模板，支持变量：
+  - `{{title}}`: 报告标题
+  - `{{date}}`: 生成日期
+  - `{{summary}}`: 数据摘要
+  - `{{details}}`: 详细内容
+- `config.json`: 默认配置
+
+## 示例
+
+<example>
+user: 分析 sales.csv 文件并生成报告
+assistant: 我来分析您的销售数据并生成报告。
+
+首先，运行分析脚本：
+
+[调用 internal__skill_run_script]
+{
+  "script_name": "analyze.py",
+  "args": ["--input", "sales.csv", "--format", "json"]
+}
+
+分析结果：
+{
+  "total_records": 1500,
+  "total_sales": 125000,
+  "average_order": 83.33,
+  "top_product": "Widget A"
+}
+
+接下来，加载报告模板并填充数据：
+
+[调用 internal__skill_load_asset]
+{
+  "asset_name": "report-template.md",
+  "variables": {
+    "title": "销售数据分析报告",
+    "date": "2025-01-08",
+    "summary": "共 1,500 条记录，总销售额 ¥125,000",
+    "details": "平均订单金额 ¥83.33，最畅销产品：Widget A"
+  }
+}
+
+## 销售数据分析报告
+
+**生成日期**：2025-01-08
+
+### 摘要
+
+共 1,500 条记录，总销售额 ¥125,000
+
+### 详细信息
+
+平均订单金额 ¥83.33，最畅销产品：Widget A
+</example>
+```
+
+## 八、多技能支持
+
+### 8.1 多技能检测
+
+llama-nexus 支持在单次请求中检测和激活多个 Skills。LLM 可以通过以下方式请求多个技能：
+
+**方式一：多个 `<use_skill>` 标签**
+
+```
+<use_skill>code-review</use_skill>
+<use_skill>doc-gen</use_skill>
+```
+
+**方式二：逗号分隔（推荐）**
+
+```
+<use_skill>code-review, doc-gen, test-gen</use_skill>
+```
+
+系统会自动去重重复的技能名称。
+
+### 8.2 优先级和冲突解决
+
+当多个 Skills 被同时请求时，系统会按以下规则处理：
+
+1. **优先级排序**：按 `metadata.priority` 字段从高到低排序
+2. **冲突检测**：检查 `metadata.conflicts` 字段，移除冲突的低优先级技能
+3. **返回结果**：返回解决后的技能列表和被移除的技能原因
+
+**示例场景**：
+
+假设有以下两个 Skills：
+
+```yaml
+# primary-review/SKILL.md
+---
+name: primary-review
+description: 主要代码审查技能
+metadata:
+  priority: "20"
+  conflicts: "legacy-review"
+---
+```
+
+```yaml
+# legacy-review/SKILL.md
+---
+name: legacy-review
+description: 旧版代码审查技能
+metadata:
+  priority: "5"
+---
+```
+
+当 LLM 请求 `<use_skill>legacy-review, primary-review</use_skill>` 时：
+
+1. 系统检测到两个技能
+2. 按优先级排序：`primary-review (20)` > `legacy-review (5)`
+3. `primary-review` 声明与 `legacy-review` 冲突
+4. 最终只激活 `primary-review`，`legacy-review` 被移除
+
+### 8.3 最佳实践
+
+- **设置合理优先级**：核心功能技能设置较高优先级（如 `"10"` 到 `"20"`），辅助技能使用默认值 0
+- **声明冲突关系**：如果两个技能不应同时使用，在高优先级技能中声明 `metadata.conflicts`
+- **避免循环冲突**：确保 A conflicts B 时，不要同时让 B conflicts A（虽然系统能处理，但会增加复杂性）
+- **使用标准格式**：`priority` 和 `conflicts` 使用字符串格式，符合 Agent Skills Standard
+
+## 九、最佳实践
+
+### 9.1 Skill 设计原则
 
 1. **单一职责**：每个 Skill 专注于一类任务
 2. **清晰描述**：description 要包含用户可能说的关键词
 3. **详细指导**：提供明确的工作流程和输出格式
 4. **丰富示例**：包含多个典型用例的示例
 
-### 6.2 文件组织
+### 9.2 文件组织
 
 ```
 skills/
@@ -584,7 +995,7 @@ skills/
     └── SKILL.md
 ```
 
-### 6.3 测试 Skill
+### 9.3 测试 Skill
 
 创建 Skill 后，通过以下方式测试：
 
@@ -593,9 +1004,9 @@ skills/
 3. 检查 LLM 是否正确使用了 Skill 指令
 4. 验证 MCP 工具调用是否正确
 
-## 七、故障排除
+## 十、故障排除
 
-### 7.1 Skill 未被触发
+### 10.1 Skill 未被触发
 
 **可能原因**：
 - `description` 未包含用户使用的关键词
@@ -605,7 +1016,7 @@ skills/
 - 丰富 `description` 中的触发词
 - 检查 YAML front matter 格式
 
-### 7.2 MCP 工具调用失败
+### 10.2 MCP 工具调用失败
 
 **可能原因**：
 - `allowed-tools` 中的工具名称错误
@@ -615,7 +1026,49 @@ skills/
 - 确认工具名称格式：`工具名---MCP服务器名`
 - 检查 `config.toml` 中的 MCP 配置
 
-### 7.3 输出格式不正确
+### 10.3 脚本执行失败
+
+**可能原因**：
+
+| 错误信息 | 原因 | 解决方案 |
+|----------|------|----------|
+| `Scripts are not allowed` | Skill 未启用脚本权限 | 在 SKILL.md 中添加 `allow-scripts: true` |
+| `Script not found` | 脚本文件不存在 | 确认脚本在 `scripts/` 目录中 |
+| `Unsupported script type` | 脚本扩展名不支持 | 使用 `.js`、`.py` 或 `.sh` 扩展名 |
+| `Script execution timed out` | 脚本执行超时 | 增加 `script-timeout` 值或优化脚本 |
+| `Script execution failed` | 脚本运行错误 | 检查脚本逻辑和依赖 |
+
+**调试步骤**：
+
+1. 确认 Skill 配置正确：
+   ```yaml
+   allow-scripts: true
+   script-timeout: 30  # 根据需要调整
+   ```
+
+2. 手动测试脚本：
+   ```bash
+   cd skills/my-skill/scripts
+   python3 analyze.py --help
+   ```
+
+3. 检查脚本依赖是否已安装
+
+4. 查看服务器日志获取详细错误信息
+
+### 10.4 资源文件加载失败
+
+**可能原因**：
+- 资源文件不存在于 `assets/` 目录
+- 文件名拼写错误
+- 模板变量语法错误
+
+**解决方案**：
+- 确认文件路径：`skills/<skill-name>/assets/<file>`
+- 检查 `{{variable}}` 语法是否正确
+- 验证 JSON/YAML 文件格式是否有效
+
+### 10.5 输出格式不正确
 
 **可能原因**：
 - Skill 中的输出格式说明不够清晰
@@ -627,6 +1080,7 @@ skills/
 
 ---
 
-*文档版本: 1.0*
+*文档版本: 2.0*
 *创建日期: 2025-12-29*
-*适用项目版本: llama-nexus (feat-plan-mode)*
+*最后更新: 2025-01-08*
+*适用项目版本: llama-nexus (feat-sandbox)*
