@@ -80,6 +80,13 @@ directories = [                             # Directories to scan for Skills
     "~/.llama-nexus/skills"                 # User-level skills
 ]
 
+# Skills API configuration for authentication and rate limiting
+# Controls access to Skills management API endpoints
+[skill.api]
+# api_key = "sk-your-secret-key"  # API key for Skills API (or set SKILLS_API_KEY env var)
+# rate_limit_requests = 100       # Maximum requests per window (default: 100, 0 to disable)
+# rate_limit_window_secs = 60     # Rate limit window in seconds (default: 60)
+
 # Skills marketplace configuration (skillsmp.com)
 # Use: llama-nexus skill install skillsmp:<name>
 [skill.market]
