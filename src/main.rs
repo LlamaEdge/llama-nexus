@@ -7,6 +7,7 @@ mod handlers;
 mod info;
 mod mcp;
 mod memory;
+mod reflection;
 mod responses;
 mod server;
 mod skills;

@@ -56,6 +56,9 @@ pub struct Config {
     /// Skills configuration (only effective in Plan Mode)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill: Option<SkillConfig>,
+    /// Reflection system configuration (only effective in Plan Mode)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reflection: Option<crate::reflection::ReflectionConfig>,
 }
 impl Config {
     pub async fn load(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
@@ -115,6 +118,7 @@ impl Default for Config {
             server_health_push_url: None,
             mcp: None,
             skill: None,
+            reflection: None,
         }
     }
 }
