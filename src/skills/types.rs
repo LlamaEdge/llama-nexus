@@ -84,28 +84,62 @@ pub struct SkillMetadata {
     /// - `["guide-*.txt", "api.md"]` - load files matching patterns
     #[serde(default)]
     pub references: Option<Vec<String>>,
+}
 
-    /// Skill priority for multi-skill resolution (optional, extension field)
+impl SkillMetadata {
+    /// Get skill priority from metadata (extension field)
+    ///
+    /// Priority is stored in the `metadata` field as a string value
+    /// under the key "priority", following Agent Skills Standard.
     ///
     /// Higher priority skills take precedence in conflict resolution.
     /// Default priority is 0. Range: -100 to 100.
     ///
-    /// Examples:
-    /// - `priority: 10` - higher priority, loaded first
-    /// - `priority: -5` - lower priority, loaded after higher priority skills
-    #[serde(default)]
-    pub priority: Option<i32>,
+    /// # Example metadata configuration:
+    /// ```yaml
+    /// metadata:
+    ///   priority: "10"
+    /// ```
+    ///
+    /// # Returns
+    /// - `Some(i32)` if priority is defined and valid
+    /// - `None` if not defined or invalid (defaults to 0 in resolution)
+    pub fn get_priority(&self) -> Option<i32> {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get("priority"))
+            .and_then(|v| v.parse::<i32>().ok())
+    }
 
-    /// Conflicting skills (optional, extension field)
+    /// Get conflicting skills from metadata (extension field)
+    ///
+    /// Conflicts are stored in the `metadata` field as a comma-separated
+    /// string under the key "conflicts", following Agent Skills Standard.
     ///
     /// Lists skills that cannot be active simultaneously with this skill.
     /// When conflict is detected, the higher priority skill wins.
     ///
-    /// Examples:
-    /// - `conflicts: ["other-skill"]` - conflicts with specific skill
-    /// - `conflicts: ["skill-a", "skill-b"]` - conflicts with multiple skills
-    #[serde(default)]
-    pub conflicts: Option<Vec<String>>,
+    /// # Example metadata configuration:
+    /// ```yaml
+    /// metadata:
+    ///   conflicts: "skill-a, skill-b"
+    /// ```
+    ///
+    /// # Returns
+    /// - `Some(Vec<String>)` if conflicts are defined
+    /// - `None` if not defined (no conflicts)
+    pub fn get_conflicts(&self) -> Option<Vec<String>> {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get("conflicts"))
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty())
+    }
 }
 
 /// Skill-specific resource limits configuration
@@ -690,8 +724,39 @@ mod tests {
             allowed_scripts: None,
             execution_limits: None,
             references: None,
-            priority: None,
-            conflicts: None,
+        }
+    }
+
+    /// Helper to create a SkillMetadata with priority and conflicts in metadata
+    fn test_metadata_with_priority_conflicts(
+        name: &str,
+        description: &str,
+        priority: Option<i32>,
+        conflicts: Option<Vec<&str>>,
+    ) -> SkillMetadata {
+        let mut metadata_map = HashMap::new();
+        if let Some(p) = priority {
+            metadata_map.insert("priority".to_string(), p.to_string());
+        }
+        if let Some(c) = conflicts {
+            metadata_map.insert("conflicts".to_string(), c.join(", "));
+        }
+
+        SkillMetadata {
+            name: name.to_string(),
+            description: description.to_string(),
+            license: None,
+            compatibility: None,
+            metadata: if metadata_map.is_empty() {
+                None
+            } else {
+                Some(metadata_map)
+            },
+            allowed_tools: None,
+            model: None,
+            allowed_scripts: None,
+            execution_limits: None,
+            references: None,
         }
     }
 
@@ -1437,5 +1502,128 @@ allowed-scripts:
         // But core variables should still be present
         assert!(env.get("SKILL_DIR").is_some());
         assert!(env.get("SCRIPT_NAME").is_some());
+    }
+
+    // ==========================================================================
+    // Tests for get_priority() and get_conflicts() from metadata
+    // ==========================================================================
+
+    #[test]
+    fn test_get_priority_from_metadata() {
+        let metadata = test_metadata_with_priority_conflicts("test", "test", Some(10), None);
+        assert_eq!(metadata.get_priority(), Some(10));
+    }
+
+    #[test]
+    fn test_get_priority_negative() {
+        let metadata = test_metadata_with_priority_conflicts("test", "test", Some(-5), None);
+        assert_eq!(metadata.get_priority(), Some(-5));
+    }
+
+    #[test]
+    fn test_get_priority_none_when_not_set() {
+        let metadata = test_metadata("test", "test");
+        assert_eq!(metadata.get_priority(), None);
+    }
+
+    #[test]
+    fn test_get_priority_none_when_metadata_empty() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.metadata = Some(HashMap::new());
+        assert_eq!(metadata.get_priority(), None);
+    }
+
+    #[test]
+    fn test_get_priority_none_when_invalid_string() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.metadata = Some(HashMap::from([(
+            "priority".to_string(),
+            "not_a_number".to_string(),
+        )]));
+        assert_eq!(metadata.get_priority(), None);
+    }
+
+    #[test]
+    fn test_get_conflicts_from_metadata() {
+        let metadata = test_metadata_with_priority_conflicts(
+            "test",
+            "test",
+            None,
+            Some(vec!["skill-a", "skill-b"]),
+        );
+        let conflicts = metadata.get_conflicts();
+        assert!(conflicts.is_some());
+        let conflicts = conflicts.unwrap();
+        assert_eq!(conflicts.len(), 2);
+        assert!(conflicts.contains(&"skill-a".to_string()));
+        assert!(conflicts.contains(&"skill-b".to_string()));
+    }
+
+    #[test]
+    fn test_get_conflicts_single() {
+        let metadata =
+            test_metadata_with_priority_conflicts("test", "test", None, Some(vec!["only-one"]));
+        let conflicts = metadata.get_conflicts();
+        assert!(conflicts.is_some());
+        assert_eq!(conflicts.unwrap(), vec!["only-one"]);
+    }
+
+    #[test]
+    fn test_get_conflicts_none_when_not_set() {
+        let metadata = test_metadata("test", "test");
+        assert!(metadata.get_conflicts().is_none());
+    }
+
+    #[test]
+    fn test_get_conflicts_none_when_empty_string() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.metadata = Some(HashMap::from([("conflicts".to_string(), "".to_string())]));
+        assert!(metadata.get_conflicts().is_none());
+    }
+
+    #[test]
+    fn test_get_conflicts_trims_whitespace() {
+        let mut metadata = test_metadata("test", "test");
+        metadata.metadata = Some(HashMap::from([(
+            "conflicts".to_string(),
+            "  skill-a  ,  skill-b  ".to_string(),
+        )]));
+        let conflicts = metadata.get_conflicts().unwrap();
+        assert_eq!(conflicts, vec!["skill-a", "skill-b"]);
+    }
+
+    #[test]
+    fn test_get_priority_and_conflicts_together() {
+        let metadata = test_metadata_with_priority_conflicts(
+            "test",
+            "test",
+            Some(20),
+            Some(vec!["conflict-a", "conflict-b"]),
+        );
+        assert_eq!(metadata.get_priority(), Some(20));
+        let conflicts = metadata.get_conflicts().unwrap();
+        assert_eq!(conflicts, vec!["conflict-a", "conflict-b"]);
+    }
+
+    #[test]
+    fn test_metadata_yaml_with_priority_conflicts() {
+        let yaml = r#"
+name: test-skill
+description: A test skill
+metadata:
+  priority: "10"
+  conflicts: "skill-a, skill-b"
+  author: "test"
+"#;
+
+        let metadata: SkillMetadata = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(metadata.get_priority(), Some(10));
+        let conflicts = metadata.get_conflicts().unwrap();
+        assert_eq!(conflicts, vec!["skill-a", "skill-b"]);
+        // Other metadata fields should still work
+        assert_eq!(
+            metadata.metadata.as_ref().unwrap().get("author"),
+            Some(&"test".to_string())
+        );
     }
 }

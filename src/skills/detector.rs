@@ -108,6 +108,9 @@ impl SkillDetector {
 
     /// Resolve skills by priority, returning sorted list (highest priority first)
     ///
+    /// Priority is read from the skill's metadata field using `get_priority()`,
+    /// following the Agent Skills Standard extension mechanism.
+    ///
     /// # Arguments
     /// * `skill_names` - List of detected skill names
     /// * `loaded_skills` - Available loaded skills with metadata
@@ -125,7 +128,7 @@ impl SkillDetector {
                 let priority = loaded_skills
                     .iter()
                     .find(|s| &s.metadata.name == name)
-                    .and_then(|s| s.metadata.priority)
+                    .and_then(|s| s.metadata.get_priority())
                     .unwrap_or(0);
                 (name.clone(), priority)
             })
@@ -144,6 +147,9 @@ impl SkillDetector {
     ///
     /// When skills conflict, the higher priority skill is kept and
     /// conflicting lower priority skills are removed.
+    ///
+    /// Conflicts are read from the skill's metadata field using `get_conflicts()`,
+    /// following the Agent Skills Standard extension mechanism.
     ///
     /// # Arguments
     /// * `skill_names` - List of skill names (should be priority-sorted)
@@ -185,7 +191,7 @@ impl SkillDetector {
                     if let Some(resolved_meta) = loaded_skills
                         .iter()
                         .find(|s| &s.metadata.name == resolved_skill)
-                        && let Some(ref conflicts) = resolved_meta.metadata.conflicts
+                        && let Some(ref conflicts) = resolved_meta.metadata.get_conflicts()
                         && conflicts.contains(skill_name)
                     {
                         // This skill conflicts with an already resolved higher-priority skill
@@ -203,7 +209,7 @@ impl SkillDetector {
                     resolved.push(skill_name.clone());
 
                     // Mark skills that this skill conflicts with as excluded
-                    if let Some(ref conflicts) = skill.metadata.conflicts {
+                    if let Some(ref conflicts) = skill.metadata.get_conflicts() {
                         for conflict in conflicts {
                             excluded.insert(conflict.clone(), skill_name.clone());
                         }
@@ -564,11 +570,20 @@ mod tests {
         priority: Option<i32>,
         conflicts: Option<Vec<String>>,
     ) -> LoadedSkill {
-        use std::path::PathBuf;
+        use std::{collections::HashMap, path::PathBuf};
 
         use chrono::Utc;
 
         use crate::skills::SkillMetadata;
+
+        // Build metadata map with priority and conflicts
+        let mut metadata_map = HashMap::new();
+        if let Some(p) = priority {
+            metadata_map.insert("priority".to_string(), p.to_string());
+        }
+        if let Some(ref c) = conflicts {
+            metadata_map.insert("conflicts".to_string(), c.join(", "));
+        }
 
         LoadedSkill {
             metadata: SkillMetadata {
@@ -576,14 +591,16 @@ mod tests {
                 description: format!("Test skill {}", name),
                 license: None,
                 compatibility: None,
-                metadata: None,
+                metadata: if metadata_map.is_empty() {
+                    None
+                } else {
+                    Some(metadata_map)
+                },
                 allowed_tools: None,
                 model: None,
                 allowed_scripts: None,
                 execution_limits: None,
                 references: None,
-                priority,
-                conflicts,
             },
             content: format!("Content for {}", name),
             raw_content: String::new(),
