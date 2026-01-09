@@ -259,7 +259,7 @@ async fn main() -> ServerResult<()> {
 
     // Set up CORS
     let cors = CorsLayer::new()
-        .allow_methods([http::Method::GET, http::Method::POST])
+        .allow_methods([http::Method::GET, http::Method::POST, http::Method::PUT])
         .allow_headers(Any)
         .allow_origin(Any);
 
@@ -311,6 +311,31 @@ async fn main() -> ServerResult<()> {
             );
     } else {
         dual_info!("Memory endpoints are disabled");
+    }
+
+    // Add skills API endpoints if skills system is initialized
+    if SkillRegistry::global().is_ok() {
+        dual_info!("Skills API endpoints are enabled");
+        main_router = main_router
+            .route("/api/skills", get(skills::handlers::list_skills_handler))
+            .route(
+                "/api/skills/reload",
+                post(skills::handlers::reload_all_skills_handler),
+            )
+            .route(
+                "/api/skills/{name}",
+                get(skills::handlers::get_skill_handler),
+            )
+            .route(
+                "/api/skills/{name}/enabled",
+                axum::routing::put(skills::handlers::set_skill_enabled_handler),
+            )
+            .route(
+                "/api/skills/{name}/reload",
+                post(skills::handlers::reload_skill_handler),
+            );
+    } else {
+        dual_info!("Skills API endpoints are disabled (skills system not initialized)");
     }
 
     // Add state to main router

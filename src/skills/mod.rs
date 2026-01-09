@@ -10,6 +10,7 @@
 
 pub mod detector;
 pub mod error;
+pub mod handlers;
 pub mod injector;
 pub mod loader;
 pub mod parser;
