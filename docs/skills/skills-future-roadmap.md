@@ -15,7 +15,7 @@
       - [核心模块](#核心模块)
       - [脚本执行](#脚本执行)
       - [配置系统](#配置系统)
-    - [1.2 预留待启用](#12-预留待启用)
+    - [1.2 API 与运行时管理](#12-api-与运行时管理)
     - [1.3 资源加载（已完成）](#13-资源加载已完成)
   - [二、已实现功能详情](#二已实现功能详情)
     - [2.1 脚本执行系统](#21-脚本执行系统)
@@ -38,8 +38,8 @@
   - [五、技能管理 API](#五技能管理-api)
     - [5.1 API 设计](#51-api-设计)
     - [5.2 实现任务](#52-实现任务)
-      - [任务 5.2.1：API 端点](#任务-521api-端点)
-      - [任务 5.2.2：权限控制](#任务-522权限控制)
+      - [任务 5.2.1：API 端点 ✅](#任务-521api-端点-)
+      - [任务 5.2.2：权限控制 ✅](#任务-522权限控制-)
   - [六、高级特性](#六高级特性)
     - [6.1 技能市场/远程加载](#61-技能市场远程加载)
     - [6.2 技能版本管理](#62-技能版本管理)
@@ -48,7 +48,8 @@
   - [七、优先级矩阵](#七优先级矩阵)
     - [核心功能（已完成）](#核心功能已完成)
     - [待实现](#待实现)
-    - [高级特性](#高级特性)
+    - [高级特性（分阶段）](#高级特性分阶段)
+    - [其他高级特性](#其他高级特性)
   - [文档版本](#文档版本)
 
 ---
@@ -90,13 +91,15 @@
 | 资源限制配置 | ✅ 完成 | `config.toml` | 全局默认限制 |
 | Docker 镜像映射 | ✅ 完成 | `config.toml` | 扩展名→镜像映射 |
 
-### 1.2 预留待启用
+### 1.2 API 与运行时管理
 
 | 功能 | 状态 | 位置 | 说明 |
 | ---- | ---- | ---- | ---- |
 | 多技能注入 | ✅ 完成 | `injector.rs` | `multi_skill_injection()` 方法 |
-| 技能启用/禁用 | 📦 预留 | `registry.rs` | `set_enabled()` 方法 |
-| 技能重载 | 📦 预留 | `registry.rs` | `reload()` / `reload_all()` 方法 |
+| 技能启用/禁用 | ✅ 完成 | `handlers.rs` | `PUT /api/skills/{name}/enabled` |
+| 技能重载 | ✅ 完成 | `handlers.rs` | `POST /api/skills/{name}/reload` |
+| API 认证 | ✅ 完成 | `middleware.rs` | Bearer token 认证（可选） |
+| 速率限制 | ✅ 完成 | `middleware.rs` | 滑动窗口算法 |
 
 ### 1.3 资源加载（已完成）
 
@@ -151,20 +154,25 @@ graph TB
 **三级优先级**（从高到低）：
 
 1. 请求参数中指定的限制
-2. Skill 级别的 `execution-limits`（SKILL.md）
+2. Skill 级别的 `execution-limits`（通过 `metadata` 扩展字段）
 3. 全局默认限制（config.toml）
 
 ```yaml
-# SKILL.md 中的 Skill 级别限制
+# SKILL.md 中的 Skill 级别限制（使用 metadata 扩展字段）
 ---
 name: my-skill
-execution-limits:
-  max_memory_bytes: 134217728    # 128MB
-  timeout_secs: 30
-  max_output_bytes: 524288       # 512KB
-  network_access: true
+description: A skill with custom resource limits
+metadata:
+  execution-limits: "max_memory_bytes=134217728,timeout_secs=30,network_access=true"
 ---
 ```
+
+> **注意**：根据 [Agent Skills Standard](https://agentskills.io/specification#frontmatter-required)，
+> 自定义扩展字段必须放在 `metadata` 字段中。`execution-limits` 使用键值对格式：
+> - `max_memory_bytes=<bytes>` - 最大内存
+> - `timeout_secs=<seconds>` - 超时时间
+> - `max_output_bytes=<bytes>` - 最大输出大小
+> - `network_access=true|false` - 是否允许网络访问
 
 ```toml
 # config.toml 中的全局默认限制
@@ -177,16 +185,19 @@ network_access = false
 
 ### 2.3 权限控制
 
-**脚本执行权限**（`allowed-scripts` 字段）：
+**脚本执行权限**（通过 `metadata.allowed-scripts` 扩展字段）：
 
 ```yaml
-allowed-scripts:
-  - "*.js"              # 通配符匹配
-  - "process.py"        # 精确匹配
-  - "data-*.json"       # 前缀匹配
+metadata:
+  allowed-scripts: "*.js, process.py, data-*.json"  # 逗号分隔的模式列表
 ```
 
-**工具访问控制**（`allowed-tools` 字段）：
+> 支持的模式：
+> - `*.js` - 通配符匹配
+> - `process.py` - 精确匹配
+> - `data-*.json` - 前缀匹配
+
+**工具访问控制**（`allowed-tools` 字段，Agent Skills Standard 标准字段）：
 
 ```yaml
 allowed-tools: Read Grep Bash(git:*) mcp__calc__sum
@@ -252,7 +263,18 @@ skill-name/
 - `SkillInjector::phase2_injection_auto_refs()` 自动加载并注入参考文档
 - `SkillLoader::load_references_with_patterns()` 支持按模式过滤文件
 - 配置项 `[skill].max_reference_size` 控制最大加载大小（默认 100KB）
-- SKILL.md 中 `references` 字段支持 glob 模式（如 `["*.md", "api-*.txt"]`）
+- `references` 通过 `metadata` 扩展字段配置（符合 Agent Skills Standard）
+
+**配置示例**：
+
+```yaml
+---
+name: my-skill
+description: A skill with custom references
+metadata:
+  references: "api-docs.md, *.txt"  # 逗号分隔的 glob 模式
+---
+```
 
 #### 任务 3.3.2：Assets 工具支持 ✅
 
@@ -451,32 +473,173 @@ metadata:
 
 | 端点 | 方法 | 功能 | 状态 |
 | ---- | ---- | ---- | ---- |
-| `/api/skills` | GET | 列出所有技能摘要 | 📦 待实现 |
-| `/api/skills/{name}` | GET | 获取技能详情 | 📦 待实现 |
-| `/api/skills/{name}/enabled` | PUT | 启用/禁用技能 | 📦 待实现 |
-| `/api/skills/{name}/reload` | POST | 重载指定技能 | 📦 待实现 |
-| `/api/skills/reload` | POST | 重载所有技能 | 📦 待实现 |
+| `/api/skills` | GET | 列出所有技能摘要 | ✅ 已完成 |
+| `/api/skills/{name}` | GET | 获取技能详情 | ✅ 已完成 |
+| `/api/skills/{name}/enabled` | PUT | 启用/禁用技能 | ✅ 已完成 |
+| `/api/skills/{name}/reload` | POST | 重载指定技能 | ✅ 已完成 |
+| `/api/skills/reload` | POST | 重载所有技能 | ✅ 已完成 |
 
 > **注意**：底层方法 `registry.set_enabled()` 和 `registry.reload()` 已实现
 
 ### 5.2 实现任务
 
-#### 任务 5.2.1：API 端点
+#### 任务 5.2.1：API 端点 ✅
 
-- [ ] 创建 `src/handlers/skills.rs`
-- [ ] 实现 CRUD 操作
-- [ ] 添加路由配置到 `main.rs`
+- [x] 创建 `src/skills/handlers.rs`
+- [x] 实现 CRUD 操作
+- [x] 添加路由配置到 `main.rs`
 
-#### 任务 5.2.2：权限控制
+**实现细节**：
 
-- [ ] 添加 API 认证（可选）
-- [ ] 实现速率限制
+- `src/skills/handlers.rs` 实现了 5 个 HTTP 处理程序：
+  - `list_skills_handler()` - 列出所有启用的技能摘要
+  - `get_skill_handler()` - 获取技能详情（包含 content、scripts 等）
+  - `set_skill_enabled_handler()` - 启用/禁用技能
+  - `reload_skill_handler()` - 重载单个技能
+  - `reload_all_skills_handler()` - 重载所有技能
+- 路由仅在 Skills 系统初始化后启用（Plan Mode 且 `skill.enabled = true`）
+- 所有端点返回 JSON 响应，包含适当的错误处理
+- 使用 `x-request-id` 头进行请求跟踪
+
+**响应格式**：
+
+```json
+// GET /api/skills
+{
+  "skills": [
+    { "name": "code-review", "description": "...", "allowed_tools": [...] }
+  ],
+  "total": 1
+}
+
+// GET /api/skills/{name}
+{
+  "name": "code-review",
+  "description": "...",
+  "enabled": true,
+  "license": "MIT",
+  "allowed_tools": [...],
+  "allowed_scripts": ["*.js"],
+  "scripts": ["analyze.js"],
+  "content": "# Code Review..."
+}
+
+// PUT /api/skills/{name}/enabled, POST /api/skills/{name}/reload
+{
+  "success": true,
+  "message": "Skill 'code-review' enabled successfully",
+  "skill_name": "code-review"
+}
+
+// POST /api/skills/reload
+{
+  "success": true,
+  "message": "Reloaded 3 skills successfully",
+  "skills_loaded": 3
+}
+```
+
+#### 任务 5.2.2：权限控制 ✅
+
+- [x] 添加 API 认证（可选）
+- [x] 实现速率限制
+
+**实现细节**：
+
+- `src/skills/middleware.rs` 实现了认证和速率限制中间件：
+  - `skills_api_middleware()` - 处理认证和速率限制检查
+  - `RateLimiter` - 滑动窗口速率限制器
+  - `SkillsApiState` - 中间件状态管理
+- `src/config.rs` 新增 `SkillApiConfig` 配置结构
+
+**配置示例**：
+
+```toml
+[skill.api]
+# API 密钥认证（可选，留空则不需要认证）
+# 也可通过 SKILLS_API_KEY 环境变量设置
+api_key = "sk-your-secret-key"
+
+# 速率限制：每个时间窗口内允许的最大请求数
+# 设置为 0 禁用速率限制，默认：100
+rate_limit_requests = 100
+
+# 速率限制时间窗口（秒），默认：60
+rate_limit_window_secs = 60
+```
+
+**认证方式**：
+
+请求需在 `Authorization` 头中携带 API 密钥：
+
+```http
+Authorization: Bearer sk-your-secret-key
+```
+
+**速率限制响应**：
+
+当超过速率限制时，返回 HTTP 429：
+
+```json
+{
+  "error": "Rate limit exceeded"
+}
+```
 
 ---
 
 ## 六、高级特性
 
 ### 6.1 技能市场/远程加载
+
+#### 6.1.1 功能意义
+
+远程技能加载功能旨在解决以下问题：
+
+1. **技能共享与复用**：允许开发者将通用技能发布到公共仓库，其他用户可以直接安装使用，避免重复开发。
+
+2. **版本管理**：通过远程仓库管理技能版本，用户可以选择安装特定版本或自动更新到最新版本。
+
+3. **团队协作**：企业或团队可以维护内部技能仓库，统一管理和分发团队专用技能。
+
+4. **生态建设**：构建技能市场生态，促进 AI Agent 技能的标准化和规范化发展。
+
+```mermaid
+graph TB
+    subgraph Developers["技能开发者"]
+        D1[个人开发者]
+        D2[企业团队]
+        D3[开源社区]
+    end
+
+    subgraph Market["技能市场"]
+        M1[skillsmp.com]
+        M2[企业私有市场]
+    end
+
+    subgraph Sources["其他来源"]
+        S1[GitHub/GitLab]
+        S2[私有注册中心]
+    end
+
+    subgraph Users["技能使用者"]
+        U1[本地安装]
+        U2[按需加载]
+    end
+
+    D1 -->|发布| M1
+    D2 -->|发布| M2
+    D3 -->|发布| M1
+    D1 -->|开源| S1
+    D2 -->|内部| S2
+
+    M1 -->|安装| U1
+    M2 -->|安装| U1
+    S1 -->|安装| U1
+    S2 -->|安装| U1
+```
+
+#### 6.1.2 技能来源
 
 ```mermaid
 graph LR
@@ -485,20 +648,370 @@ graph LR
         L2[~/.llama-nexus/skills/]
     end
 
-    subgraph Remote["远程技能"]
-        R1[GitHub Repo]
-        R2[Skills Registry]
+    subgraph Market["技能市场"]
+        M1[skillsmp.com]
     end
 
-    R1 -->|git clone| L1
-    R2 -->|HTTP fetch| L2
+    subgraph Git["Git 仓库"]
+        G1[GitHub]
+        G2[GitLab/Gitee]
+    end
+
+    subgraph Private["私有源"]
+        P1[企业注册中心]
+    end
+
+    M1 -->|API 下载| L2
+    G1 -->|git clone| L1
+    G2 -->|git clone| L1
+    P1 -->|认证访问| L2
 ```
 
-**任务**：
+远程技能支持多种来源：
 
-- [ ] 设计远程技能协议
-- [ ] 实现 `skill install <url>` 命令
-- [ ] 添加技能签名验证
+| 来源类型 | URL 格式 | 说明 |
+| -------- | -------- | ---- |
+| 技能市场 | `skillsmp:skill-name` 或 `https://skillsmp.com/skills/name` | 公共技能市场，如 skillsmp.com |
+| GitHub | `github:owner/repo` 或 `https://github.com/owner/repo` | 最常用的公开技能托管平台 |
+| GitLab | `gitlab:owner/repo` 或 `https://gitlab.com/owner/repo` | 支持私有仓库 |
+| Gitee | `gitee:owner/repo` | 国内镜像，访问更快 |
+| HTTP(S) | `https://example.com/skills/my-skill.tar.gz` | 直接下载压缩包 |
+| 私有注册中心 | `registry:skill-name@version` | 企业私有技能仓库 |
+
+##### skillsmp.com API 集成
+
+[skillsmp.com](https://skillsmp.com/) 是一个聚合 GitHub 上 Agent Skills 的公共市场，提供 30,000+ 技能供搜索和下载。
+
+###### 技能 URL 格式
+
+技能页面 URL 格式为：
+
+```text
+https://skillsmp.com/skills/{skill-id}
+```
+
+其中 `skill-id` 基于 GitHub 路径生成，格式为 `{owner}-{repo}-{path-to-skill-md}`。
+
+示例：
+
+- `https://skillsmp.com/skills/krmcbride-claude-plugins-essentials-skills-documentation-lookup-skill-md`
+- `https://skillsmp.com/skills/openai-codex-codex-rs-core-src-skills-assets-samples-skill-installer-skill-md`
+
+###### API 端点
+
+```bash
+# 搜索技能（AI 语义搜索）
+curl -X GET "https://skillsmp.com/api/v1/skills/ai-search?q=code+review" \
+  -H "Authorization: Bearer sk_live_your_api_key"
+
+# 获取技能详情
+curl -X GET "https://skillsmp.com/api/v1/skills/{skill-id}" \
+  -H "Authorization: Bearer sk_live_your_api_key"
+
+# 下载技能包（zip 格式）
+curl -X GET "https://skillsmp.com/api/v1/skills/{skill-id}/download" \
+  -H "Authorization: Bearer sk_live_your_api_key" \
+  -o skill.zip
+```
+
+###### 网页下载
+
+在技能页面提供 `wget skill.zip` 按钮，可下载包含 SKILL.md 和所有相关文件的完整技能目录。
+
+###### 认证方式
+
+- 免费技能：无需认证
+- 付费/私有技能：需要 API Key（`sk_live_xxx` 格式）
+
+#### 6.1.3 使用方法
+
+##### 安装远程技能
+
+```bash
+# 从技能市场安装（推荐）✅ 已实现
+llama-nexus skill install skillsmp:code-review
+llama-nexus skill install skillsmp:code-review@2.0.0
+
+# 搜索技能市场 ✅ 已实现
+llama-nexus skill search "code review"
+llama-nexus skill search "code review" --category development
+
+# 从 HTTP URL 安装 ✅ 已实现
+llama-nexus skill install https://example.com/skills/my-skill.zip
+
+# 安装到指定目录 ✅ 已实现
+llama-nexus skill install skillsmp:code-review --dir ~/.llama-nexus/skills/
+llama-nexus skill install skillsmp:code-review -d /custom/path
+
+# 安装并自动启用 ✅ 已实现（标志存在，功能待完善）
+llama-nexus skill install skillsmp:code-review --enable
+
+# 从 GitHub 安装（阶段三）🔮 规划中
+llama-nexus skill install github:user/awesome-skill
+llama-nexus skill install github:user/awesome-skill@v1.2.0
+
+# 从私有注册中心安装（阶段三）🔮 规划中
+llama-nexus skill install registry:code-review@latest
+```
+
+##### 管理已安装技能
+
+```bash
+# 列出本地已安装技能 ✅ 已实现
+llama-nexus skill list
+
+# 列出远程热门技能 ✅ 已实现
+llama-nexus skill list --remote
+llama-nexus skill list -r -n 20
+
+# 检查技能版本信息 ✅ 已实现
+llama-nexus skill outdated
+
+# 更新单个技能 ✅ 已实现
+llama-nexus skill update code-review
+
+# 更新所有技能 ✅ 已实现
+llama-nexus skill update --all
+llama-nexus skill update -a
+
+# 卸载技能 ✅ 已实现
+llama-nexus skill uninstall code-review
+llama-nexus skill uninstall code-review --yes  # 跳过确认
+
+# 查看本地技能详情 ✅ 已实现
+llama-nexus skill info code-review
+
+# 查看远程技能详情 ✅ 已实现
+llama-nexus skill info skillsmp:code-review
+```
+
+##### 配置技能源
+
+```toml
+# config.toml
+
+# 技能市场配置 ✅ 已实现
+[skill.market]
+# API URL（默认：https://skillsmp.com/api/v1）
+# url = "https://skillsmp.com/api/v1"
+
+# API 密钥（或设置 SKILLSMP_API_KEY 环境变量）
+# api_key = "sk_live_your_api_key"
+
+# 下载缓存目录（可选）
+# cache_dir = "~/.llama-nexus/cache/skills"
+
+# 私有注册中心（阶段三）🔮 规划中
+# [[skill.registry.sources]]
+# name = "company"
+# url = "https://skills.company.com/api/v1"
+# token_env = "COMPANY_SKILLS_TOKEN"
+
+# GitHub 镜像加速（阶段三）🔮 规划中
+# [skill.registry.github]
+# mirror = "https://ghproxy.com/"
+
+# 缓存配置（阶段四）🔮 规划中
+# [skill.cache]
+# enabled = true
+# dir = "~/.llama-nexus/cache/skills"
+# ttl_hours = 24
+```
+
+#### 6.1.4 技能包格式
+
+远程技能使用标准目录结构打包：
+
+```text
+my-skill/
+├── SKILL.md           # 必需：技能定义文件
+├── scripts/           # 可选：可执行脚本目录
+│   ├── process.js
+│   └── analyze.py
+├── references/        # 可选：参考文档目录（Phase 2 自动注入）
+│   ├── api-docs.md
+│   └── examples.txt
+├── assets/            # 可选：资源文件目录（按需加载）
+│   ├── template.md
+│   └── config.json
+├── LICENSE            # 推荐：许可证文件
+├── README.md          # 推荐：使用说明
+└── skill.lock         # 自动生成：版本锁定文件 ✅ 已实现
+```
+
+##### skill.lock 文件 ✅ 已实现
+
+安装远程技能时自动生成，用于版本跟踪和更新管理：
+
+```yaml
+# skill.lock - Auto-generated, do not edit manually
+# https://github.com/secondstate/llama-nexus
+
+name: code-review
+version: 2.1.0                              # 可选：版本号
+source: skillsmp:code-review@2.1.0          # 安装来源
+installed_at: 2024-01-15T10:30:00+00:00     # ISO 8601 时间戳
+checksum: ~                                 # 预留：完整性校验（阶段四）
+```
+
+> **当前实现**：`skill.lock` 文件支持 `name`、`version`、`source`、`installed_at` 字段。
+> `checksum` 和 `dependencies` 字段为阶段四规划功能。
+
+#### 6.1.5 安全机制
+
+```mermaid
+graph TD
+    subgraph Install["安装流程"]
+        I1[下载技能包]
+        I2[验证签名]
+        I3[检查权限声明]
+        I4[沙箱扫描]
+        I5[用户确认]
+        I6[安装完成]
+    end
+
+    I1 --> I2
+    I2 -->|验证通过| I3
+    I2 -->|验证失败| X1[拒绝安装]
+    I3 --> I4
+    I4 -->|无风险| I6
+    I4 -->|有风险| I5
+    I5 -->|用户同意| I6
+    I5 -->|用户拒绝| X2[取消安装]
+```
+
+##### 签名验证
+
+技能发布者可以使用 GPG 或类似机制对技能进行签名：
+
+```bash
+# 发布者：签名技能
+llama-nexus skill sign my-skill --key ~/.gnupg/my-key.asc
+
+# 使用者：验证签名
+llama-nexus skill verify my-skill
+
+# 配置信任的签名者
+# config.toml
+[skills.security]
+require_signature = true  # 是否强制要求签名
+trusted_keys = [
+    "ABC123...",  # 信任的公钥指纹
+    "DEF456...",
+]
+```
+
+##### 权限审查
+
+安装时自动检查技能声明的权限：
+
+```text
+Installing skill: code-review@2.1.0
+
+Permissions requested:
+  ✓ Read: Read files from workspace
+  ✓ Bash: Execute git commands
+  ⚠ Write: Write to current directory (requires confirmation)
+
+Scripts included:
+  - analyze.js (Deno sandbox)
+  - format.py (Docker container)
+
+Resource limits:
+  - Memory: 128MB
+  - Timeout: 30s
+  - Network: disabled
+
+Continue installation? [y/N]
+```
+
+#### 6.1.6 分阶段实现计划
+
+##### 阶段一：skillsmp.com 基础集成（MVP）✅
+
+目标：通过命令行从 skillsmp.com 安装技能
+
+- [x] **任务 P1.1**：实现 CLI 子命令框架
+  - 添加 `llama-nexus skill` 子命令入口
+  - 实现基础参数解析（install, list, info）
+  - 实现位置：`src/cli/mod.rs`, `src/cli/skill.rs`
+
+- [x] **任务 P1.2**：实现 skillsmp.com 下载
+  - 调用 `GET /api/v1/skills/{skill-id}/download` 获取 zip
+  - 解压到 `~/.llama-nexus/skills/` 目录
+  - 支持 `skill install skillsmp:skill-name` 语法
+  - 实现位置：`src/cli/skill/installer.rs`, `src/cli/skill/marketplace.rs`
+
+- [x] **任务 P1.3**：实现本地技能列表
+  - `skill list` 显示已安装技能
+  - `skill list --remote` 从 skillsmp.com 获取热门技能
+  - 注意：远程列表需要 API key（Cloudflare 保护）
+
+- [x] **任务 P1.4**：实现基础技能信息
+  - `skill info <name>` 显示本地技能详情
+  - `skill info skillsmp:<name>` 显示市场技能详情
+
+##### 阶段二：完整技能管理 ✅
+
+目标：完善技能生命周期管理
+
+- [x] **任务 P2.1**：实现技能搜索
+  - `skill search <query>` 搜索 skillsmp.com
+  - 支持分类过滤 `--category`
+  - 实现位置：`src/cli/skill.rs` (`search_skills()`)
+
+- [x] **任务 P2.2**：实现技能更新
+  - `skill update <name>` 更新单个技能
+  - `skill update --all` 更新所有技能
+  - `skill outdated` 检查可更新技能
+  - 实现位置：`src/cli/skill.rs` (`update_skills()`, `check_outdated_skills()`)
+
+- [x] **任务 P2.3**：实现技能卸载
+  - `skill uninstall <name>` 删除技能
+  - 支持 `--yes` 跳过确认提示
+  - 实现位置：`src/cli/skill.rs` (`uninstall_skill()`)
+
+- [x] **任务 P2.4**：实现版本管理
+  - 支持 `skill install skillsmp:name@version` 指定版本
+  - 安装时自动生成 `skill.lock` 锁定文件
+  - 实现位置：`src/cli/skill/lockfile.rs`, `src/cli/skill/installer.rs`
+
+##### 阶段三：多源支持
+
+目标：支持 GitHub 等其他技能来源
+
+- [ ] **任务 P3.1**：实现 GitHub 安装
+  - `skill install github:owner/repo`
+  - 支持分支/标签 `@v1.0.0` 或 `#branch`
+  - 支持子目录 `github:owner/repo/path/to/skill`
+
+- [ ] **任务 P3.2**：实现 HTTP(S) 安装
+  - `skill install https://example.com/skill.zip`
+  - 支持 tar.gz 和 zip 格式
+
+- [ ] **任务 P3.3**：实现私有注册中心
+  - `skill install registry:name@version`
+  - 支持企业私有仓库认证
+  - 配置文件中定义注册中心
+
+##### 阶段四：安全与高级功能
+
+目标：增强安全性和用户体验
+
+- [ ] **任务 P4.1**：实现安全机制
+  - GPG 签名验证
+  - 权限声明审查（安装前提示）
+  - 可选的沙箱扫描
+
+- [ ] **任务 P4.2**：实现缓存和镜像
+  - 本地下载缓存
+  - 镜像源配置（国内加速）
+  - 离线安装支持
+
+- [ ] **任务 P4.3**：实现配置管理
+  - `skill config` 管理配置
+  - API Key 安全存储
+  - 默认安装目录设置
 
 ### 6.2 技能版本管理
 
@@ -567,16 +1080,29 @@ llama-nexus skill new my-skill --template basic
 
 | 功能 | 优先级 | 复杂度 | 依赖 | 状态 |
 | ---- | ------ | ------ | ---- | ---- |
-| 技能管理 API | P2 | 低 | 无 | 📦 待实现 |
+| 技能管理 API | P2 | 低 | 无 | ✅ 完成 |
 | 多技能检测 | P3 | 中 | 无 | ✅ 完成 |
 | 多技能注入 | P3 | 中 | 多技能检测 | ✅ 完成 |
 | 多技能同时激活 | P3 | 中 | 多技能检测、多技能注入 | ✅ 完成 |
 
-### 高级特性
+### 高级特性（分阶段）
+
+| 功能 | 阶段 | 优先级 | 复杂度 | 状态 |
+| ---- | ---- | ------ | ------ | ---- |
+| skillsmp.com 基础安装 | P1 | P2 | 中 | ✅ 完成 |
+| 技能列表和信息 | P1 | P2 | 低 | ✅ 完成 |
+| 技能搜索 | P2 | P3 | 中 | ✅ 完成 |
+| 技能更新/卸载 | P2 | P3 | 中 | ✅ 完成 |
+| 版本管理 (skill.lock) | P2 | P3 | 中 | ✅ 完成 |
+| GitHub 安装支持 | P3 | P3 | 中 | 🔮 规划中 |
+| 私有注册中心 | P3 | P4 | 高 | 🔮 规划中 |
+| 安全机制（签名验证） | P4 | P4 | 高 | 🔮 规划中 |
+| 缓存和镜像 | P4 | P4 | 中 | 🔮 规划中 |
+
+### 其他高级特性
 
 | 功能 | 优先级 | 复杂度 | 依赖 | 状态 |
 | ---- | ------ | ------ | ---- | ---- |
-| 远程技能加载 | P4 | 高 | 签名验证 | 🔮 规划中 |
 | 技能版本管理 | P4 | 中 | 无 | 🔮 规划中 |
 | 技能依赖 | P4 | 高 | 版本管理 | 🔮 规划中 |
 | 技能模板 | P4 | 低 | CLI 工具 | 🔮 规划中 |
@@ -585,7 +1111,58 @@ llama-nexus skill new my-skill --template basic
 
 ## 文档版本
 
-- **版本**: 2.1
+- **版本**: 2.9
 - **创建日期**: 2024-12-31
-- **更新日期**: 2026-01-08
+- **更新日期**: 2026-01-09
 - **适用项目版本**: llama-nexus v0.8.2 (feat-sandbox)
+
+### 更新记录
+
+**v2.9 (2026-01-09)**
+
+- 完成阶段二（完整技能管理）所有任务
+- 实现技能搜索：`skill search <query>` 支持 `--category` 过滤
+- 实现技能更新：`skill update <name>` 和 `skill update --all`
+- 实现技能卸载：`skill uninstall <name>` 支持 `--yes` 跳过确认
+- 实现版本管理：安装时自动生成 `skill.lock` 文件用于版本跟踪
+- 新增文件：`src/cli/skill/lockfile.rs`
+
+**v2.8 (2026-01-09)**
+
+- 完成阶段一（MVP）所有任务
+- 实现 CLI 子命令框架：`llama-nexus skill {install,list,info}`
+- 实现 skillsmp.com 下载集成（需要 API key 因 Cloudflare 保护）
+- 实现本地技能列表和详情查看
+- 新增文件：`src/cli/mod.rs`, `src/cli/skill.rs`, `src/cli/skill/installer.rs`, `src/cli/skill/marketplace.rs`
+- 新增配置：`SkillMarketConfig` 支持市场 API key 配置
+
+**v2.7 (2026-01-09)**
+
+- 将 6.1 节实现任务重构为四阶段计划
+- 阶段一（MVP）：skillsmp.com 基础安装功能
+- 阶段二：完整技能管理（搜索、更新、卸载）
+- 阶段三：多源支持（GitHub、HTTP、私有注册中心）
+- 阶段四：安全与高级功能
+- 更新优先级矩阵，按阶段展示
+
+**v2.6 (2026-01-09)**
+
+- 新增技能市场（skillsmp.com）集成支持
+- 新增 skillsmp.com API 集成说明
+- 新增 `skillsmp:skill-name` 协议和搜索功能
+- 更新图表和配置示例，突出技能市场作为推荐安装方式
+
+**v2.5 (2026-01-09)**
+
+- 扩展 6.1 节"技能市场/远程加载"功能文档
+- 新增功能意义说明（6.1.1）
+- 新增技能来源类型表（6.1.2）
+- 新增详细使用方法和命令示例（6.1.3）
+- 新增技能包格式和 skill.lock 文件说明（6.1.4）
+- 新增安全机制说明：签名验证、权限审查（6.1.5）
+- 细化实现任务列表（6.1.6）
+
+**v2.4 (2026-01-09)**
+- 将 `execution-limits`、`allowed-scripts`、`references` 扩展字段迁移到 `metadata` 中
+- 符合 Agent Skills Standard 对 frontmatter 的要求
+- 扩展字段使用逗号分隔的字符串格式存储在 metadata 中

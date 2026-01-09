@@ -11,6 +11,8 @@
   - [三、SKILL.md 文件规范](#三skillmd-文件规范)
     - [3.1 文件格式（兼容 Claude Code）](#31-文件格式兼容-claude-code)
     - [3.2 元数据字段说明](#32-元数据字段说明)
+      - [标准字段（Agent Skills Standard）](#标准字段agent-skills-standard)
+      - [扩展字段（通过 metadata）](#扩展字段通过-metadata)
     - [3.3 description 字段的重要性](#33-description-字段的重要性)
     - [3.4 Markdown 内容部分](#34-markdown-内容部分)
   - [四、Skill 示例](#四skill-示例)
@@ -32,22 +34,26 @@
     - [8.2 阶段一：注入 Skills 描述列表](#82-阶段一注入-skills-描述列表)
     - [8.3 阶段二：注入完整 Skill 内容](#83-阶段二注入完整-skill-内容)
     - [8.4 提示词注入器实现](#84-提示词注入器实现)
-  - [九、配置系统](#九配置系统)
-    - [9.1 Skill 配置](#91-skill-配置)
-    - [9.2 配置文件示例](#92-配置文件示例)
-  - [十、错误类型扩展](#十错误类型扩展)
-  - [十一、初始化流程](#十一初始化流程)
-    - [11.1 Skills 系统初始化](#111-skills-系统初始化)
-    - [11.2 main.rs 集成](#112-mainrs-集成)
-  - [十二、API 端点](#十二api-端点)
-    - [12.1 Skills 管理 API](#121-skills-管理-api)
-    - [12.2 路由配置](#122-路由配置)
-  - [十三、与 Claude Code 的对比](#十三与-claude-code-的对比)
-    - [13.1 机制对比](#131-机制对比)
-    - [13.2 文件格式兼容性](#132-文件格式兼容性)
-  - [十四、总结](#十四总结)
-    - [14.1 架构优势](#141-架构优势)
-    - [14.2 实施建议](#142-实施建议)
+  - [九、CLI 技能管理](#九cli-技能管理)
+    - [9.1 命令行界面](#91-命令行界面)
+    - [9.2 技能市场客户端](#92-技能市场客户端)
+    - [9.3 版本锁定文件](#93-版本锁定文件)
+  - [十、配置系统](#十配置系统)
+    - [10.1 Skill 配置](#101-skill-配置)
+    - [10.2 配置文件示例](#102-配置文件示例)
+  - [十一、错误类型扩展](#十一错误类型扩展)
+  - [十二、初始化流程](#十二初始化流程)
+    - [12.1 Skills 系统初始化](#121-skills-系统初始化)
+    - [12.2 main.rs 集成](#122-mainrs-集成)
+  - [十三、API 端点](#十三api-端点)
+    - [13.1 Skills 管理 API](#131-skills-管理-api)
+    - [13.2 路由配置](#132-路由配置)
+  - [十四、与 Claude Code 的对比](#十四与-claude-code-的对比)
+    - [14.1 机制对比](#141-机制对比)
+    - [14.2 文件格式兼容性](#142-文件格式兼容性)
+  - [十五、总结](#十五总结)
+    - [15.1 架构优势](#151-架构优势)
+    - [15.2 实施建议](#152-实施建议)
 
 ## 一、设计目标
 
@@ -96,25 +102,37 @@ graph TB
 ```
 llama-nexus/
 ├── src/
-│   └── skills/
-│       ├── mod.rs           # 模块导出
-│       ├── types.rs         # 类型定义
-│       ├── registry.rs      # Skill 注册表（文件加载器）
-│       ├── parser.rs        # SKILL.md 文件解析器
-│       ├── injector.rs      # 系统提示词注入器
-│       ├── detector.rs      # Skill 请求检测器
-│       └── config.rs        # 配置定义
+│   ├── skills/                  # Skills 运行时模块
+│   │   ├── mod.rs               # 模块导出
+│   │   ├── types.rs             # 类型定义（SkillMetadata, LoadedSkill 等）
+│   │   ├── registry.rs          # Skill 注册表
+│   │   ├── loader.rs            # 文件系统加载器
+│   │   ├── parser.rs            # SKILL.md 文件解析器
+│   │   ├── injector.rs          # 系统提示词注入器
+│   │   ├── detector.rs          # Skill 请求检测器
+│   │   ├── validator.rs         # Skill 名称验证器
+│   │   ├── error.rs             # 错误类型定义
+│   │   ├── handlers.rs          # API 端点处理器
+│   │   ├── middleware.rs        # API 认证和速率限制中间件
+│   │   └── e2e_tests.rs         # 端到端测试
+│   │
+│   └── cli/                     # CLI 子命令模块
+│       ├── mod.rs               # CLI 入口
+│       └── skill/               # Skill 管理子命令
+│           ├── mod.rs           # 子命令路由
+│           ├── installer.rs     # 技能安装器（ZIP 解压）
+│           ├── marketplace.rs   # skillsmp.com 市场客户端
+│           └── lockfile.rs      # skill.lock 版本锁定文件
 │
-├── skills/                   # Skills 目录（可配置路径）
+├── .skills/                     # 项目级 Skills 目录
 │   ├── code-review/
-│   │   └── SKILL.md
-│   ├── commit/
-│   │   └── SKILL.md
-│   ├── doc-gen/
 │   │   └── SKILL.md
 │   └── ...
 │
-└── config.toml              # 配置文件
+├── ~/.llama-nexus/skills/       # 用户级 Skills 目录
+│   └── ...
+│
+└── config.toml                  # 配置文件
 ```
 
 ### 2.2 模块依赖关系
@@ -197,14 +215,44 @@ model: claude-opus-4-5-20251101
 
 ### 3.2 元数据字段说明
 
+#### 标准字段（Agent Skills Standard）
+
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `name` | String | **是** | Skill 唯一标识符，只能包含小写字母、数字、连字符，最多 64 字符 |
 | `description` | String | **是** | 清晰的描述，最多 1024 字符，**用于语义匹配触发** |
-| `allowed-tools` | String | 否 | 限制此 Skill 可用的工具列表（空格分隔，符合 Agent Skills 标准） |
-| `model` | String | 否 | 此 Skill 活跃时使用的模型 |
+| `license` | String | 否 | 许可证标识（如 MIT, Apache-2.0） |
+| `compatibility` | String | 否 | 兼容性要求（系统依赖、网络访问等），最多 500 字符 |
+| `allowed-tools` | String | 否 | 限制此 Skill 可用的工具列表（空格分隔） |
+| `model` | String | 否 | 此 Skill 活跃时使用的模型（Claude Code 兼容） |
+| `metadata` | Map | 否 | 扩展字段容器（见下方） |
 
-**注意**：与之前设计相比，移除了 `triggers`、`tags`、`version`、`required_tools`、`author` 字段，与 Claude Code 保持一致。
+#### 扩展字段（通过 metadata）
+
+扩展字段存储在 `metadata` HashMap 中，使用逗号分隔的字符串格式：
+
+| 键名 | 格式 | 说明 |
+|------|------|------|
+| `execution-limits` | `key=value,...` | 脚本执行资源限制（max_memory_bytes, timeout_secs, network_access） |
+| `allowed-scripts` | `pattern,...` | 允许执行的脚本模式（支持 glob，如 `*.js, process.py`） |
+| `references` | `pattern,...` | 自动加载的参考文档模式（如 `api-docs.md, *.txt`） |
+| `priority` | `number` | 多技能冲突时的优先级（数值越大优先级越高） |
+| `conflicts` | `name,...` | 与此技能冲突的其他技能名称 |
+
+**示例**：
+
+```yaml
+---
+name: code-review
+description: 审查代码变更
+license: MIT
+metadata:
+  priority: "10"
+  conflicts: "quick-review"
+  execution-limits: "timeout_secs=60,network_access=false"
+  allowed-scripts: "*.js, *.ts"
+---
+```
 
 ### 3.3 description 字段的重要性
 
@@ -489,32 +537,75 @@ auth 模块提供用户认证相关功能...
 
 ```rust
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Skill 元数据（从 YAML Front Matter 解析）
-/// 兼容 Claude Code 的 SKILL.md 格式
+/// 遵循 Agent Skills Standard 规范
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillMetadata {
-    /// Skill 唯一名称（小写字母、数字、连字符）
+    /// Skill 唯一名称（小写字母、数字、连字符，最多 64 字符）
     pub name: String,
 
-    /// 清晰的描述，用于语义匹配触发
+    /// 清晰的描述，用于语义匹配触发（最多 1024 字符）
     pub description: String,
 
-    /// 允许使用的工具列表（可选）
+    /// 许可证标识（可选）
+    pub license: Option<String>,
+
+    /// 兼容性要求（可选，最多 500 字符）
+    pub compatibility: Option<String>,
+
+    /// 扩展字段容器（Agent Skills Standard 扩展机制）
+    pub metadata: Option<HashMap<String, String>>,
+
+    /// 允许使用的工具列表（空格分隔）
     #[serde(rename = "allowed-tools")]
     pub allowed_tools: Option<String>,
 
-    /// 指定使用的模型（可选）
+    /// 指定使用的模型（Claude Code 兼容）
     pub model: Option<String>,
 }
 
 impl SkillMetadata {
-    /// 解析 allowed-tools 字符串为工具列表
+    /// 解析 allowed-tools 字符串为工具列表（空格分隔）
     pub fn get_allowed_tools(&self) -> Vec<String> {
         self.allowed_tools
             .as_ref()
-            .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
+            .map(|s| s.split_whitespace().map(|t| t.to_string()).collect())
             .unwrap_or_default()
+    }
+
+    /// 获取优先级（从 metadata 扩展字段）
+    pub fn get_priority(&self) -> Option<i32> {
+        self.metadata.as_ref()?.get("priority")?.parse().ok()
+    }
+
+    /// 获取冲突列表（从 metadata 扩展字段）
+    pub fn get_conflicts(&self) -> Option<Vec<String>> {
+        self.metadata.as_ref()?.get("conflicts").map(|v| {
+            v.split(',').map(|s| s.trim().to_string()).collect()
+        })
+    }
+
+    /// 获取执行限制（从 metadata 扩展字段）
+    pub fn get_execution_limits(&self) -> Option<SkillResourceLimits> {
+        self.metadata.as_ref()?.get("execution-limits")
+            .and_then(|v| SkillResourceLimits::parse(v))
+    }
+
+    /// 获取允许的脚本模式（从 metadata 扩展字段）
+    pub fn get_allowed_scripts(&self) -> Option<Vec<String>> {
+        self.metadata.as_ref()?.get("allowed-scripts").map(|v| {
+            v.split(',').map(|s| s.trim().to_string()).collect()
+        })
+    }
+
+    /// 检查脚本是否被允许执行
+    pub fn is_script_allowed(&self, script_name: &str) -> bool {
+        match self.get_allowed_scripts() {
+            None => true, // 无限制，允许所有
+            Some(patterns) => patterns.iter().any(|p| glob_match(p, script_name))
+        }
     }
 }
 ```
@@ -1042,53 +1133,180 @@ impl SkillInjector {
 }
 ```
 
-## 九、配置系统
+## 九、CLI 技能管理
 
-### 9.1 Skill 配置
+### 9.1 命令行界面
+
+llama-nexus 提供完整的 CLI 子命令用于技能管理：
+
+```bash
+# 从技能市场安装
+llama-nexus skill install skillsmp:code-review
+llama-nexus skill install skillsmp:code-review@2.0.0
+
+# 从 URL 安装
+llama-nexus skill install https://example.com/skills/my-skill.zip
+
+# 搜索技能市场
+llama-nexus skill search "code review"
+llama-nexus skill search "code review" --category development
+
+# 列出已安装技能
+llama-nexus skill list
+llama-nexus skill list --remote  # 显示市场热门技能
+
+# 查看技能详情
+llama-nexus skill info code-review
+llama-nexus skill info skillsmp:code-review
+
+# 更新技能
+llama-nexus skill update code-review
+llama-nexus skill update --all
+
+# 检查可更新技能
+llama-nexus skill outdated
+
+# 卸载技能
+llama-nexus skill uninstall code-review
+llama-nexus skill uninstall code-review --yes  # 跳过确认
+```
+
+### 9.2 技能市场客户端
+
+```rust
+/// skillsmp.com 市场客户端
+pub struct SkillsMarketplace {
+    client: reqwest::Client,
+    api_key: Option<String>,
+}
+
+impl SkillsMarketplace {
+    /// 搜索技能
+    pub async fn search(&self, query: &str, limit: usize) -> ServerResult<Vec<MarketplaceSkill>>;
+
+    /// 获取技能信息
+    pub async fn get_skill_info(&self, query: &str) -> ServerResult<MarketplaceSkill>;
+
+    /// 下载技能包
+    pub async fn download_skill(&self, skill_id: &str) -> ServerResult<Bytes>;
+
+    /// 解析技能名称到 ID
+    pub async fn resolve_skill_id(&self, name: &str, version: Option<&str>) -> ServerResult<String>;
+}
+```
+
+### 9.3 版本锁定文件
+
+安装远程技能时自动生成 `skill.lock` 文件：
+
+```yaml
+# skill.lock - Auto-generated, do not edit manually
+# https://github.com/secondstate/llama-nexus
+
+name: code-review
+version: 2.1.0
+source: skillsmp:code-review@2.1.0
+installed_at: 2024-01-15T10:30:00+00:00
+checksum: ~  # 预留：完整性校验
+```
+
+```rust
+/// 技能锁定文件结构
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillLockFile {
+    pub name: String,
+    pub version: Option<String>,
+    pub source: Option<String>,
+    pub installed_at: Option<String>,
+    pub checksum: Option<String>,
+}
+```
+
+## 十、配置系统
+
+### 10.1 Skill 配置
 
 ```rust
 use serde::{Deserialize, Serialize};
 
 /// Skills 总配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SkillsConfig {
+pub struct SkillConfig {
     /// 是否启用 Skills 系统
-    #[serde(default = "default_enable")]
-    pub enable: bool,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 
-    /// Skills 目录路径
-    #[serde(default = "default_skills_dir")]
-    pub skills_dir: String,
-
-    /// 是否在启动时自动加载
-    #[serde(default = "default_enable")]
-    pub auto_load: bool,
-
-    /// 禁用的 Skills 列表
+    /// Skills 目录路径列表
     #[serde(default)]
-    pub disabled_skills: Vec<String>,
+    pub directories: Vec<String>,
+
+    /// Skills API 配置（认证和速率限制）
+    pub api: Option<SkillApiConfig>,
+
+    /// 技能市场配置
+    pub market: Option<SkillMarketConfig>,
+
+    /// 脚本执行配置
+    pub execution: Option<SkillExecutionConfig>,
 }
 
-fn default_enable() -> bool {
-    true
+/// Skills API 配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillApiConfig {
+    /// API 密钥（或通过 SKILLS_API_KEY 环境变量设置）
+    pub api_key: String,
+    /// 速率限制请求数（默认 100，0 禁用）
+    pub rate_limit_requests: u32,
+    /// 速率限制窗口秒数（默认 60）
+    pub rate_limit_window_secs: u64,
 }
 
-fn default_skills_dir() -> String {
-    "skills".to_string()
+/// 技能市场配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillMarketConfig {
+    /// 市场 API URL（默认 https://skillsmp.com/api/v1）
+    pub url: Option<String>,
+    /// API 密钥（或通过 SKILLSMP_API_KEY 环境变量设置）
+    pub api_key: Option<String>,
+    /// 下载缓存目录
+    pub cache_dir: Option<String>,
 }
 ```
 
-### 9.2 配置文件示例
+### 10.2 配置文件示例
 
 ```toml
-[skills]
-enable = true
-skills_dir = "skills"
-auto_load = true
-disabled_skills = []
+[skill]
+enabled = true
+directories = [
+    ".skills",                    # 项目级技能
+    "~/.llama-nexus/skills"       # 用户级技能
+]
+
+# Skills API 认证和速率限制
+[skill.api]
+# api_key = "sk-your-secret-key"  # 或设置 SKILLS_API_KEY 环境变量
+# rate_limit_requests = 100       # 每窗口最大请求数
+# rate_limit_window_secs = 60     # 速率限制窗口
+
+# 技能市场配置
+[skill.market]
+# url = "https://skillsmp.com/api/v1"
+# api_key = "your-api-key"        # 或设置 SKILLSMP_API_KEY 环境变量
+# cache_dir = "~/.llama-nexus/cache/skills"
+
+# 脚本执行配置
+[skill.execution]
+enabled = true
+
+[skill.execution.limits]
+max_memory_bytes = 268435456      # 256MB
+timeout = "30s"
+max_output_bytes = 1048576        # 1MB
+network_access = false
 ```
 
-## 十、错误类型扩展
+## 十一、错误类型扩展
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -1116,9 +1334,9 @@ pub enum ServerError {
 }
 ```
 
-## 十一、初始化流程
+## 十二、初始化流程
 
-### 11.1 Skills 系统初始化
+### 12.1 Skills 系统初始化
 
 ```rust
 use crate::config::Config;
@@ -1158,7 +1376,7 @@ pub async fn init_skills_system(config: &Config) -> ServerResult<()> {
 }
 ```
 
-### 11.2 main.rs 集成
+### 12.2 main.rs 集成
 
 ```rust
 mod skills;
@@ -1176,9 +1394,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## 十二、API 端点
+## 十三、API 端点
 
-### 12.1 Skills 管理 API
+### 13.1 Skills 管理 API
 
 ```rust
 use axum::{extract::Path, Json};
@@ -1253,7 +1471,7 @@ pub struct SetEnabledRequest {
 }
 ```
 
-### 12.2 路由配置
+### 13.2 路由配置
 
 ```rust
 use crate::handlers::skills;
@@ -1267,9 +1485,9 @@ let skills_routes = Router::new()
     .route("/skills/reload", post(skills::reload_all_skills));
 ```
 
-## 十三、与 Claude Code 的对比
+## 十四、与 Claude Code 的对比
 
-### 13.1 机制对比
+### 14.1 机制对比
 
 | 方面 | Claude Code | llama-nexus |
 |------|-------------|-------------|
@@ -1279,7 +1497,7 @@ let skills_routes = Router::new()
 | **激活机制** | Claude 内部处理 | 检测 `<use_skill>` 标签 |
 | **文件格式** | SKILL.md（YAML + Markdown） | **完全兼容** |
 
-### 13.2 文件格式兼容性
+### 14.2 文件格式兼容性
 
 llama-nexus 的 SKILL.md 文件可以直接在 Claude Code 中使用，反之亦然。
 
@@ -1292,9 +1510,9 @@ llama-nexus 的 SKILL.md 文件可以直接在 Claude Code 中使用，反之亦
 **未使用的字段（Claude Code 特有）：**
 - 无（我们支持所有 Claude Code 的字段）
 
-## 十四、总结
+## 十五、总结
 
-### 14.1 架构优势
+### 15.1 架构优势
 
 | 优势 | 说明 |
 |------|------|
@@ -1304,7 +1522,7 @@ llama-nexus 的 SKILL.md 文件可以直接在 Claude Code 中使用，反之亦
 | **工具限制** | 通过 `allowed-tools` 增强安全性 |
 | **热加载** | 支持运行时重新加载 Skills |
 
-### 14.2 实施建议
+### 15.2 实施建议
 
 1. **Phase 1**：核心模块
    - types.rs（类型定义）
@@ -1327,6 +1545,7 @@ llama-nexus 的 SKILL.md 文件可以直接在 Claude Code 中使用，反之亦
 
 ---
 
-*文档版本: 3.0*
+*文档版本: 4.0*
 *创建日期: 2025-12-29*
-*适用项目版本: llama-nexus (feat-plan-mode)*
+*最后更新: 2026-01-09*
+*适用项目版本: llama-nexus (feat-sandbox)*
