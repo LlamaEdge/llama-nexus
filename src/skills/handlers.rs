@@ -190,7 +190,7 @@ pub async fn get_skill_handler(
         enabled: skill.enabled,
         license: skill.metadata.license.clone(),
         allowed_tools: skill.metadata.get_allowed_tools(),
-        allowed_scripts: skill.metadata.allowed_scripts.clone(),
+        allowed_scripts: skill.metadata.get_allowed_scripts(),
         scripts: skill.scripts.iter().map(|s| s.name.clone()).collect(),
         content: skill.content.clone(),
     };

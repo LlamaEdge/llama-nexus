@@ -128,7 +128,7 @@ The following skill instructions guide how to complete this task:
         // Load references with optional pattern filtering from skill metadata
         let references = SkillLoader::load_references_with_patterns(
             &skill.skill_dir,
-            skill.metadata.references.as_deref(),
+            skill.metadata.get_references().as_deref(),
         )
         .await;
 
@@ -285,7 +285,7 @@ The following skill instructions guide how to complete this task:
         for skill in skills {
             let skill_refs = SkillLoader::load_references_with_patterns(
                 &skill.skill_dir,
-                skill.metadata.references.as_deref(),
+                skill.metadata.get_references().as_deref(),
             )
             .await;
             all_references.extend(skill_refs);
@@ -347,10 +347,10 @@ The following skill instructions guide how to complete this task:
         let mut result = Vec::new();
 
         for skill in skills {
-            if let Some(scripts) = &skill.metadata.allowed_scripts {
+            if let Some(scripts) = skill.metadata.get_allowed_scripts() {
                 for script in scripts {
                     if seen.insert(script.clone()) {
-                        result.push(script.clone());
+                        result.push(script);
                     }
                 }
             }
@@ -420,9 +420,6 @@ mod tests {
                 metadata: None,
                 allowed_tools: None,
                 model: None,
-                allowed_scripts: None,
-                execution_limits: None,
-                references: None,
             },
             content: content.to_string(),
             raw_content: String::new(),
@@ -935,8 +932,15 @@ fn main() {
     }
 
     fn create_test_skill_with_scripts(name: &str, scripts: Option<Vec<&str>>) -> LoadedSkill {
+        use std::collections::HashMap;
         let mut skill = create_test_skill(name, "Content");
-        skill.metadata.allowed_scripts = scripts.map(|v| v.into_iter().map(String::from).collect());
+        if let Some(s) = scripts {
+            let scripts_str = s.join(", ");
+            skill.metadata.metadata = Some(HashMap::from([(
+                "allowed-scripts".to_string(),
+                scripts_str,
+            )]));
+        }
         skill
     }
 
@@ -1117,13 +1121,17 @@ fn main() {
 
     #[test]
     fn test_multi_skill_injection_with_merged_permissions() {
-        let mut skill_a = create_test_skill("skill-a", "Content A");
-        skill_a.metadata.allowed_tools = Some("Bash Read".to_string());
-        skill_a.metadata.allowed_scripts = Some(vec!["*.js".to_string()]);
+        let skill_a = create_test_skill_with_tools("skill-a", Some("Bash Read"));
+        let mut skill_a = skill_a;
+        skill_a.metadata.metadata = Some(std::collections::HashMap::from([
+            ("allowed-scripts".to_string(), "*.js".to_string()),
+        ]));
 
-        let mut skill_b = create_test_skill("skill-b", "Content B");
-        skill_b.metadata.allowed_tools = Some("Read Write".to_string());
-        skill_b.metadata.allowed_scripts = Some(vec!["*.py".to_string()]);
+        let skill_b = create_test_skill_with_tools("skill-b", Some("Read Write"));
+        let mut skill_b = skill_b;
+        skill_b.metadata.metadata = Some(std::collections::HashMap::from([
+            ("allowed-scripts".to_string(), "*.py".to_string()),
+        ]));
 
         let skills = vec![skill_a, skill_b];
         let result = SkillInjector::multi_skill_injection(&skills);

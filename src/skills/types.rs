@@ -15,6 +15,13 @@ use crate::executor::{EXECUTOR_MANAGER, ExecutionError, ResourceLimits, ScriptOu
 /// - Required: name, description
 /// - Optional: license, compatibility, metadata, allowed-tools
 /// - Extension: model (for Claude Code compatibility)
+///
+/// Extension fields (stored in `metadata`):
+/// - `execution-limits`: Resource limits for script execution
+/// - `allowed-scripts`: List of allowed script patterns
+/// - `references`: List of reference document patterns
+/// - `priority`: Skill priority for conflict resolution
+/// - `conflicts`: List of conflicting skill names
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkillMetadata {
     /// Skill name (1-64 chars, lowercase letters/numbers/hyphens)
@@ -35,6 +42,9 @@ pub struct SkillMetadata {
     pub compatibility: Option<String>,
 
     /// Additional metadata as key-value pairs (optional)
+    ///
+    /// This field is the official extension mechanism per Agent Skills Standard.
+    /// All custom/extension fields should be stored here.
     #[serde(default)]
     pub metadata: Option<HashMap<String, String>>,
 
@@ -47,43 +57,6 @@ pub struct SkillMetadata {
     /// Not part of the standard, for compatibility
     #[serde(default)]
     pub model: Option<String>,
-
-    /// Allowed scripts for execution (optional, extension field)
-    ///
-    /// Controls which scripts from the scripts/ directory can be executed.
-    /// Supports glob patterns (e.g., "*.js", "process-*.py").
-    ///
-    /// - If None or empty: all scripts in scripts/ are allowed (default permissive)
-    /// - If Some with patterns: only matching scripts are allowed
-    ///
-    /// Examples:
-    /// - `["*.js", "*.ts"]` - allow all JavaScript and TypeScript files
-    /// - `["process.py", "export.py"]` - allow only specific files
-    /// - `["data-*.js"]` - allow files matching pattern
-    #[serde(rename = "allowed-scripts", default)]
-    pub allowed_scripts: Option<Vec<String>>,
-
-    /// Execution resource limits for this skill (optional, extension field)
-    ///
-    /// Overrides global default limits for scripts executed by this skill.
-    /// Any field not specified inherits from the global default.
-    #[serde(rename = "execution-limits", default)]
-    pub execution_limits: Option<SkillResourceLimits>,
-
-    /// Reference documents to load (optional, extension field)
-    ///
-    /// Specifies which files from the references/ directory to load.
-    /// Supports glob patterns.
-    ///
-    /// - If None or empty: all .md and .txt files are loaded (default behavior)
-    /// - If Some with patterns: only matching files are loaded
-    ///
-    /// Examples:
-    /// - `["api-docs.md"]` - load only specific file
-    /// - `["*.md"]` - load all markdown files
-    /// - `["guide-*.txt", "api.md"]` - load files matching patterns
-    #[serde(default)]
-    pub references: Option<Vec<String>>,
 }
 
 impl SkillMetadata {
@@ -140,6 +113,100 @@ impl SkillMetadata {
             })
             .filter(|v: &Vec<String>| !v.is_empty())
     }
+
+    /// Get execution limits from metadata (extension field)
+    ///
+    /// Execution limits are stored in the `metadata` field as a formatted string
+    /// under the key "execution-limits", following Agent Skills Standard.
+    ///
+    /// Format: `key=value` pairs separated by commas
+    /// Supported keys:
+    /// - `max_memory_bytes`: Maximum memory in bytes
+    /// - `timeout_secs`: Maximum execution time in seconds
+    /// - `max_output_bytes`: Maximum output size in bytes
+    /// - `network_access`: Whether network access is allowed (true/false)
+    ///
+    /// # Example metadata configuration:
+    /// ```yaml
+    /// metadata:
+    ///   execution-limits: "max_memory_bytes=134217728,timeout_secs=30,network_access=true"
+    /// ```
+    ///
+    /// # Returns
+    /// - `Some(SkillResourceLimits)` if execution-limits is defined and valid
+    /// - `None` if not defined or empty
+    pub fn get_execution_limits(&self) -> Option<SkillResourceLimits> {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get("execution-limits"))
+            .and_then(|v| SkillResourceLimits::parse(v))
+    }
+
+    /// Get allowed scripts from metadata (extension field)
+    ///
+    /// Allowed scripts are stored in the `metadata` field as a comma-separated
+    /// string under the key "allowed-scripts", following Agent Skills Standard.
+    ///
+    /// Controls which scripts from the scripts/ directory can be executed.
+    /// Supports glob patterns (e.g., "*.js", "process-*.py").
+    ///
+    /// - If None or empty: all scripts in scripts/ are allowed (default permissive)
+    /// - If Some with patterns: only matching scripts are allowed
+    ///
+    /// # Example metadata configuration:
+    /// ```yaml
+    /// metadata:
+    ///   allowed-scripts: "*.js, *.ts, process.py"
+    /// ```
+    ///
+    /// # Returns
+    /// - `Some(Vec<String>)` if allowed-scripts is defined
+    /// - `None` if not defined (all scripts allowed)
+    pub fn get_allowed_scripts(&self) -> Option<Vec<String>> {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get("allowed-scripts"))
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty())
+    }
+
+    /// Get reference document patterns from metadata (extension field)
+    ///
+    /// References are stored in the `metadata` field as a comma-separated
+    /// string under the key "references", following Agent Skills Standard.
+    ///
+    /// Specifies which files from the references/ directory to load.
+    /// Supports glob patterns.
+    ///
+    /// - If None or empty: all .md and .txt files are loaded (default behavior)
+    /// - If Some with patterns: only matching files are loaded
+    ///
+    /// # Example metadata configuration:
+    /// ```yaml
+    /// metadata:
+    ///   references: "api-docs.md, *.txt"
+    /// ```
+    ///
+    /// # Returns
+    /// - `Some(Vec<String>)` if references is defined
+    /// - `None` if not defined (default loading behavior)
+    pub fn get_references(&self) -> Option<Vec<String>> {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get("references"))
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty())
+    }
 }
 
 /// Skill-specific resource limits configuration
@@ -166,6 +233,66 @@ pub struct SkillResourceLimits {
 }
 
 impl SkillResourceLimits {
+    /// Parse execution limits from a metadata string
+    ///
+    /// Expected format: `key=value` pairs separated by commas
+    ///
+    /// # Example
+    /// ```text
+    /// "max_memory_bytes=134217728,timeout_secs=30,network_access=true"
+    /// ```
+    ///
+    /// # Returns
+    /// - `Some(SkillResourceLimits)` if parsing succeeds and at least one limit is set
+    /// - `None` if the string is empty or no valid limits are found
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+
+        let mut limits = SkillResourceLimits::default();
+        let mut has_any = false;
+
+        for pair in s.split(',') {
+            let pair = pair.trim();
+            if let Some((key, value)) = pair.split_once('=') {
+                let key = key.trim();
+                let value = value.trim();
+
+                match key {
+                    "max_memory_bytes" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            limits.max_memory_bytes = Some(v);
+                            has_any = true;
+                        }
+                    }
+                    "timeout_secs" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            limits.timeout_secs = Some(v);
+                            has_any = true;
+                        }
+                    }
+                    "max_output_bytes" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            limits.max_output_bytes = Some(v);
+                            has_any = true;
+                        }
+                    }
+                    "network_access" => {
+                        if let Ok(v) = value.parse::<bool>() {
+                            limits.network_access = Some(v);
+                            has_any = true;
+                        }
+                    }
+                    _ => {} // Ignore unknown keys
+                }
+            }
+        }
+
+        if has_any { Some(limits) } else { None }
+    }
+
     /// Merge skill-specific limits with global defaults
     ///
     /// Returns a `ResourceLimits` instance where skill-specific values
@@ -211,13 +338,12 @@ impl SkillMetadata {
     /// * `false` if the script is explicitly disallowed
     ///
     /// # Pattern matching
-    /// - If `allowed_scripts` is None or empty, all scripts are allowed
-    /// - If `allowed_scripts` contains patterns, the script must match at least one
+    /// - If no allowed-scripts in metadata, all scripts are allowed
+    /// - If allowed-scripts contains patterns, the script must match at least one
     /// - Supports glob patterns: `*` (any chars), `?` (single char)
     pub fn is_script_allowed(&self, script_name: &str) -> bool {
-        match &self.allowed_scripts {
-            None => true,                                  // No restrictions - allow all
-            Some(patterns) if patterns.is_empty() => true, // Empty list - allow all
+        match self.get_allowed_scripts() {
+            None => true, // No restrictions - allow all
             Some(patterns) => {
                 // Check if script matches any pattern
                 patterns.iter().any(|pattern| {
@@ -231,17 +357,6 @@ impl SkillMetadata {
                 })
             }
         }
-    }
-
-    /// Get the list of allowed script patterns
-    ///
-    /// Returns None if all scripts are allowed, Some with patterns otherwise.
-    #[allow(dead_code)]
-    pub fn get_allowed_scripts(&self) -> Option<&[String]> {
-        self.allowed_scripts
-            .as_ref()
-            .filter(|v| !v.is_empty())
-            .map(|v| v.as_slice())
     }
 
     /// Simple glob pattern matching using dynamic programming
@@ -474,23 +589,20 @@ impl LoadedSkill {
     /// Returns skill-level limits merged with global defaults,
     /// or None to use global defaults directly.
     fn resolve_resource_limits(&self) -> Option<ResourceLimits> {
-        self.metadata
-            .execution_limits
-            .as_ref()
-            .and_then(|skill_limits| {
-                // Only create merged limits if skill has custom limits
-                if skill_limits.is_empty() {
-                    return None;
-                }
+        self.metadata.get_execution_limits().and_then(|skill_limits| {
+            // Only create merged limits if skill has custom limits
+            if skill_limits.is_empty() {
+                return None;
+            }
 
-                // Get global defaults from executor manager
-                EXECUTOR_MANAGER.get().map(|_manager| {
-                    // Access the default limits from manager
-                    // For now, use ResourceLimits::default() as the base
-                    // In production, this should come from manager's configured defaults
-                    skill_limits.merge_with(&ResourceLimits::default())
-                })
+            // Get global defaults from executor manager
+            EXECUTOR_MANAGER.get().map(|_manager| {
+                // Access the default limits from manager
+                // For now, use ResourceLimits::default() as the base
+                // In production, this should come from manager's configured defaults
+                skill_limits.merge_with(&ResourceLimits::default())
             })
+        })
     }
 
     /// List all available scripts in this skill
@@ -721,9 +833,27 @@ mod tests {
             metadata: None,
             allowed_tools: None,
             model: None,
-            allowed_scripts: None,
-            execution_limits: None,
-            references: None,
+        }
+    }
+
+    /// Helper to create a SkillMetadata with metadata extension fields
+    fn test_metadata_with_extensions(
+        name: &str,
+        description: &str,
+        extensions: HashMap<String, String>,
+    ) -> SkillMetadata {
+        SkillMetadata {
+            name: name.to_string(),
+            description: description.to_string(),
+            license: None,
+            compatibility: None,
+            metadata: if extensions.is_empty() {
+                None
+            } else {
+                Some(extensions)
+            },
+            allowed_tools: None,
+            model: None,
         }
     }
 
@@ -754,9 +884,6 @@ mod tests {
             },
             allowed_tools: None,
             model: None,
-            allowed_scripts: None,
-            execution_limits: None,
-            references: None,
         }
     }
 
@@ -859,8 +986,9 @@ mod tests {
         assert!(metadata.metadata.is_none());
         assert!(metadata.allowed_tools.is_none());
         assert!(metadata.model.is_none());
-        assert!(metadata.allowed_scripts.is_none());
-        assert!(metadata.execution_limits.is_none());
+        // Extension fields are in metadata
+        assert!(metadata.get_allowed_scripts().is_none());
+        assert!(metadata.get_execution_limits().is_none());
     }
 
     #[test]
@@ -1140,18 +1268,24 @@ mod tests {
     }
 
     #[test]
-    fn test_is_script_allowed_empty_list() {
-        let mut metadata = test_metadata("test", "test");
-        metadata.allowed_scripts = Some(vec![]);
+    fn test_is_script_allowed_empty_metadata() {
+        let metadata = test_metadata_with_extensions(
+            "test",
+            "test",
+            HashMap::from([("allowed-scripts".to_string(), "".to_string())]),
+        );
 
-        // Empty list - all scripts allowed
+        // Empty metadata value - all scripts allowed
         assert!(metadata.is_script_allowed("process.js"));
     }
 
     #[test]
     fn test_is_script_allowed_exact_match() {
-        let mut metadata = test_metadata("test", "test");
-        metadata.allowed_scripts = Some(vec!["process.js".to_string(), "export.py".to_string()]);
+        let metadata = test_metadata_with_extensions(
+            "test",
+            "test",
+            HashMap::from([("allowed-scripts".to_string(), "process.js, export.py".to_string())]),
+        );
 
         // Exact matches
         assert!(metadata.is_script_allowed("process.js"));
@@ -1164,8 +1298,11 @@ mod tests {
 
     #[test]
     fn test_is_script_allowed_glob_star() {
-        let mut metadata = test_metadata("test", "test");
-        metadata.allowed_scripts = Some(vec!["*.js".to_string()]);
+        let metadata = test_metadata_with_extensions(
+            "test",
+            "test",
+            HashMap::from([("allowed-scripts".to_string(), "*.js".to_string())]),
+        );
 
         // Matches *.js
         assert!(metadata.is_script_allowed("process.js"));
@@ -1179,8 +1316,11 @@ mod tests {
 
     #[test]
     fn test_is_script_allowed_glob_multiple_patterns() {
-        let mut metadata = test_metadata("test", "test");
-        metadata.allowed_scripts = Some(vec!["*.js".to_string(), "*.ts".to_string()]);
+        let metadata = test_metadata_with_extensions(
+            "test",
+            "test",
+            HashMap::from([("allowed-scripts".to_string(), "*.js, *.ts".to_string())]),
+        );
 
         // Matches either pattern
         assert!(metadata.is_script_allowed("process.js"));
@@ -1192,8 +1332,11 @@ mod tests {
 
     #[test]
     fn test_is_script_allowed_glob_prefix() {
-        let mut metadata = test_metadata("test", "test");
-        metadata.allowed_scripts = Some(vec!["process-*.js".to_string()]);
+        let metadata = test_metadata_with_extensions(
+            "test",
+            "test",
+            HashMap::from([("allowed-scripts".to_string(), "process-*.js".to_string())]),
+        );
 
         // Matches prefix pattern
         assert!(metadata.is_script_allowed("process-data.js"));
@@ -1207,8 +1350,11 @@ mod tests {
 
     #[test]
     fn test_is_script_allowed_glob_question_mark() {
-        let mut metadata = test_metadata("test", "test");
-        metadata.allowed_scripts = Some(vec!["script?.js".to_string()]);
+        let metadata = test_metadata_with_extensions(
+            "test",
+            "test",
+            HashMap::from([("allowed-scripts".to_string(), "script?.js".to_string())]),
+        );
 
         // Matches exactly one character
         assert!(metadata.is_script_allowed("script1.js"));
@@ -1227,15 +1373,21 @@ mod tests {
 
     #[test]
     fn test_get_allowed_scripts_empty() {
-        let mut metadata = test_metadata("test", "test");
-        metadata.allowed_scripts = Some(vec![]);
+        let metadata = test_metadata_with_extensions(
+            "test",
+            "test",
+            HashMap::from([("allowed-scripts".to_string(), "".to_string())]),
+        );
         assert!(metadata.get_allowed_scripts().is_none());
     }
 
     #[test]
     fn test_get_allowed_scripts_with_values() {
-        let mut metadata = test_metadata("test", "test");
-        metadata.allowed_scripts = Some(vec!["*.js".to_string(), "process.py".to_string()]);
+        let metadata = test_metadata_with_extensions(
+            "test",
+            "test",
+            HashMap::from([("allowed-scripts".to_string(), "*.js, process.py".to_string())]),
+        );
 
         let scripts = metadata.get_allowed_scripts();
         assert!(scripts.is_some());
@@ -1347,20 +1499,19 @@ mod tests {
     }
 
     #[test]
-    fn test_skill_metadata_with_execution_limits() {
+    fn test_skill_metadata_with_execution_limits_in_metadata() {
         let yaml = r#"
 name: test-skill
 description: A test skill
-execution-limits:
-  max_memory_bytes: 134217728
-  timeout_secs: 30
-  network_access: true
+metadata:
+  execution-limits: "max_memory_bytes=134217728,timeout_secs=30,network_access=true"
 "#;
 
         let metadata: SkillMetadata = serde_yaml::from_str(yaml).unwrap();
 
-        assert!(metadata.execution_limits.is_some());
-        let limits = metadata.execution_limits.unwrap();
+        let limits = metadata.get_execution_limits();
+        assert!(limits.is_some());
+        let limits = limits.unwrap();
         assert_eq!(limits.max_memory_bytes, Some(128 * 1024 * 1024));
         assert_eq!(limits.timeout_secs, Some(30));
         assert_eq!(limits.network_access, Some(true));
@@ -1368,24 +1519,93 @@ execution-limits:
     }
 
     #[test]
-    fn test_skill_metadata_with_allowed_scripts() {
+    fn test_skill_metadata_with_allowed_scripts_in_metadata() {
         let yaml = r#"
 name: test-skill
 description: A test skill
-allowed-scripts:
-  - "*.js"
-  - "*.ts"
-  - "process.py"
+metadata:
+  allowed-scripts: "*.js, *.ts, process.py"
 "#;
 
         let metadata: SkillMetadata = serde_yaml::from_str(yaml).unwrap();
 
-        assert!(metadata.allowed_scripts.is_some());
-        let scripts = metadata.allowed_scripts.unwrap();
+        let scripts = metadata.get_allowed_scripts();
+        assert!(scripts.is_some());
+        let scripts = scripts.unwrap();
         assert_eq!(scripts.len(), 3);
         assert!(scripts.contains(&"*.js".to_string()));
         assert!(scripts.contains(&"*.ts".to_string()));
         assert!(scripts.contains(&"process.py".to_string()));
+    }
+
+    #[test]
+    fn test_skill_resource_limits_parse() {
+        let s = "max_memory_bytes=134217728,timeout_secs=30,network_access=true";
+        let limits = SkillResourceLimits::parse(s);
+
+        assert!(limits.is_some());
+        let limits = limits.unwrap();
+        assert_eq!(limits.max_memory_bytes, Some(134217728));
+        assert_eq!(limits.timeout_secs, Some(30));
+        assert_eq!(limits.network_access, Some(true));
+        assert!(limits.max_output_bytes.is_none());
+    }
+
+    #[test]
+    fn test_skill_resource_limits_parse_with_spaces() {
+        let s = "max_memory_bytes = 134217728 , timeout_secs = 30";
+        let limits = SkillResourceLimits::parse(s);
+
+        assert!(limits.is_some());
+        let limits = limits.unwrap();
+        assert_eq!(limits.max_memory_bytes, Some(134217728));
+        assert_eq!(limits.timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn test_skill_resource_limits_parse_empty() {
+        assert!(SkillResourceLimits::parse("").is_none());
+        assert!(SkillResourceLimits::parse("   ").is_none());
+    }
+
+    #[test]
+    fn test_skill_resource_limits_parse_invalid() {
+        // No valid key-value pairs
+        assert!(SkillResourceLimits::parse("invalid").is_none());
+        assert!(SkillResourceLimits::parse("unknown_key=123").is_none());
+    }
+
+    #[test]
+    fn test_skill_resource_limits_parse_partial() {
+        let s = "timeout_secs=60";
+        let limits = SkillResourceLimits::parse(s).unwrap();
+
+        assert!(limits.max_memory_bytes.is_none());
+        assert_eq!(limits.timeout_secs, Some(60));
+        assert!(limits.max_output_bytes.is_none());
+        assert!(limits.network_access.is_none());
+    }
+
+    #[test]
+    fn test_get_references_from_metadata() {
+        let metadata = test_metadata_with_extensions(
+            "test",
+            "test",
+            HashMap::from([("references".to_string(), "api-docs.md, *.txt".to_string())]),
+        );
+
+        let refs = metadata.get_references();
+        assert!(refs.is_some());
+        let refs = refs.unwrap();
+        assert_eq!(refs.len(), 2);
+        assert!(refs.contains(&"api-docs.md".to_string()));
+        assert!(refs.contains(&"*.txt".to_string()));
+    }
+
+    #[test]
+    fn test_get_references_none() {
+        let metadata = test_metadata("test", "test");
+        assert!(metadata.get_references().is_none());
     }
 
     #[test]
