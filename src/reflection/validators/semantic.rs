@@ -131,7 +131,10 @@ impl SemanticValidator {
 
         let mut request = self
             .client
-            .post(format!("{}/v1/chat/completions", server.url))
+            .post(format!(
+                "{}/chat/completions",
+                server.url.trim_end_matches('/')
+            ))
             .header(CONTENT_TYPE, "application/json")
             .json(&request_body);
 
