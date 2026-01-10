@@ -58,6 +58,12 @@
     - [13.1 命令结构](#131-命令结构)
     - [13.2 技能管理命令](#132-技能管理命令)
     - [13.3 安装流程](#133-安装流程)
+  - [十四、反思系统](#十四反思系统)
+    - [14.1 架构概览](#141-架构概览)
+    - [14.2 模块结构](#142-模块结构)
+    - [14.3 反思流程](#143-反思流程)
+    - [14.4 动态重规划](#144-动态重规划)
+    - [14.5 核心类型](#145-核心类型)
   - [附录：API 端点一览](#附录api-端点一览)
   - [文档版本](#文档版本)
 
@@ -74,6 +80,7 @@
 - **MCP 集成**：支持与外部 MCP 工具服务器集成
 - **健康检查**：对下游服务器进行定期健康监控
 - **脚本执行器**：为 Skills 提供沙盒化脚本执行环境（支持 Deno/Docker）
+- **反思系统**：LLM 驱动的结果评估、自动重试和动态重规划能力
 
 ### 技术栈
 
@@ -1794,6 +1801,335 @@ classDiagram
 
 ---
 
+## 十四、反思系统
+
+反思系统为 Plan 模式提供自我纠错能力，通过 LLM 驱动的结果评估和动态重规划实现高质量任务执行。
+
+### 14.1 架构概览
+
+```mermaid
+graph TB
+    subgraph "Plan Mode Execution"
+        EXEC[子任务执行]
+        RESULT[执行结果]
+    end
+
+    subgraph "Reflection System"
+        subgraph "Core Components"
+            ENGINE[ReflectionEngine]
+            CACHE[ReflectionCache]
+            STRATEGY[AdaptiveStrategy]
+        end
+
+        subgraph "Validation"
+            VALIDATOR[ResultValidator]
+            JSON_V[JsonValidator]
+            CODE_V[CodeValidator]
+            SEMANTIC_V[SemanticValidator]
+        end
+
+        subgraph "Replanning"
+            REPLANNER[DynamicReplanner]
+            TRIGGER[ReplanTrigger]
+        end
+
+        subgraph "Reporting"
+            REPORT[ReflectionReport]
+            TRACE[反思追踪]
+        end
+    end
+
+    EXEC --> RESULT
+    RESULT --> CACHE
+    CACHE -->|缓存命中| REPORT
+    CACHE -->|缓存未命中| ENGINE
+
+    ENGINE --> VALIDATOR
+    VALIDATOR --> JSON_V
+    VALIDATOR --> CODE_V
+    VALIDATOR --> SEMANTIC_V
+
+    ENGINE --> STRATEGY
+    STRATEGY -->|调整参数| ENGINE
+
+    ENGINE -->|评估结果| DECISION{决策}
+    DECISION -->|Accept| REPORT
+    DECISION -->|Retry| EXEC
+    DECISION -->|Replan| TRIGGER
+
+    TRIGGER --> REPLANNER
+    REPLANNER -->|新计划| EXEC
+
+    REPORT --> TRACE
+
+    style ENGINE fill:#90EE90
+    style CACHE fill:#90EE90
+    style REPLANNER fill:#90EE90
+```
+
+### 14.2 模块结构
+
+```mermaid
+graph TB
+    subgraph "src/reflection/"
+        MOD["mod.rs<br/>(模块导出)"]
+
+        ENGINE_RS["engine.rs<br/>(反思引擎)"]
+        TYPES_RS["types.rs<br/>(核心类型)"]
+        PROMPTS_RS["prompts.rs<br/>(LLM 提示词)"]
+        CACHE_RS["cache.rs<br/>(反思缓存)"]
+        STRATEGY_RS["strategy.rs<br/>(自适应策略)"]
+        REPLANNER_RS["replanner.rs<br/>(动态重规划)"]
+        REPORT_RS["report.rs<br/>(结构化报告)"]
+        VALIDATOR_RS["validator.rs<br/>(验证框架)"]
+
+        subgraph "validators/"
+            V_MOD["mod.rs"]
+            STRUCTURAL["structural.rs"]
+            SEMANTIC["semantic.rs"]
+        end
+    end
+
+    MOD --> ENGINE_RS
+    MOD --> TYPES_RS
+    MOD --> CACHE_RS
+    MOD --> STRATEGY_RS
+    MOD --> REPLANNER_RS
+    MOD --> REPORT_RS
+    MOD --> VALIDATOR_RS
+    VALIDATOR_RS --> V_MOD
+```
+
+**代码统计：**
+
+| 模块 | 代码行数 | 测试数量 |
+|------|----------|----------|
+| `engine.rs` | ~600 | 5 |
+| `types.rs` | ~444 | 11 |
+| `prompts.rs` | ~259 | 4 |
+| `cache.rs` | ~834 | 22 |
+| `strategy.rs` | ~760 | 17 |
+| `replanner.rs` | ~1,418 | 35 |
+| `report.rs` | ~827 | 22 |
+| `validator.rs` | ~436 | 13 |
+| `validators/*` | ~1,294 | 8 |
+| **总计** | **~6,969** | **137** |
+
+### 14.3 反思流程
+
+```mermaid
+sequenceDiagram
+    participant Plan as Plan Mode
+    participant Cache as ReflectionCache
+    participant Engine as ReflectionEngine
+    participant LLM as LLM Server
+    participant Strategy as AdaptiveStrategy
+    participant Trace as SubtaskTrace
+
+    Plan->>Cache: get(task, result)
+
+    alt 缓存命中
+        Cache-->>Plan: cached ReflectionResult
+        Plan->>Trace: set_reflection(summary, from_cache=true)
+    else 缓存未命中
+        Cache-->>Plan: None
+
+        Plan->>Strategy: adapt_for_task(task)
+        Strategy-->>Plan: AdaptedParams
+
+        Plan->>Engine: reflect_on_subtask(subtask, result, trace, context)
+        Engine->>LLM: 发送反思提示词
+        LLM-->>Engine: 反思评估响应
+
+        Engine->>Engine: 解析响应，生成 ReflectionResult
+
+        Engine-->>Plan: ReflectionResult
+
+        Plan->>Cache: put(task, result, reflection)
+        Plan->>Strategy: record_outcome(task, passed, rounds, confidence)
+        Plan->>Trace: set_reflection(summary, from_cache=false)
+    end
+
+    alt 结果通过
+        Plan->>Plan: 继续执行下一子任务
+    else 建议重试
+        Plan->>Plan: 重试当前子任务
+    else 触发重规划
+        Plan->>Plan: 调用 DynamicReplanner
+    end
+```
+
+### 14.4 动态重规划
+
+```mermaid
+flowchart TD
+    START([子任务失败]) --> CHECK_TRIGGER[检查重规划触发条件]
+
+    CHECK_TRIGGER --> TRIGGER_TYPE{触发类型?}
+
+    TRIGGER_TYPE -->|连续失败| CONSECUTIVE["ConsecutiveFailures<br/>(count >= threshold)"]
+    TRIGGER_TYPE -->|关键任务失败| CRITICAL["CriticalSubtaskFailed<br/>(影响多个依赖)"]
+    TRIGGER_TYPE -->|反思建议| REFLECTION["ReflectionSuggested<br/>(RecommendedAction::Replan)"]
+    TRIGGER_TYPE -->|时间超限| TIMEOUT["TimeBudgetExceeded<br/>(剩余时间不足)"]
+    TRIGGER_TYPE -->|无触发| NO_TRIGGER[继续当前计划]
+
+    CONSECUTIVE --> REPLAN
+    CRITICAL --> REPLAN
+    REFLECTION --> REPLAN
+    TIMEOUT --> REPLAN
+
+    REPLAN[调用 DynamicReplanner]
+    REPLAN --> BUILD_CONTEXT[构建 ReplanContext]
+
+    BUILD_CONTEXT --> LLM_CALL[LLM 生成新计划]
+    LLM_CALL --> PARSE[解析 ReplanResult]
+
+    PARSE --> APPLY[应用新计划]
+
+    subgraph "ReplanResult"
+        PRESERVED[保留的子任务]
+        ADDED[新增的子任务]
+        REMOVED[移除的子任务]
+    end
+
+    APPLY --> RECORD[记录 ReplanEvent 到 PlanTrace]
+    RECORD --> CONTINUE[继续执行新计划]
+
+    NO_TRIGGER --> END([结束])
+    CONTINUE --> END
+```
+
+**重规划触发条件：**
+
+| 触发器 | 条件 | 默认阈值 |
+|--------|------|----------|
+| `ConsecutiveFailures` | 连续失败次数达到阈值 | 2 次 |
+| `CriticalSubtaskFailed` | 关键子任务失败（多个依赖） | 依赖数 > 2 |
+| `ReflectionSuggested` | 反思系统建议重规划 | - |
+| `TimeBudgetExceeded` | 剩余时间不足 | < 20% |
+
+### 14.5 核心类型
+
+```mermaid
+classDiagram
+    class ReflectionEngine {
+        +Arc~RwLock~LlmServerInfo~~ server
+        +ReflectionConfig config
+        +reflect_on_subtask(subtask, result, trace, context) Result~ReflectionResult~
+    }
+
+    class ReflectionResult {
+        +bool passed
+        +f64 confidence
+        +Vec~ReflectionIssue~ issues
+        +Vec~String~ suggestions
+        +RecommendedAction recommended_action
+        +u32 reflection_rounds
+        +passed() Self
+        +failed(issues) Self
+        +summary() String
+    }
+
+    class RecommendedAction {
+        <<enumeration>>
+        Accept
+        AcceptWithFix(String)
+        Retry
+        RetryWithStrategy(String)
+        Replan(ReplanRequest)
+        RequestClarification(String)
+        Abort(String)
+    }
+
+    class ReflectionCache {
+        +CacheConfig config
+        +HashMap entries
+        +get(task, result) Option~ReflectionResult~
+        +put(task, result, reflection)
+        +cleanup_expired()
+    }
+
+    class AdaptiveStrategy {
+        +AdaptiveConfig config
+        +ReflectionStats stats
+        +record_outcome(task, passed, rounds, confidence)
+        +adapt_for_task(task, base_config) AdaptedParams
+    }
+
+    class DynamicReplanner {
+        +ReplanConfig config
+        +Arc~RwLock~LlmServerInfo~~ server
+        +replan(context) Result~ReplanResult~
+    }
+
+    class ReplanTrigger {
+        <<enumeration>>
+        ConsecutiveFailures
+        CriticalSubtaskFailed
+        ReflectionSuggested
+        TimeBudgetExceeded
+        +should_replan(trace, config, graph) Option~Self~
+        +description() String
+    }
+
+    ReflectionEngine --> ReflectionResult
+    ReflectionResult --> RecommendedAction
+    ReflectionCache --> ReflectionResult
+    AdaptiveStrategy --> ReflectionResult
+    DynamicReplanner --> ReplanTrigger
+```
+
+**追踪类型扩展（R5.5）：**
+
+```mermaid
+classDiagram
+    class SubtaskTrace {
+        +Option~SubtaskReflectionSummary~ reflection
+        +set_reflection(summary)
+        +get_reflection() Option
+    }
+
+    class SubtaskReflectionSummary {
+        +bool passed
+        +f64 confidence
+        +usize issue_count
+        +u32 reflection_rounds
+        +String recommended_action
+        +bool from_cache
+        +from_result(result, from_cache) Self
+    }
+
+    class PlanTrace {
+        +Option~PlanReflectionSummary~ reflection_report
+        +Vec~ReplanEvent~ replan_history
+        +compute_reflection_summary()
+        +add_replan_event(event)
+        +replan_count() usize
+    }
+
+    class PlanReflectionSummary {
+        +u32 total_reflection_rounds
+        +usize passed_subtasks
+        +usize failed_subtasks
+        +f64 avg_confidence
+        +u32 replan_count
+    }
+
+    class ReplanEvent {
+        +DateTime timestamp
+        +String trigger
+        +usize preserved_count
+        +usize added_count
+        +usize removed_count
+    }
+
+    SubtaskTrace --> SubtaskReflectionSummary
+    PlanTrace --> PlanReflectionSummary
+    PlanTrace --> ReplanEvent
+```
+
+---
+
 ## 附录：API 端点一览
 
 ```mermaid
@@ -1853,6 +2189,7 @@ graph LR
 
 ## 文档版本
 
-- **版本**: 2.0
-- **最后更新**: 2026-01-09
+- **版本**: 3.1
+- **最后更新**: 2026-01-10
 - **适用项目版本**: llama-nexus v0.9.0 (feat-sandbox)
+- **本次更新**: 修正第十四章代码统计数据和 validators 子目录结构
