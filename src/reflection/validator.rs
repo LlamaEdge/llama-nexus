@@ -3,6 +3,9 @@
 //! This module defines the core validation traits and types used to validate
 //! task execution results before and during reflection.
 
+// Some validation types are reserved for future features
+#![allow(dead_code)]
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 

@@ -55,9 +55,6 @@
 //! let result = code_validator.validate("fn main() {}", &context).await;
 //! ```
 
-// Allow dead code - will be fully integrated when Plan mode calls reflection
-#![allow(dead_code)]
-
 pub mod cache;
 pub mod engine;
 pub mod prompts;
@@ -68,30 +65,29 @@ pub mod types;
 pub mod validator;
 pub mod validators;
 
-// Re-exports will be used when integrated into Plan mode
+// Re-exports for Plan mode integration
+// Core reflection types (currently used in plan.rs)
+pub use cache::{CacheConfig, ReflectionCache};
+// Additional exports for future use and external API
 #[allow(unused_imports)]
-pub use cache::{CacheConfig, CacheEntry, CacheKey, CacheStats, ReflectionCache};
-#[allow(unused_imports)]
+pub use cache::{CacheEntry, CacheKey, CacheStats};
 pub use engine::{LlmServerInfo, ReflectionEngine};
-#[allow(unused_imports)]
 pub use replanner::{
-    DependencyGraph, DynamicReplanner, FailedSubtaskInfo, NewSubtask, PlanDiff, ReplanConfig,
-    ReplanContext, ReplanResult, ReplanTrigger, SubtaskInfo, TimeBudget,
+    DependencyGraph, DynamicReplanner, FailedSubtaskInfo, ReplanContext, ReplanTrigger, SubtaskInfo,
 };
+#[allow(unused_imports)]
+pub use replanner::{NewSubtask, PlanDiff, ReplanConfig, ReplanResult, TimeBudget};
 #[allow(unused_imports)]
 pub use report::{
     ActionReport, IssueReport, PlanChangeSummary, PlanReflectionReport, ReflectionReport,
     ReflectionSummary, ReplanSummary, ReportMetadata, SubtaskReflectionReport, ValidationReport,
 };
+pub use strategy::AdaptiveStrategy;
 #[allow(unused_imports)]
-pub use strategy::{
-    AdaptedParams, AdaptiveConfig, AdaptiveStrategy, CategoryStats, ReflectionStats, TaskCategory,
-};
+pub use strategy::{AdaptedParams, AdaptiveConfig, CategoryStats, ReflectionStats, TaskCategory};
 #[allow(unused_imports)]
-pub use types::{
-    IssueType, RecommendedAction, ReflectionConfig, ReflectionContext, ReflectionIssue,
-    ReflectionResult, ReplanRequest,
-};
+pub use types::{IssueType, ReflectionIssue, ReflectionResult, ReplanRequest};
+pub use types::{RecommendedAction, ReflectionConfig, ReflectionContext};
 #[allow(unused_imports)]
 pub use validator::{
     Constraint, ExpectedFormat, ResultValidator, ValidationContext, ValidationError,

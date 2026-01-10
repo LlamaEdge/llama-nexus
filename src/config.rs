@@ -59,6 +59,9 @@ pub struct Config {
     /// Reflection system configuration (only effective in Plan Mode)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reflection: Option<crate::reflection::ReflectionConfig>,
+    /// Dynamic replanning configuration (only effective in Plan Mode)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replan: Option<crate::reflection::ReplanConfig>,
 }
 impl Config {
     pub async fn load(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
@@ -119,6 +122,7 @@ impl Default for Config {
             mcp: None,
             skill: None,
             reflection: None,
+            replan: None,
         }
     }
 }

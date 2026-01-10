@@ -4,6 +4,9 @@
 //! - Structural validators (JSON, code syntax)
 //! - Semantic validators (LLM-driven content evaluation)
 
+// Validators are reserved for future validation features
+#![allow(dead_code)]
+
 pub mod semantic;
 pub mod structural;
 

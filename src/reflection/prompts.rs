@@ -3,6 +3,9 @@
 //! This module provides prompt templates used by the reflection engine
 //! to evaluate task execution results.
 
+// Some prompts are reserved for plan-level reflection
+#![allow(dead_code)]
+
 use super::types::ReflectionContext;
 
 /// Subtask reflection prompt template.

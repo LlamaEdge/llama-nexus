@@ -4,6 +4,9 @@
 //! for similar tasks to avoid repeated LLM evaluations for semantically
 //! equivalent inputs.
 
+// Some public API methods are not yet used in plan.rs but are part of the public interface
+#![allow(dead_code)]
+
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},

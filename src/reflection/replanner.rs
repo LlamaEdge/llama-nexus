@@ -3,6 +3,9 @@
 //! This module implements dynamic replanning capabilities that allow the Plan mode
 //! to automatically revise the task plan when failures or issues are detected.
 
+// DynamicReplanner will be integrated in R5.2
+#![allow(dead_code)]
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};

@@ -4,6 +4,9 @@
 //! reports from reflection results, suitable for inclusion in API responses
 //! and frontend visualization.
 
+// ReflectionReport will be integrated in R5.5
+#![allow(dead_code)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

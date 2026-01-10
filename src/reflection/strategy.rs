@@ -4,6 +4,9 @@
 //! reflection depth and parameters based on historical success rates and
 //! task characteristics.
 
+// Some public API methods are reserved for future features
+#![allow(dead_code)]
+
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},

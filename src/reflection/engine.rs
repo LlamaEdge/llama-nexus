@@ -3,6 +3,9 @@
 //! The reflection engine evaluates task execution results and provides
 //! structured feedback for quality improvement and self-correction.
 
+// Some public API methods are reserved for future features
+#![allow(dead_code)]
+
 use std::sync::Arc;
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};

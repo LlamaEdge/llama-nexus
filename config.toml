@@ -160,6 +160,35 @@ rb = "ruby:3.2-slim"               # Ruby scripts
 
 
 # ============================================================================
+# SECTION 1.6: REFLECTION SYSTEM CONFIGURATION (Only effective in Plan Mode)
+# ============================================================================
+# The reflection system provides self-correction capabilities for Plan mode.
+# It evaluates subtask results using LLM-driven analysis and can trigger
+# retries or replanning when issues are detected.
+
+[reflection]
+enabled = true                        # Enable reflection system
+confidence_threshold = 0.7            # Confidence threshold (0.0-1.0) below which issues are flagged
+max_reflection_rounds = 3             # Maximum reflection rounds per subtask
+enable_result_validation = true       # Enable structural/semantic result validation
+enable_path_optimization = false      # Enable path optimization suggestions (experimental)
+
+# ============================================================================
+# SECTION 1.7: DYNAMIC REPLANNING CONFIGURATION (Only effective in Plan Mode)
+# ============================================================================
+# The dynamic replanning system automatically adjusts the plan when subtasks
+# fail or external conditions change. It analyzes failure patterns and can
+# insert recovery steps, reorder tasks, or trigger a full replan.
+
+[replan]
+enabled = true                        # Enable dynamic replanning
+max_replan_attempts = 2               # Maximum number of replan attempts
+critical_dependent_threshold = 2      # Threshold for considering a subtask critical (based on dependent count)
+failure_rate_threshold = 0.5          # Failure rate threshold (0.0-1.0) for triggering replanning
+min_time_per_subtask = 30             # Minimum time in seconds required per subtask
+
+
+# ============================================================================
 # SECTION 2: AI SERVICE CONFIGURATION
 # ============================================================================
 # This section contains configuration for AI services including chat and

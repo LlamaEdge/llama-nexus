@@ -41,7 +41,9 @@ use crate::{
     chat::{
         gen_chat_id,
         planner::{SubTask, TaskPlan, TaskPlanner, ToolDescription},
-        trace::{PlanTrace, SubtaskTrace, TokenUsage, TraceStatus},
+        trace::{
+            PlanTrace, ReplanEvent, SubtaskReflectionSummary, SubtaskTrace, TokenUsage, TraceStatus,
+        },
         utils::*,
     },
     dual_debug, dual_error, dual_info, dual_warn,
@@ -49,6 +51,11 @@ use crate::{
     mcp::{
         DEFAULT_SEARCH_FALLBACK_MESSAGE, MCP_SERVICES, SEARCH_MCP_SERVER_NAMES, extract_tool_name,
         format_mcp_tool_name, parse_mcp_tool_name,
+    },
+    reflection::{
+        AdaptiveStrategy, CacheConfig, DependencyGraph, DynamicReplanner, FailedSubtaskInfo,
+        LlmServerInfo, RecommendedAction, ReflectionCache, ReflectionContext, ReflectionEngine,
+        ReplanContext, ReplanTrigger, SubtaskInfo,
     },
     server::{RoutingPolicy, ServerKind},
     skills::{
@@ -146,6 +153,7 @@ pub(crate) async fn chat(
         max_tools_per_iteration,
         tool_call_max_retries,
         tool_call_retry_delay_ms,
+        reflection_config,
     ) = {
         let config = state.config.read().await;
         (
@@ -157,11 +165,55 @@ pub(crate) async fn chat(
             config.server.max_tools_per_iteration,
             config.server.tool_call_max_retries,
             config.server.tool_call_retry_delay_ms,
+            config.reflection.clone().unwrap_or_default(),
         )
     };
 
     // Initialize time budget for the entire plan
     let time_budget = TimeBudget::new(plan_timeout_secs);
+
+    // Initialize reflection system (if enabled)
+    let reflection_engine = if reflection_config.enabled {
+        let server_info = Arc::new(tokio::sync::RwLock::new(LlmServerInfo {
+            url: chat_server.url.clone(),
+            api_key: chat_server.api_key.clone(),
+        }));
+        Some(ReflectionEngine::new(
+            server_info,
+            reflection_config.clone(),
+        ))
+    } else {
+        None
+    };
+
+    // Initialize reflection cache (if reflection is enabled)
+    let reflection_cache = if reflection_config.enabled {
+        Some(ReflectionCache::new(CacheConfig::default()))
+    } else {
+        None
+    };
+
+    // Initialize adaptive strategy (if reflection is enabled)
+    let adaptive_strategy = if reflection_config.enabled {
+        Some(AdaptiveStrategy::new(Default::default()))
+    } else {
+        None
+    };
+
+    // Initialize dynamic replanner (if reflection is enabled)
+    let dynamic_replanner = if reflection_config.enabled {
+        let server_info = Arc::new(tokio::sync::RwLock::new(LlmServerInfo {
+            url: chat_server.url.clone(),
+            api_key: chat_server.api_key.clone(),
+        }));
+        Some(DynamicReplanner::with_defaults(server_info))
+    } else {
+        None
+    };
+
+    if reflection_config.enabled {
+        dual_info!("🔍 Reflection system enabled - request_id: {}", request_id);
+    }
 
     // Store original stream setting
     let stream = request.stream.unwrap_or(false);
@@ -270,201 +322,496 @@ pub(crate) async fn chat(
     let mut completed_subtasks: HashSet<usize> = HashSet::new();
     let mut subtask_results: Vec<(usize, String)> = Vec::new();
 
+    // Build dependency graph for critical subtask detection (R5.2)
+    #[allow(unused_variables)]
+    let dependency_graph = DependencyGraph::from_subtask_dependencies(
+        &plan.subtasks.iter().map(|s| s.id).collect::<Vec<_>>(),
+        &plan
+            .subtasks
+            .iter()
+            .map(|s| s.dependencies.clone())
+            .collect::<Vec<_>>(),
+    );
+
     // Calculate pending subtask count for time allocation
     let mut pending_count = plan.execution_order.len();
 
-    for &subtask_idx in &plan.execution_order {
-        // Check time budget
-        if time_budget.is_exhausted() {
-            dual_warn!(
-                "Plan time budget exhausted after {} seconds - request_id: {}",
-                time_budget.elapsed().as_secs(),
-                request_id
-            );
-            trace.finalize(TraceStatus::Timeout);
-            dual_info!("Plan trace: {}", trace.summary());
-            return Err(ServerError::TimeBudgetExhausted {
-                elapsed_secs: time_budget.elapsed().as_secs(),
-            });
-        }
+    // Replan tracking (for R5.2 dynamic replanner integration)
+    #[allow(unused_variables, unused_mut)]
+    let mut replan_count = 0u32;
+    #[allow(dead_code)]
+    const MAX_REPLAN_ATTEMPTS: u32 = 3;
 
-        // Check cancellation
-        if cancel_token.is_cancelled() {
-            let warn_msg = "Request was cancelled by client";
-            dual_warn!("{} - request_id: {}", warn_msg, request_id);
-            trace.finalize(TraceStatus::Error(warn_msg.to_string()));
-            return Err(ServerError::Operation(warn_msg.to_string()));
-        }
+    'execution: loop {
+        let execution_order = plan.execution_order.clone();
 
-        let subtask = match plan.subtasks.get_mut(subtask_idx) {
-            Some(s) => s,
-            None => continue,
-        };
+        for &subtask_idx in &execution_order {
+            // Check time budget
+            if time_budget.is_exhausted() {
+                dual_warn!(
+                    "Plan time budget exhausted after {} seconds - request_id: {}",
+                    time_budget.elapsed().as_secs(),
+                    request_id
+                );
+                trace.finalize(TraceStatus::Timeout);
+                dual_info!("Plan trace: {}", trace.summary());
+                return Err(ServerError::TimeBudgetExhausted {
+                    elapsed_secs: time_budget.elapsed().as_secs(),
+                });
+            }
 
-        // Initialize subtask trace
-        let mut subtask_trace = SubtaskTrace::new(subtask.id, subtask.description.clone());
+            // Check cancellation
+            if cancel_token.is_cancelled() {
+                let warn_msg = "Request was cancelled by client";
+                dual_warn!("{} - request_id: {}", warn_msg, request_id);
+                trace.finalize(TraceStatus::Error(warn_msg.to_string()));
+                return Err(ServerError::Operation(warn_msg.to_string()));
+            }
 
-        dual_info!(
-            "▶️ Executing subtask {}: {} - request_id: {}",
-            subtask.id,
-            subtask.description,
-            request_id
-        );
+            let subtask = match plan.subtasks.get_mut(subtask_idx) {
+                Some(s) => s,
+                None => continue,
+            };
 
-        // Check dependencies
-        if !subtask.is_ready(&completed_subtasks) {
-            dual_warn!(
-                "Subtask {} has unmet dependencies, skipping - request_id: {}",
+            // Initialize subtask trace
+            let mut subtask_trace = SubtaskTrace::new(subtask.id, subtask.description.clone());
+
+            dual_info!(
+                "▶️ Executing subtask {}: {} - request_id: {}",
                 subtask.id,
+                subtask.description,
                 request_id
             );
-            subtask.skip();
-            subtask_trace.status = crate::chat::planner::SubTaskStatus::Skipped;
+
+            // Check dependencies
+            if !subtask.is_ready(&completed_subtasks) {
+                dual_warn!(
+                    "Subtask {} has unmet dependencies, skipping - request_id: {}",
+                    subtask.id,
+                    request_id
+                );
+                subtask.skip();
+                subtask_trace.status = crate::chat::planner::SubTaskStatus::Skipped;
+                dual_info!("Subtask trace: {}", subtask_trace.summary());
+                trace.add_subtask_trace(subtask_trace);
+                pending_count = pending_count.saturating_sub(1);
+                continue;
+            }
+
+            // Start subtask execution
+            subtask.start();
+            subtask_trace.start();
+
+            // Allocate time budget for this subtask (including potential retries)
+            let subtask_time_budget = time_budget.allocate(pending_count);
+            // Ensure we don't exceed the configured subtask timeout
+            let effective_timeout =
+                subtask_time_budget.min(Duration::from_secs(subtask_react_timeout_secs));
+
+            dual_debug!(
+                "Allocated {:?} for subtask {} (pending: {}, max_retries: {}) - request_id: {}",
+                effective_timeout,
+                subtask.id,
+                pending_count,
+                subtask_max_retries,
+                request_id
+            );
+
+            // Execute the subtask with retry loop
+            let mut last_error: Option<ServerError> = None;
+            let subtask_start_time = Instant::now();
+
+            for attempt in 0..=subtask_max_retries {
+                // Check if we've exceeded the total time budget for this subtask
+                let elapsed = subtask_start_time.elapsed();
+                if elapsed >= subtask_time_budget {
+                    dual_warn!(
+                        "Subtask {} time budget exhausted after {:?} - request_id: {}",
+                        subtask.id,
+                        elapsed,
+                        request_id
+                    );
+                    last_error = Some(ServerError::SubtaskTimeout {
+                        subtask_id: subtask.id,
+                        timeout_secs: subtask_time_budget.as_secs(),
+                    });
+                    break;
+                }
+
+                // Calculate remaining time for this attempt
+                let remaining_time = subtask_time_budget.saturating_sub(elapsed);
+                let attempt_timeout = remaining_time.min(effective_timeout);
+
+                if attempt > 0 {
+                    dual_info!(
+                        "🔄 Retrying subtask {} (attempt {}/{}) - request_id: {}",
+                        subtask.id,
+                        attempt + 1,
+                        subtask_max_retries + 1,
+                        request_id
+                    );
+                }
+
+                let result = execute_subtask_with_react(
+                    &state,
+                    &chat_server,
+                    &headers,
+                    subtask,
+                    &subtask_results,
+                    &available_tools,
+                    Some(&skills_summaries),
+                    conv_id.as_deref(),
+                    attempt_timeout,
+                    subtask_react_max_iterations,
+                    max_tools_per_iteration,
+                    tool_call_max_retries,
+                    tool_call_retry_delay_ms,
+                    &cancel_token,
+                    request_id,
+                    &mut subtask_trace,
+                    &model_name,
+                )
+                .await;
+
+                match result {
+                    Ok(result_text) => {
+                        // Perform reflection on the result (if enabled)
+                        let should_retry = if let Some(ref engine) = reflection_engine {
+                            // Build reflection context
+                            let deps_results: Vec<String> = subtask
+                                .dependencies
+                                .iter()
+                                .filter_map(|dep_id| {
+                                    subtask_results
+                                        .iter()
+                                        .find(|(id, _)| *id == *dep_id)
+                                        .map(|(_, r)| r.clone())
+                                })
+                                .collect();
+
+                            let tool_calls: Vec<String> = subtask_trace
+                                .react_iterations
+                                .iter()
+                                .flat_map(|it| it.tool_calls.iter().map(|tc| tc.tool_name.clone()))
+                                .collect();
+
+                            let context = ReflectionContext::new(&subtask.description)
+                                .with_dependencies(deps_results)
+                                .with_iterations(subtask_trace.react_iterations.len() as u32)
+                                .with_tool_calls(tool_calls)
+                                .with_time_taken(subtask_start_time.elapsed().as_millis() as u64);
+
+                            // Check cache first (if enabled)
+                            let cached_result = if let Some(ref cache) = reflection_cache {
+                                cache.get(&subtask.description, &result_text)
+                            } else {
+                                None
+                            };
+
+                            if let Some(cached) = cached_result {
+                                dual_debug!(
+                                    "🔍 Using cached reflection for subtask {} - request_id: {}",
+                                    subtask.id,
+                                    request_id
+                                );
+
+                                // Record cached reflection result to subtask trace
+                                subtask_trace.set_reflection(
+                                    SubtaskReflectionSummary::from_result(
+                                        &cached, true, // from_cache = true
+                                    ),
+                                );
+
+                                // Use cached reflection result
+                                match cached.recommended_action {
+                                    RecommendedAction::Accept
+                                    | RecommendedAction::AcceptWithFix(_) => false,
+                                    RecommendedAction::Retry
+                                    | RecommendedAction::RetryWithStrategy(_) => {
+                                        attempt < subtask_max_retries
+                                    }
+                                    _ => false,
+                                }
+                            } else {
+                                // Perform fresh reflection
+                                match engine
+                                    .reflect_on_subtask(
+                                        subtask,
+                                        &result_text,
+                                        &subtask_trace,
+                                        &context,
+                                    )
+                                    .await
+                                {
+                                    Ok(reflection) => {
+                                        dual_info!(
+                                            "🔍 Reflection for subtask {}: {} - request_id: {}",
+                                            subtask.id,
+                                            reflection.summary(),
+                                            request_id
+                                        );
+
+                                        // Record fresh reflection result to subtask trace
+                                        subtask_trace.set_reflection(
+                                            SubtaskReflectionSummary::from_result(
+                                                &reflection,
+                                                false, // from_cache = false
+                                            ),
+                                        );
+
+                                        // Store in cache
+                                        if let Some(ref cache) = reflection_cache {
+                                            cache.put(
+                                                &subtask.description,
+                                                &result_text,
+                                                reflection.clone(),
+                                            );
+                                        }
+
+                                        // Update adaptive strategy
+                                        if let Some(ref strategy) = adaptive_strategy {
+                                            strategy.record_outcome(
+                                                &subtask.description,
+                                                reflection.passed,
+                                                reflection.reflection_rounds,
+                                                reflection.confidence,
+                                            );
+                                        }
+
+                                        // Determine if retry is needed based on reflection
+                                        match &reflection.recommended_action {
+                                            RecommendedAction::Accept
+                                            | RecommendedAction::AcceptWithFix(_) => false,
+                                            RecommendedAction::Retry
+                                            | RecommendedAction::RetryWithStrategy(_) => {
+                                                if !reflection.passed
+                                                    && attempt < subtask_max_retries
+                                                {
+                                                    dual_warn!(
+                                                        "🔄 Reflection suggests retry for subtask {} (confidence: {:.2}) - request_id: {}",
+                                                        subtask.id,
+                                                        reflection.confidence,
+                                                        request_id
+                                                    );
+                                                    subtask_trace.record_retry(format!(
+                                                        "Reflection: {}",
+                                                        reflection
+                                                            .issues
+                                                            .first()
+                                                            .map(|i| i.description.as_str())
+                                                            .unwrap_or("Low confidence")
+                                                    ));
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            }
+                                            RecommendedAction::Replan(replan_request) => {
+                                                // R5.2: Handle reflection-suggested replan
+                                                // Note: Actual replanning is deferred to after subtask borrow ends
+                                                dual_info!(
+                                                    "🔄 Reflection suggests replan for subtask {}: {} - request_id: {}",
+                                                    subtask.id,
+                                                    replan_request.reason,
+                                                    request_id
+                                                );
+                                                // For now, just log and accept the result
+                                                // Full replanning integration is handled via failure path
+                                                false
+                                            }
+                                            RecommendedAction::RequestClarification(msg) => {
+                                                dual_warn!(
+                                                    "❓ Reflection requests clarification for subtask {}: {} - request_id: {}",
+                                                    subtask.id,
+                                                    msg,
+                                                    request_id
+                                                );
+                                                false
+                                            }
+                                            RecommendedAction::Abort(reason) => {
+                                                dual_warn!(
+                                                    "⛔ Reflection suggests abort for subtask {}: {} - request_id: {}",
+                                                    subtask.id,
+                                                    reason,
+                                                    request_id
+                                                );
+                                                false
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Reflection failed, log and continue without retry
+                                        dual_warn!(
+                                            "⚠️ Reflection failed for subtask {}: {} - request_id: {}",
+                                            subtask.id,
+                                            e,
+                                            request_id
+                                        );
+                                        false
+                                    }
+                                }
+                            }
+                        } else {
+                            false
+                        };
+
+                        if should_retry {
+                            // Continue to next retry attempt
+                            last_error = Some(ServerError::Operation(
+                                "Reflection suggested retry".to_string(),
+                            ));
+                            continue;
+                        }
+
+                        dual_info!(
+                            "✅ Subtask {} completed (attempt {}) - request_id: {}",
+                            subtask.id,
+                            attempt + 1,
+                            request_id
+                        );
+
+                        subtask.complete(result_text.clone());
+                        completed_subtasks.insert(subtask.id);
+                        subtask_results.push((subtask.id, result_text.clone()));
+                        subtask_trace.complete(result_text);
+                        last_error = None;
+                        break;
+                    }
+                    Err(e) => {
+                        // Check if this error is retryable
+                        if is_retryable_error(&e) && attempt < subtask_max_retries {
+                            dual_warn!(
+                                "⚠️ Subtask {} failed with retryable error: {} - request_id: {}",
+                                subtask.id,
+                                e,
+                                request_id
+                            );
+                            subtask_trace.record_retry(e.to_string());
+                            last_error = Some(e);
+                            // Continue to next retry attempt
+                        } else {
+                            // Non-retryable error or max retries exceeded
+                            dual_warn!(
+                                "❌ Subtask {} failed: {} - request_id: {}",
+                                subtask.id,
+                                e,
+                                request_id
+                            );
+                            last_error = Some(e);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Handle final result after retry loop
+            if let Some(error) = last_error {
+                // Check if we exhausted all retries
+                if subtask_trace.retry_count >= subtask_max_retries && subtask_max_retries > 0 {
+                    let retry_exhausted_error = ServerError::SubtaskRetryExhausted {
+                        subtask_id: subtask.id,
+                        attempts: subtask_trace.retry_count + 1,
+                        message: error.to_string(),
+                    };
+                    subtask.fail(retry_exhausted_error.to_string());
+                    subtask_trace.fail(retry_exhausted_error.to_string());
+                } else {
+                    subtask.fail(error.to_string());
+                    subtask_trace.fail(error.to_string());
+                }
+
+                // Continue execution (don't fail the entire plan)
+            }
+
             dual_info!("Subtask trace: {}", subtask_trace.summary());
             trace.add_subtask_trace(subtask_trace);
             pending_count = pending_count.saturating_sub(1);
-            continue;
-        }
 
-        // Start subtask execution
-        subtask.start();
-        subtask_trace.start();
+            // R5.2: Check if replanning should be triggered after failure
+            // This is done after subtask borrow ends to avoid conflicts
+            if let Some(ref replanner) = dynamic_replanner {
+                let replan_config = replanner.config().clone();
 
-        // Allocate time budget for this subtask (including potential retries)
-        let subtask_time_budget = time_budget.allocate(pending_count);
-        // Ensure we don't exceed the configured subtask timeout
-        let effective_timeout =
-            subtask_time_budget.min(Duration::from_secs(subtask_react_timeout_secs));
-
-        dual_debug!(
-            "Allocated {:?} for subtask {} (pending: {}, max_retries: {}) - request_id: {}",
-            effective_timeout,
-            subtask.id,
-            pending_count,
-            subtask_max_retries,
-            request_id
-        );
-
-        // Execute the subtask with retry loop
-        let mut last_error: Option<ServerError> = None;
-        let subtask_start_time = Instant::now();
-
-        for attempt in 0..=subtask_max_retries {
-            // Check if we've exceeded the total time budget for this subtask
-            let elapsed = subtask_start_time.elapsed();
-            if elapsed >= subtask_time_budget {
-                dual_warn!(
-                    "Subtask {} time budget exhausted after {:?} - request_id: {}",
-                    subtask.id,
-                    elapsed,
-                    request_id
-                );
-                last_error = Some(ServerError::SubtaskTimeout {
-                    subtask_id: subtask.id,
-                    timeout_secs: subtask_time_budget.as_secs(),
-                });
-                break;
-            }
-
-            // Calculate remaining time for this attempt
-            let remaining_time = subtask_time_budget.saturating_sub(elapsed);
-            let attempt_timeout = remaining_time.min(effective_timeout);
-
-            if attempt > 0 {
-                dual_info!(
-                    "🔄 Retrying subtask {} (attempt {}/{}) - request_id: {}",
-                    subtask.id,
-                    attempt + 1,
-                    subtask_max_retries + 1,
-                    request_id
-                );
-            }
-
-            let result = execute_subtask_with_react(
-                &state,
-                &chat_server,
-                &headers,
-                subtask,
-                &subtask_results,
-                &available_tools,
-                Some(&skills_summaries),
-                conv_id.as_deref(),
-                attempt_timeout,
-                subtask_react_max_iterations,
-                max_tools_per_iteration,
-                tool_call_max_retries,
-                tool_call_retry_delay_ms,
-                &cancel_token,
-                request_id,
-                &mut subtask_trace,
-                &model_name,
-            )
-            .await;
-
-            match result {
-                Ok(result_text) => {
-                    dual_info!(
-                        "✅ Subtask {} completed (attempt {}) - request_id: {}",
-                        subtask.id,
-                        attempt + 1,
-                        request_id
-                    );
-
-                    subtask.complete(result_text.clone());
-                    completed_subtasks.insert(subtask.id);
-                    subtask_results.push((subtask.id, result_text.clone()));
-                    subtask_trace.complete(result_text);
-                    last_error = None;
-                    break;
-                }
-                Err(e) => {
-                    // Check if this error is retryable
-                    if is_retryable_error(&e) && attempt < subtask_max_retries {
-                        dual_warn!(
-                            "⚠️ Subtask {} failed with retryable error: {} - request_id: {}",
-                            subtask.id,
-                            e,
+                if let Some(trigger) =
+                    ReplanTrigger::should_replan(&trace, &replan_config, &dependency_graph)
+                {
+                    if replan_count < MAX_REPLAN_ATTEMPTS {
+                        dual_info!(
+                            "🔄 Replan triggered: {} - request_id: {}",
+                            trigger.description(),
                             request_id
                         );
-                        subtask_trace.record_retry(e.to_string());
-                        last_error = Some(e);
-                        // Continue to next retry attempt
+
+                        // Capture plan info
+                        let original_goal = plan.original_goal.clone();
+                        let pending = extract_pending_subtasks(&plan, &completed_subtasks);
+
+                        // Capture trigger description before move
+                        let trigger_desc = format!("{:?}", trigger);
+
+                        // Execute replanning
+                        match execute_replan(
+                            replanner,
+                            &original_goal,
+                            pending,
+                            &subtask_results,
+                            &trace,
+                            trigger,
+                            Some(time_budget.remaining()),
+                            request_id,
+                        )
+                        .await
+                        {
+                            Ok(replan_result) => {
+                                // Record the replan event to trace
+                                trace.add_replan_event(ReplanEvent {
+                                    timestamp: chrono::Utc::now(),
+                                    trigger: trigger_desc,
+                                    preserved_count: replan_result.preserved_subtasks.len(),
+                                    added_count: replan_result.added_subtasks.len(),
+                                    removed_count: replan_result.removed_subtasks.len(),
+                                });
+
+                                // Apply the new plan
+                                apply_new_plan(&mut plan, replan_result, request_id);
+                                replan_count += 1;
+
+                                // Reset state for new plan execution
+                                completed_subtasks.clear();
+                                for (id, _) in &subtask_results {
+                                    completed_subtasks.insert(*id);
+                                }
+                                pending_count = plan.execution_order.len();
+
+                                dual_info!(
+                                    "🔄 Restarting execution with new plan (attempt {}/{}) - request_id: {}",
+                                    replan_count,
+                                    MAX_REPLAN_ATTEMPTS,
+                                    request_id
+                                );
+                                continue 'execution;
+                            }
+                            Err(e) => {
+                                dual_warn!(
+                                    "⚠️ Replanning failed: {} - continuing with current plan - request_id: {}",
+                                    e,
+                                    request_id
+                                );
+                            }
+                        }
                     } else {
-                        // Non-retryable error or max retries exceeded
                         dual_warn!(
-                            "❌ Subtask {} failed: {} - request_id: {}",
-                            subtask.id,
-                            e,
+                            "⚠️ Max replan attempts ({}) reached - request_id: {}",
+                            MAX_REPLAN_ATTEMPTS,
                             request_id
                         );
-                        last_error = Some(e);
-                        break;
                     }
                 }
             }
         }
 
-        // Handle final result after retry loop
-        if let Some(error) = last_error {
-            // Check if we exhausted all retries
-            if subtask_trace.retry_count >= subtask_max_retries && subtask_max_retries > 0 {
-                let retry_exhausted_error = ServerError::SubtaskRetryExhausted {
-                    subtask_id: subtask.id,
-                    attempts: subtask_trace.retry_count + 1,
-                    message: error.to_string(),
-                };
-                subtask.fail(retry_exhausted_error.to_string());
-                subtask_trace.fail(retry_exhausted_error.to_string());
-            } else {
-                subtask.fail(error.to_string());
-                subtask_trace.fail(error.to_string());
-            }
-            // Continue execution (don't fail the entire plan)
-        }
-
-        dual_info!("Subtask trace: {}", subtask_trace.summary());
-        trace.add_subtask_trace(subtask_trace);
-        pending_count = pending_count.saturating_sub(1);
+        // All subtasks in current plan completed, exit the execution loop
+        break 'execution;
     }
 
     // ========================================================================
@@ -472,6 +819,9 @@ pub(crate) async fn chat(
     // ========================================================================
 
     dual_info!("📊 Aggregating results - request_id: {}", request_id);
+
+    // Compute reflection summary before finalizing trace
+    trace.compute_reflection_summary();
 
     let final_response = generate_final_response(
         &state,
@@ -2148,6 +2498,162 @@ fn build_response(
                 ServerError::Operation(format!("Failed to create response: {}", e))
             })
     }
+}
+
+// ============================================================================
+// Replanning Helper Functions (R5.2)
+// ============================================================================
+
+/// Extracts failed subtask information from the plan trace.
+fn extract_failed_subtasks(trace: &PlanTrace) -> Vec<FailedSubtaskInfo> {
+    use crate::chat::planner::SubTaskStatus;
+    trace
+        .subtask_traces
+        .iter()
+        .filter_map(|t| {
+            if let SubTaskStatus::Failed(ref error) = t.status {
+                Some(FailedSubtaskInfo {
+                    id: t.subtask_id,
+                    description: t.description.clone(),
+                    error: error.clone(),
+                    retry_count: t.retry_count,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Extracts pending subtask information from the plan.
+fn extract_pending_subtasks(plan: &TaskPlan, completed_ids: &HashSet<usize>) -> Vec<SubtaskInfo> {
+    plan.subtasks
+        .iter()
+        .filter(|s| !completed_ids.contains(&s.id))
+        .map(|s| SubtaskInfo {
+            id: s.id,
+            description: s.description.clone(),
+            dependencies: s.dependencies.clone(),
+        })
+        .collect()
+}
+
+/// Executes the replanning process.
+#[allow(clippy::too_many_arguments)]
+async fn execute_replan(
+    replanner: &DynamicReplanner,
+    original_goal: &str,
+    pending_subtasks: Vec<SubtaskInfo>,
+    subtask_results: &[(usize, String)],
+    trace: &PlanTrace,
+    trigger: ReplanTrigger,
+    remaining_time: Option<Duration>,
+    request_id: &str,
+) -> ServerResult<crate::reflection::ReplanResult> {
+    use std::collections::HashMap;
+
+    dual_info!(
+        "🔄 Starting replan due to: {} - request_id: {}",
+        trigger.description(),
+        request_id
+    );
+
+    // Build completed results map
+    let completed_results: HashMap<usize, String> = subtask_results.iter().cloned().collect();
+
+    // Extract failed subtasks from trace
+    let failed_subtasks = extract_failed_subtasks(trace);
+
+    // Build replan context
+    let context = ReplanContext {
+        original_goal: original_goal.to_string(),
+        completed_results,
+        failed_subtasks,
+        pending_subtasks,
+        trigger,
+        remaining_time,
+    };
+
+    // Execute replanning
+    replanner.replan(&context).await
+}
+
+/// Applies a new plan from replanning result.
+#[allow(dead_code)]
+fn apply_new_plan(
+    current_plan: &mut TaskPlan,
+    replan_result: crate::reflection::ReplanResult,
+    request_id: &str,
+) {
+    use crate::chat::planner::SubTaskStatus;
+
+    dual_info!(
+        "📝 Applying new plan: preserved={}, added={}, removed={} - request_id: {}",
+        replan_result.preserved_subtasks.len(),
+        replan_result.added_subtasks.len(),
+        replan_result.removed_subtasks.len(),
+        request_id
+    );
+
+    // Create new subtasks from replan result
+    let mut new_subtasks: Vec<SubTask> = Vec::new();
+
+    for new_subtask in replan_result.new_subtasks {
+        let subtask = if new_subtask.preserved {
+            // Find the original subtask and preserve its state
+            if let Some(original_id) = new_subtask.original_id {
+                if let Some(original) = current_plan.subtasks.iter().find(|s| s.id == original_id) {
+                    let mut s = original.clone();
+                    s.id = new_subtask.id;
+                    s.dependencies = new_subtask.dependencies;
+                    s
+                } else {
+                    SubTask {
+                        id: new_subtask.id,
+                        description: new_subtask.description,
+                        dependencies: new_subtask.dependencies,
+                        required_tools: vec![],
+                        recommended_skill: None,
+                        status: SubTaskStatus::Pending,
+                        result: None,
+                    }
+                }
+            } else {
+                SubTask {
+                    id: new_subtask.id,
+                    description: new_subtask.description,
+                    dependencies: new_subtask.dependencies,
+                    required_tools: vec![],
+                    recommended_skill: None,
+                    status: SubTaskStatus::Pending,
+                    result: None,
+                }
+            }
+        } else {
+            SubTask {
+                id: new_subtask.id,
+                description: new_subtask.description,
+                dependencies: new_subtask.dependencies,
+                required_tools: vec![],
+                recommended_skill: None,
+                status: SubTaskStatus::Pending,
+                result: None,
+            }
+        };
+        new_subtasks.push(subtask);
+    }
+
+    // Update the plan
+    current_plan.subtasks = new_subtasks;
+
+    // Recalculate execution order
+    current_plan.execution_order = current_plan.subtasks.iter().map(|s| s.id).collect();
+
+    dual_info!(
+        "✅ New plan applied with {} subtasks - request_id: {}",
+        current_plan.subtasks.len(),
+        request_id
+    );
 }
 
 // ============================================================================

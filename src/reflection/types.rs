@@ -3,6 +3,9 @@
 //! This module defines the core types for the reflection and self-correction
 //! system used in Plan mode to evaluate task execution results.
 
+// Some types are reserved for future integration
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 
 /// Result of a reflection evaluation.

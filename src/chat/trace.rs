@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::planner::SubTaskStatus;
+use crate::reflection::types::ReflectionResult;
 
 /// Trace information for a complete React mode execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +243,9 @@ pub struct SubtaskTrace {
     /// Active skills used during execution (supports multi-skill activation).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_skills: Vec<String>,
+    /// Reflection evaluation result (if reflection is enabled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reflection: Option<SubtaskReflectionSummary>,
 }
 
 /// Information about a single retry attempt.
@@ -274,6 +278,7 @@ impl SubtaskTrace {
             retry_count: 0,
             retry_history: Vec::new(),
             active_skills: Vec::new(),
+            reflection: None,
         }
     }
 
@@ -307,6 +312,17 @@ impl SubtaskTrace {
     #[allow(dead_code)]
     pub fn get_active_skills(&self) -> &[String] {
         &self.active_skills
+    }
+
+    /// Sets the reflection summary for this subtask.
+    pub fn set_reflection(&mut self, summary: SubtaskReflectionSummary) {
+        self.reflection = Some(summary);
+    }
+
+    /// Returns the reflection summary if available.
+    #[allow(dead_code)]
+    pub fn get_reflection(&self) -> Option<&SubtaskReflectionSummary> {
+        self.reflection.as_ref()
     }
 
     /// Marks the subtask as completed successfully.
@@ -450,6 +466,7 @@ impl Default for SubtaskTrace {
             retry_count: 0,
             retry_history: Vec::new(),
             active_skills: Vec::new(),
+            reflection: None,
         }
     }
 }
@@ -483,6 +500,12 @@ pub struct PlanTrace {
     /// When the plan finished executing.
     #[serde(with = "option_datetime_serde")]
     pub end_time: Option<DateTime<Utc>>,
+    /// Plan-level reflection summary (computed from subtask reflections).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reflection_report: Option<PlanReflectionSummary>,
+    /// History of replanning events that occurred during execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replan_history: Vec<ReplanEvent>,
 }
 
 impl PlanTrace {
@@ -500,6 +523,8 @@ impl PlanTrace {
             total_duration: Duration::ZERO,
             start_time: None,
             end_time: None,
+            reflection_report: None,
+            replan_history: Vec::new(),
         }
     }
 
@@ -557,6 +582,52 @@ impl PlanTrace {
             self.plan_status
         )
     }
+
+    /// Computes the reflection summary from all subtask reflections.
+    ///
+    /// This should be called before finalizing the plan to populate
+    /// the `reflection_report` field.
+    pub fn compute_reflection_summary(&mut self) {
+        let mut total_rounds = 0u32;
+        let mut passed = 0usize;
+        let mut failed = 0usize;
+        let mut total_confidence = 0.0f64;
+        let mut count = 0usize;
+
+        for trace in &self.subtask_traces {
+            if let Some(ref refl) = trace.reflection {
+                total_rounds += refl.reflection_rounds;
+                total_confidence += refl.confidence;
+                count += 1;
+                if refl.passed {
+                    passed += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+        }
+
+        if count > 0 {
+            self.reflection_report = Some(PlanReflectionSummary {
+                total_reflection_rounds: total_rounds,
+                passed_subtasks: passed,
+                failed_subtasks: failed,
+                avg_confidence: total_confidence / count as f64,
+                replan_count: self.replan_history.len() as u32,
+            });
+        }
+    }
+
+    /// Adds a replanning event to the history.
+    pub fn add_replan_event(&mut self, event: ReplanEvent) {
+        self.replan_history.push(event);
+    }
+
+    /// Returns the number of replanning events.
+    #[allow(dead_code)]
+    pub fn replan_count(&self) -> usize {
+        self.replan_history.len()
+    }
 }
 
 impl Default for PlanTrace {
@@ -572,8 +643,79 @@ impl Default for PlanTrace {
             total_duration: Duration::ZERO,
             start_time: None,
             end_time: None,
+            reflection_report: None,
+            replan_history: Vec::new(),
         }
     }
+}
+
+// ============================================================================
+// Reflection Trace Structures (R5.5)
+// ============================================================================
+
+/// Summary of subtask reflection for API responses.
+///
+/// This is a condensed version of `ReflectionResult` suitable for
+/// inclusion in trace data and API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtaskReflectionSummary {
+    /// Whether the reflection passed.
+    pub passed: bool,
+    /// Confidence score (0.0 to 1.0).
+    pub confidence: f64,
+    /// Number of issues found.
+    pub issue_count: usize,
+    /// Number of reflection rounds performed.
+    pub reflection_rounds: u32,
+    /// Recommended action as a string.
+    pub recommended_action: String,
+    /// Whether the result came from cache.
+    pub from_cache: bool,
+}
+
+impl SubtaskReflectionSummary {
+    /// Creates a summary from a reflection result.
+    pub fn from_result(result: &ReflectionResult, from_cache: bool) -> Self {
+        Self {
+            passed: result.passed,
+            confidence: result.confidence,
+            issue_count: result.issues.len(),
+            reflection_rounds: result.reflection_rounds,
+            recommended_action: format!("{:?}", result.recommended_action),
+            from_cache,
+        }
+    }
+}
+
+/// Summary of plan-level reflection for API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanReflectionSummary {
+    /// Total reflection rounds across all subtasks.
+    pub total_reflection_rounds: u32,
+    /// Number of subtasks that passed reflection.
+    pub passed_subtasks: usize,
+    /// Number of subtasks that failed reflection.
+    pub failed_subtasks: usize,
+    /// Average confidence across all reflections.
+    pub avg_confidence: f64,
+    /// Number of replanning events.
+    pub replan_count: u32,
+}
+
+/// A replanning event that occurred during plan execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplanEvent {
+    /// When the replanning occurred.
+    #[serde(with = "datetime_serde")]
+    pub timestamp: DateTime<Utc>,
+    /// The trigger that caused replanning.
+    pub trigger: String,
+    /// Number of subtasks preserved from the original plan.
+    pub preserved_count: usize,
+    /// Number of new subtasks added.
+    pub added_count: usize,
+    /// Number of subtasks removed.
+    pub removed_count: usize,
 }
 
 /// Custom serialization for Duration to make it JSON-friendly.
@@ -1268,5 +1410,334 @@ mod tests {
         let trace = SubtaskTrace::default();
         assert!(trace.active_skills.is_empty());
         assert!(!trace.has_active_skills());
+    }
+
+    // ========================================================================
+    // R5.5 Reflection Trace Tests
+    // ========================================================================
+
+    #[test]
+    fn test_subtask_reflection_summary_creation() {
+        use crate::reflection::types::{RecommendedAction, ReflectionResult};
+
+        let result = ReflectionResult {
+            passed: true,
+            confidence: 0.92,
+            issues: vec![],
+            suggestions: vec!["Good job".to_string()],
+            recommended_action: RecommendedAction::Accept,
+            reflection_rounds: 1,
+        };
+
+        let summary = SubtaskReflectionSummary::from_result(&result, false);
+
+        assert!(summary.passed);
+        assert!((summary.confidence - 0.92).abs() < 0.001);
+        assert_eq!(summary.issue_count, 0);
+        assert_eq!(summary.reflection_rounds, 1);
+        assert!(summary.recommended_action.contains("Accept"));
+        assert!(!summary.from_cache);
+    }
+
+    #[test]
+    fn test_subtask_reflection_summary_from_cache() {
+        use crate::reflection::types::{RecommendedAction, ReflectionResult};
+
+        let result = ReflectionResult {
+            passed: true,
+            confidence: 0.85,
+            issues: vec![],
+            suggestions: vec![],
+            recommended_action: RecommendedAction::Accept,
+            reflection_rounds: 2,
+        };
+
+        let summary = SubtaskReflectionSummary::from_result(&result, true);
+
+        assert!(summary.from_cache);
+        assert_eq!(summary.reflection_rounds, 2);
+    }
+
+    #[test]
+    fn test_subtask_trace_set_reflection() {
+        use crate::reflection::types::ReflectionResult;
+
+        let mut trace = SubtaskTrace::new(1, "Test task".to_string());
+        assert!(trace.reflection.is_none());
+        assert!(trace.get_reflection().is_none());
+
+        let result = ReflectionResult::passed();
+        let summary = SubtaskReflectionSummary::from_result(&result, false);
+        trace.set_reflection(summary);
+
+        assert!(trace.reflection.is_some());
+        assert!(trace.get_reflection().unwrap().passed);
+    }
+
+    #[test]
+    fn test_subtask_trace_reflection_serialization() {
+        use crate::reflection::types::{RecommendedAction, ReflectionResult};
+
+        let mut trace = SubtaskTrace::new(1, "Task with reflection".to_string());
+        trace.start();
+
+        let result = ReflectionResult {
+            passed: true,
+            confidence: 0.9,
+            issues: vec![],
+            suggestions: vec![],
+            recommended_action: RecommendedAction::Accept,
+            reflection_rounds: 1,
+        };
+        trace.set_reflection(SubtaskReflectionSummary::from_result(&result, false));
+        trace.complete("Done".to_string());
+
+        // Serialize
+        let json = serde_json::to_string(&trace).expect("Failed to serialize");
+        assert!(json.contains("reflection"));
+        assert!(json.contains("\"passed\":true"));
+        assert!(json.contains("\"confidence\":0.9"));
+
+        // Deserialize
+        let deserialized: SubtaskTrace =
+            serde_json::from_str(&json).expect("Failed to deserialize");
+        assert!(deserialized.reflection.is_some());
+        let refl = deserialized.reflection.unwrap();
+        assert!(refl.passed);
+        assert!((refl.confidence - 0.9).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_subtask_trace_no_reflection_not_serialized() {
+        let trace = SubtaskTrace::new(1, "Task without reflection".to_string());
+
+        let json = serde_json::to_string(&trace).expect("Failed to serialize");
+
+        // reflection field should be skipped when None
+        assert!(!json.contains("\"reflection\""));
+    }
+
+    #[test]
+    fn test_plan_trace_compute_reflection_summary() {
+        use crate::reflection::types::{RecommendedAction, ReflectionResult};
+
+        let mut plan_trace = PlanTrace::new(
+            "plan-123".to_string(),
+            "Test goal".to_string(),
+            vec![0, 1, 2],
+        );
+        plan_trace.start();
+
+        // Add subtask 1 with passed reflection
+        let mut subtask1 = SubtaskTrace::new(0, "Subtask 1".to_string());
+        subtask1.start();
+        let result1 = ReflectionResult {
+            passed: true,
+            confidence: 0.9,
+            issues: vec![],
+            suggestions: vec![],
+            recommended_action: RecommendedAction::Accept,
+            reflection_rounds: 1,
+        };
+        subtask1.set_reflection(SubtaskReflectionSummary::from_result(&result1, false));
+        subtask1.complete("Result 1".to_string());
+        plan_trace.add_subtask_trace(subtask1);
+
+        // Add subtask 2 with failed reflection
+        let mut subtask2 = SubtaskTrace::new(1, "Subtask 2".to_string());
+        subtask2.start();
+        let result2 = ReflectionResult {
+            passed: false,
+            confidence: 0.6,
+            issues: vec![],
+            suggestions: vec![],
+            recommended_action: RecommendedAction::Retry,
+            reflection_rounds: 2,
+        };
+        subtask2.set_reflection(SubtaskReflectionSummary::from_result(&result2, false));
+        subtask2.complete("Result 2".to_string());
+        plan_trace.add_subtask_trace(subtask2);
+
+        // Add subtask 3 without reflection (reflection disabled)
+        let mut subtask3 = SubtaskTrace::new(2, "Subtask 3".to_string());
+        subtask3.start();
+        subtask3.complete("Result 3".to_string());
+        plan_trace.add_subtask_trace(subtask3);
+
+        // Compute summary
+        plan_trace.compute_reflection_summary();
+
+        assert!(plan_trace.reflection_report.is_some());
+        let report = plan_trace.reflection_report.unwrap();
+        assert_eq!(report.passed_subtasks, 1);
+        assert_eq!(report.failed_subtasks, 1);
+        assert_eq!(report.total_reflection_rounds, 3); // 1 + 2
+        assert!((report.avg_confidence - 0.75).abs() < 0.001); // (0.9 + 0.6) / 2
+        assert_eq!(report.replan_count, 0);
+    }
+
+    #[test]
+    fn test_plan_trace_add_replan_event() {
+        let mut plan_trace =
+            PlanTrace::new("plan-123".to_string(), "Test goal".to_string(), vec![0, 1]);
+
+        assert!(plan_trace.replan_history.is_empty());
+        assert_eq!(plan_trace.replan_count(), 0);
+
+        // Add a replan event
+        plan_trace.add_replan_event(ReplanEvent {
+            timestamp: chrono::Utc::now(),
+            trigger: "ConsecutiveFailures { count: 2, threshold: 2 }".to_string(),
+            preserved_count: 1,
+            added_count: 2,
+            removed_count: 1,
+        });
+
+        assert_eq!(plan_trace.replan_history.len(), 1);
+        assert_eq!(plan_trace.replan_count(), 1);
+
+        let event = &plan_trace.replan_history[0];
+        assert!(event.trigger.contains("ConsecutiveFailures"));
+        assert_eq!(event.preserved_count, 1);
+        assert_eq!(event.added_count, 2);
+        assert_eq!(event.removed_count, 1);
+    }
+
+    #[test]
+    fn test_plan_trace_reflection_with_replans() {
+        use crate::reflection::types::ReflectionResult;
+
+        let mut plan_trace =
+            PlanTrace::new("plan-123".to_string(), "Test goal".to_string(), vec![0]);
+
+        // Add subtask with reflection
+        let mut subtask = SubtaskTrace::new(0, "Subtask".to_string());
+        subtask.start();
+        let result = ReflectionResult::passed();
+        subtask.set_reflection(SubtaskReflectionSummary::from_result(&result, false));
+        subtask.complete("Done".to_string());
+        plan_trace.add_subtask_trace(subtask);
+
+        // Add replan events
+        plan_trace.add_replan_event(ReplanEvent {
+            timestamp: chrono::Utc::now(),
+            trigger: "Trigger 1".to_string(),
+            preserved_count: 1,
+            added_count: 1,
+            removed_count: 0,
+        });
+        plan_trace.add_replan_event(ReplanEvent {
+            timestamp: chrono::Utc::now(),
+            trigger: "Trigger 2".to_string(),
+            preserved_count: 2,
+            added_count: 0,
+            removed_count: 1,
+        });
+
+        // Compute summary
+        plan_trace.compute_reflection_summary();
+
+        let report = plan_trace.reflection_report.unwrap();
+        assert_eq!(report.replan_count, 2);
+    }
+
+    #[test]
+    fn test_plan_trace_empty_reflection_summary() {
+        let mut plan_trace =
+            PlanTrace::new("plan-123".to_string(), "Test goal".to_string(), vec![0]);
+
+        // Add subtask without reflection
+        let mut subtask = SubtaskTrace::new(0, "Subtask".to_string());
+        subtask.start();
+        subtask.complete("Done".to_string());
+        plan_trace.add_subtask_trace(subtask);
+
+        // Compute summary - should remain None since no reflections
+        plan_trace.compute_reflection_summary();
+
+        assert!(plan_trace.reflection_report.is_none());
+    }
+
+    #[test]
+    fn test_replan_event_serialization() {
+        let event = ReplanEvent {
+            timestamp: chrono::Utc::now(),
+            trigger: "TestTrigger".to_string(),
+            preserved_count: 2,
+            added_count: 3,
+            removed_count: 1,
+        };
+
+        let json = serde_json::to_string(&event).expect("Failed to serialize");
+        assert!(json.contains("timestamp"));
+        assert!(json.contains("TestTrigger"));
+        assert!(json.contains("preserved_count"));
+        assert!(json.contains("added_count"));
+        assert!(json.contains("removed_count"));
+
+        let deserialized: ReplanEvent = serde_json::from_str(&json).expect("Failed to deserialize");
+        assert_eq!(deserialized.trigger, "TestTrigger");
+        assert_eq!(deserialized.preserved_count, 2);
+        assert_eq!(deserialized.added_count, 3);
+        assert_eq!(deserialized.removed_count, 1);
+    }
+
+    #[test]
+    fn test_plan_trace_serialization_with_reflection() {
+        use crate::reflection::types::{RecommendedAction, ReflectionResult};
+
+        let mut plan_trace =
+            PlanTrace::new("plan-123".to_string(), "Test goal".to_string(), vec![0]);
+        plan_trace.start();
+
+        // Add subtask with reflection
+        let mut subtask = SubtaskTrace::new(0, "Subtask".to_string());
+        subtask.start();
+        let result = ReflectionResult {
+            passed: true,
+            confidence: 0.95,
+            issues: vec![],
+            suggestions: vec![],
+            recommended_action: RecommendedAction::Accept,
+            reflection_rounds: 1,
+        };
+        subtask.set_reflection(SubtaskReflectionSummary::from_result(&result, false));
+        subtask.complete("Done".to_string());
+        plan_trace.add_subtask_trace(subtask);
+
+        // Add replan event
+        plan_trace.add_replan_event(ReplanEvent {
+            timestamp: chrono::Utc::now(),
+            trigger: "Test".to_string(),
+            preserved_count: 1,
+            added_count: 0,
+            removed_count: 0,
+        });
+
+        // Compute summary
+        plan_trace.compute_reflection_summary();
+        plan_trace.finalize(TraceStatus::Success);
+
+        // Serialize
+        let json = serde_json::to_string(&plan_trace).expect("Failed to serialize");
+        assert!(json.contains("reflection_report"));
+        assert!(json.contains("replan_history"));
+        assert!(json.contains("passed_subtasks"));
+        assert!(json.contains("avg_confidence"));
+
+        // Deserialize
+        let deserialized: PlanTrace = serde_json::from_str(&json).expect("Failed to deserialize");
+        assert!(deserialized.reflection_report.is_some());
+        assert_eq!(deserialized.replan_history.len(), 1);
+    }
+
+    #[test]
+    fn test_plan_trace_empty_replan_not_serialized() {
+        let plan_trace = PlanTrace::new("plan-123".to_string(), "Test goal".to_string(), vec![0]);
+
+        let json = serde_json::to_string(&plan_trace).expect("Failed to serialize");
+
+        // Empty replan_history should be skipped
+        assert!(!json.contains("replan_history"));
     }
 }
