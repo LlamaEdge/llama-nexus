@@ -5,12 +5,16 @@
 //!
 //! ## Overview
 //!
-//! The reflection system consists of four main components:
+//! The reflection system consists of the following main components:
 //!
 //! 1. **Reflection Engine**: Evaluates subtask and plan results using LLM
 //! 2. **Reflection Types**: Core types for representing reflection results
 //! 3. **Reflection Prompts**: Templates for LLM-driven reflection
 //! 4. **Validators**: Multi-layer result validation (structural, semantic, constraints)
+//! 5. **Dynamic Replanner**: Automatic plan revision when failures occur
+//! 6. **Reflection Cache**: Caching for similar task reflections
+//! 7. **Adaptive Strategy**: Learning-based reflection parameter adjustment
+//! 8. **Reflection Reports**: Structured reports for API responses
 //!
 //! ## Usage
 //!
@@ -54,15 +58,35 @@
 // Allow dead code - will be fully integrated when Plan mode calls reflection
 #![allow(dead_code)]
 
+pub mod cache;
 pub mod engine;
 pub mod prompts;
+pub mod replanner;
+pub mod report;
+pub mod strategy;
 pub mod types;
 pub mod validator;
 pub mod validators;
 
 // Re-exports will be used when integrated into Plan mode
 #[allow(unused_imports)]
+pub use cache::{CacheConfig, CacheEntry, CacheKey, CacheStats, ReflectionCache};
+#[allow(unused_imports)]
 pub use engine::{LlmServerInfo, ReflectionEngine};
+#[allow(unused_imports)]
+pub use replanner::{
+    DependencyGraph, DynamicReplanner, FailedSubtaskInfo, NewSubtask, PlanDiff, ReplanConfig,
+    ReplanContext, ReplanResult, ReplanTrigger, SubtaskInfo, TimeBudget,
+};
+#[allow(unused_imports)]
+pub use report::{
+    ActionReport, IssueReport, PlanChangeSummary, PlanReflectionReport, ReflectionReport,
+    ReflectionSummary, ReplanSummary, ReportMetadata, SubtaskReflectionReport, ValidationReport,
+};
+#[allow(unused_imports)]
+pub use strategy::{
+    AdaptedParams, AdaptiveConfig, AdaptiveStrategy, CategoryStats, ReflectionStats, TaskCategory,
+};
 #[allow(unused_imports)]
 pub use types::{
     IssueType, RecommendedAction, ReflectionConfig, ReflectionContext, ReflectionIssue,
