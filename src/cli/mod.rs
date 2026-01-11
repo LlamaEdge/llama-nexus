@@ -6,6 +6,9 @@
 
 pub mod skill;
 
+#[cfg(test)]
+mod skill_tests;
+
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};

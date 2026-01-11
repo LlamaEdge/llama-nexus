@@ -415,7 +415,7 @@ impl TaskPlanner {
     }
 
     /// Builds the system prompt for the planner.
-    fn build_system_prompt(&self) -> String {
+    pub(crate) fn build_system_prompt(&self) -> String {
         let tools_desc = if self.available_tools.is_empty() {
             "No tools are currently available.".to_string()
         } else {

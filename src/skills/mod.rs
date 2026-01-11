@@ -22,6 +22,15 @@ pub mod validator;
 #[cfg(test)]
 mod e2e_tests;
 
+#[cfg(test)]
+mod plan_mode_tests;
+
+#[cfg(test)]
+mod script_execution_tests;
+
+#[cfg(test)]
+mod api_tests;
+
 pub use detector::SkillDetector;
 #[allow(unused_imports)]
 pub use error::SkillError;

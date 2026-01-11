@@ -786,6 +786,611 @@ async fn test_performance_injection() {
 }
 
 // ============================================================================
+// TE2E-002: Skill Recommendation in Planning Phase
+// ============================================================================
+
+#[tokio::test]
+async fn test_te2e_002_skill_recommendation_in_planning() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create skills with different capabilities
+    create_complete_skill(
+        temp_dir.path(),
+        "weather-query",
+        TestSkillConfig {
+            description: "Query weather information from various sources".to_string(),
+            allowed_tools: Some("WebFetch WebSearch".to_string()),
+            content: "# Weather Query\n\nFetch weather data.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    create_complete_skill(
+        temp_dir.path(),
+        "code-review",
+        TestSkillConfig {
+            description: "Review code changes and provide feedback".to_string(),
+            allowed_tools: Some("Read Grep".to_string()),
+            content: "# Code Review\n\nAnalyze code quality.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let summaries = registry.get_summaries().await;
+
+    // Verify summaries are available for planning
+    assert_eq!(summaries.len(), 2);
+
+    // Verify Phase 1 injection includes all skills
+    let phase1_prompt = SkillInjector::phase1_injection(&summaries);
+    assert!(phase1_prompt.contains("## Available Skills"));
+    assert!(phase1_prompt.contains("weather-query"));
+    assert!(phase1_prompt.contains("code-review"));
+    assert!(phase1_prompt.contains("<use_skill>"));
+
+    // Verify skill descriptions are present
+    let weather_summary = summaries.iter().find(|s| s.name == "weather-query");
+    assert!(weather_summary.is_some());
+    assert_eq!(
+        weather_summary.unwrap().description,
+        "Query weather information from various sources"
+    );
+}
+
+// ============================================================================
+// TE2E-005: References Auto Loading
+// ============================================================================
+
+#[tokio::test]
+async fn test_te2e_005_references_auto_loading() {
+    use super::SkillLoader;
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create skill with references directory
+    let skill_dir = temp_dir.path().join("ref-skill");
+    let refs_dir = skill_dir.join("references");
+    std::fs::create_dir_all(&refs_dir).unwrap();
+
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: ref-skill
+description: Skill with reference documents
+---
+# Reference Skill
+
+This skill uses external reference documents.
+"#,
+    )
+    .unwrap();
+
+    // Create multiple reference documents
+    std::fs::write(
+        refs_dir.join("api-docs.md"),
+        "# API Documentation\n\nAPI endpoints here.",
+    )
+    .unwrap();
+    std::fs::write(
+        refs_dir.join("examples.md"),
+        "# Examples\n\nCode examples here.",
+    )
+    .unwrap();
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let skill = registry.get("ref-skill").await.unwrap();
+
+    // Verify references directory exists and has files
+    let references = SkillLoader::load_references(&skill.skill_dir).await;
+    assert!(!references.is_empty());
+
+    // Verify Phase 2 injection with auto refs includes reference content
+    let phase2_content = SkillInjector::phase2_injection_auto_refs(&skill, 0).await;
+    assert!(phase2_content.contains("ref-skill"));
+    assert!(phase2_content.contains("Reference Skill"));
+    // Reference content should be included
+    assert!(phase2_content.contains("API Documentation") || phase2_content.contains("Examples"));
+}
+
+// ============================================================================
+// TE2E-006: Tool Restriction Enforcement
+// ============================================================================
+
+#[tokio::test]
+async fn test_te2e_006_tool_restriction_enforcement() {
+    let temp_dir = TempDir::new().unwrap();
+
+    create_complete_skill(
+        temp_dir.path(),
+        "restricted-skill",
+        TestSkillConfig {
+            description: "Skill with strict tool restrictions".to_string(),
+            allowed_tools: Some("weather forecast".to_string()),
+            content: "# Restricted Skill\n\nOnly weather tools allowed.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let skill = registry.get("restricted-skill").await.unwrap();
+    let allowed = skill.metadata.get_allowed_tools();
+
+    // Verify tool restrictions parsed correctly
+    assert_eq!(allowed, vec!["weather", "forecast"]);
+
+    // Simulate tool filtering logic
+    let all_tools = vec!["weather", "forecast", "email", "calendar", "bash"];
+    let filtered: Vec<_> = all_tools
+        .iter()
+        .filter(|t| allowed.contains(&t.to_string()))
+        .collect();
+
+    assert_eq!(filtered.len(), 2);
+    assert!(filtered.contains(&&"weather"));
+    assert!(filtered.contains(&&"forecast"));
+    assert!(!filtered.contains(&&"email"));
+    assert!(!filtered.contains(&&"bash"));
+}
+
+// ============================================================================
+// TE2E-007: Skill Hot Reload
+// ============================================================================
+
+#[tokio::test]
+async fn test_te2e_007_hot_reload() {
+    let temp_dir = TempDir::new().unwrap();
+
+    create_complete_skill(
+        temp_dir.path(),
+        "hot-reload-skill",
+        TestSkillConfig {
+            description: "Original description".to_string(),
+            content: "# Original Content\n\nOriginal instructions.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    // Verify original content
+    let skill = registry.get("hot-reload-skill").await.unwrap();
+    assert_eq!(skill.metadata.description, "Original description");
+    assert!(skill.content.contains("Original Content"));
+
+    // Modify SKILL.md on disk
+    let skill_path = temp_dir.path().join("hot-reload-skill/SKILL.md");
+    std::fs::write(
+        &skill_path,
+        r#"---
+name: hot-reload-skill
+description: Updated description for Plan mode
+---
+# Updated Content
+
+New instructions for updated skill.
+"#,
+    )
+    .unwrap();
+
+    // Reload the specific skill
+    registry.reload("hot-reload-skill").await.unwrap();
+
+    // Verify updated content
+    let skill = registry.get("hot-reload-skill").await.unwrap();
+    assert_eq!(
+        skill.metadata.description,
+        "Updated description for Plan mode"
+    );
+    assert!(skill.content.contains("Updated Content"));
+
+    // Verify summaries are also updated
+    let summaries = registry.get_summaries().await;
+    let summary = summaries
+        .iter()
+        .find(|s| s.name == "hot-reload-skill")
+        .unwrap();
+    assert_eq!(summary.description, "Updated description for Plan mode");
+}
+
+// ============================================================================
+// TMS-004: Multi-Skill Activation in Single Subtask
+// ============================================================================
+
+#[tokio::test]
+async fn test_tms_004_multi_skill_activation() {
+    let temp_dir = TempDir::new().unwrap();
+
+    create_complete_skill(
+        temp_dir.path(),
+        "weather-query",
+        TestSkillConfig {
+            description: "Query weather information".to_string(),
+            content: "# Weather Query\n\nGet weather forecasts.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    create_complete_skill(
+        temp_dir.path(),
+        "code-review",
+        TestSkillConfig {
+            description: "Review code changes".to_string(),
+            content: "# Code Review\n\nAnalyze code quality.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    // Simulate LLM response requesting multiple skills
+    let llm_response =
+        "I'll use <use_skill>weather-query</use_skill> and <use_skill>code-review</use_skill>.";
+    let detected = SkillDetector::detect(llm_response);
+
+    assert_eq!(detected.len(), 2);
+    assert!(detected.contains(&"weather-query".to_string()));
+    assert!(detected.contains(&"code-review".to_string()));
+
+    // Load all detected skills
+    let mut skills = Vec::new();
+    for name in &detected {
+        if let Some(skill) = registry.get(name).await {
+            skills.push(skill);
+        }
+    }
+    assert_eq!(skills.len(), 2);
+
+    // Generate combined Phase 2 injection for multiple skills
+    let combined_content: Vec<_> = skills
+        .iter()
+        .map(|s| SkillInjector::phase2_injection(s))
+        .collect();
+
+    // Verify both skills are included
+    let full_content = combined_content.join("\n\n---\n\n");
+    assert!(full_content.contains("weather-query"));
+    assert!(full_content.contains("code-review"));
+    assert!(full_content.contains("Weather Query"));
+    assert!(full_content.contains("Code Review"));
+}
+
+// ============================================================================
+// TER-001: Invalid SKILL.md Error Handling
+// ============================================================================
+
+#[tokio::test]
+async fn test_ter_001_invalid_skill_md() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create invalid skill - not valid YAML frontmatter
+    let invalid_dir = temp_dir.path().join("invalid-yaml");
+    std::fs::create_dir_all(&invalid_dir).unwrap();
+    std::fs::write(
+        invalid_dir.join("SKILL.md"),
+        "This is not valid YAML frontmatter content",
+    )
+    .unwrap();
+
+    // Create another invalid skill - malformed YAML
+    let malformed_dir = temp_dir.path().join("malformed-yaml");
+    std::fs::create_dir_all(&malformed_dir).unwrap();
+    std::fs::write(
+        malformed_dir.join("SKILL.md"),
+        r#"---
+name: [invalid yaml array
+description: missing bracket
+---
+# Content
+"#,
+    )
+    .unwrap();
+
+    // Create a valid skill for comparison
+    create_complete_skill(temp_dir.path(), "valid-skill", TestSkillConfig::default());
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    let count = registry.load_all().await.unwrap();
+
+    // Only valid skill should be loaded
+    assert_eq!(count, 1);
+    assert!(registry.exists("valid-skill").await);
+    assert!(!registry.exists("invalid-yaml").await);
+    assert!(!registry.exists("malformed-yaml").await);
+}
+
+// ============================================================================
+// TER-002: Missing Required Fields Error Handling
+// ============================================================================
+
+#[tokio::test]
+async fn test_ter_002_missing_required_fields() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Missing description
+    let no_desc_dir = temp_dir.path().join("no-description");
+    std::fs::create_dir_all(&no_desc_dir).unwrap();
+    std::fs::write(
+        no_desc_dir.join("SKILL.md"),
+        r#"---
+name: no-description
+---
+# Skill without description
+"#,
+    )
+    .unwrap();
+
+    // Missing name
+    let no_name_dir = temp_dir.path().join("no-name");
+    std::fs::create_dir_all(&no_name_dir).unwrap();
+    std::fs::write(
+        no_name_dir.join("SKILL.md"),
+        r#"---
+description: A skill without name
+---
+# Skill without name
+"#,
+    )
+    .unwrap();
+
+    // Valid skill for comparison
+    create_complete_skill(
+        temp_dir.path(),
+        "complete-skill",
+        TestSkillConfig::default(),
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    let count = registry.load_all().await.unwrap();
+
+    // Only valid skill should be loaded
+    assert_eq!(count, 1);
+    assert!(registry.exists("complete-skill").await);
+    assert!(!registry.exists("no-description").await);
+    assert!(!registry.exists("no-name").await);
+}
+
+// ============================================================================
+// TER-004: Empty Skills Directory
+// ============================================================================
+
+#[tokio::test]
+async fn test_ter_004_empty_skills_directory() {
+    let temp_dir = TempDir::new().unwrap();
+    // Don't create any skills
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    let count = registry.load_all().await.unwrap();
+
+    assert_eq!(count, 0);
+
+    let summaries = registry.get_summaries().await;
+    assert!(summaries.is_empty());
+
+    // Phase 1 injection should still work with empty list
+    let phase1_prompt = SkillInjector::phase1_injection(&summaries);
+    assert!(
+        phase1_prompt.contains("Available Skills")
+            || phase1_prompt.is_empty()
+            || phase1_prompt.contains("No skills")
+    );
+}
+
+#[tokio::test]
+async fn test_ter_004_nonexistent_skills_directory() {
+    // Use a path that doesn't exist
+    let registry = SkillRegistry::new(std::path::PathBuf::from("/nonexistent/path/to/skills"));
+    let count = registry.load_all().await.unwrap();
+
+    assert_eq!(count, 0);
+
+    let summaries = registry.get_summaries().await;
+    assert!(summaries.is_empty());
+}
+
+// ============================================================================
+// TER-006: Skill Detection - No Results
+// ============================================================================
+
+#[tokio::test]
+async fn test_ter_006_no_skill_detected() {
+    // Various responses without skill tags
+    let responses = vec![
+        "I will complete this task without using any special skills.",
+        "Let me analyze the data directly.",
+        "Here's my response with <other_tag>not a skill</other_tag>.",
+        "Using tools: Bash, Read, Write",
+        "",
+        "   ",
+    ];
+
+    for response in responses {
+        assert!(
+            !SkillDetector::has_skill_request(response),
+            "Should not detect skill in: {}",
+            response
+        );
+        let detected = SkillDetector::detect(response);
+        assert!(
+            detected.is_empty(),
+            "Should not detect any skills in: {}",
+            response
+        );
+    }
+
+    // Malformed skill tags should not be detected
+    let malformed = vec![
+        "<use_skill>",                    // No closing tag
+        "</use_skill>",                   // No opening tag
+        "<use_skill></use_skill>",        // Empty skill name
+        "<use_skill>   </use_skill>",     // Whitespace only
+        "<use_skil>wrong-tag</use_skil>", // Typo in tag
+    ];
+
+    for response in malformed {
+        let detected = SkillDetector::detect(response);
+        assert!(
+            detected.is_empty(),
+            "Should not detect skill in malformed: {}",
+            response
+        );
+    }
+}
+
+// ============================================================================
+// Additional E2E: Skill Priority and Conflict Resolution
+// ============================================================================
+
+#[tokio::test]
+async fn test_e2e_skill_priority_resolution() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create skills with priorities
+    let high_priority_dir = temp_dir.path().join("high-priority");
+    std::fs::create_dir_all(&high_priority_dir).unwrap();
+    std::fs::write(
+        high_priority_dir.join("SKILL.md"),
+        r#"---
+name: high-priority
+description: High priority skill
+metadata:
+  priority: "10"
+---
+# High Priority Skill
+"#,
+    )
+    .unwrap();
+
+    let low_priority_dir = temp_dir.path().join("low-priority");
+    std::fs::create_dir_all(&low_priority_dir).unwrap();
+    std::fs::write(
+        low_priority_dir.join("SKILL.md"),
+        r#"---
+name: low-priority
+description: Low priority skill
+metadata:
+  priority: "5"
+---
+# Low Priority Skill
+"#,
+    )
+    .unwrap();
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let high = registry.get("high-priority").await.unwrap();
+    let low = registry.get("low-priority").await.unwrap();
+
+    // Verify priorities are parsed using get_priority() method
+    let high_priority = high.metadata.get_priority().unwrap_or(0);
+    let low_priority = low.metadata.get_priority().unwrap_or(0);
+    assert!(high_priority > low_priority);
+}
+
+// ============================================================================
+// Additional E2E: Script Allowlist with Patterns
+// ============================================================================
+
+#[tokio::test]
+async fn test_e2e_script_allowlist_patterns() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let skill_dir = temp_dir.path().join("pattern-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: pattern-skill
+description: Skill with script patterns
+metadata:
+  allowed-scripts: "*.sh, process-*.py, build.js"
+---
+# Pattern Skill
+"#,
+    )
+    .unwrap();
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let skill = registry.get("pattern-skill").await.unwrap();
+
+    // Test pattern matching
+    assert!(skill.metadata.is_script_allowed("test.sh"));
+    assert!(skill.metadata.is_script_allowed("helper.sh"));
+    assert!(skill.metadata.is_script_allowed("process-data.py"));
+    assert!(skill.metadata.is_script_allowed("process-image.py"));
+    assert!(skill.metadata.is_script_allowed("build.js"));
+
+    // These should not match
+    assert!(!skill.metadata.is_script_allowed("random.py"));
+    assert!(!skill.metadata.is_script_allowed("deploy.js"));
+    assert!(!skill.metadata.is_script_allowed("test.rb"));
+}
+
+// ============================================================================
+// Additional E2E: Reload All Skills
+// ============================================================================
+
+#[tokio::test]
+async fn test_e2e_reload_all_skills() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create initial skills
+    create_complete_skill(
+        temp_dir.path(),
+        "skill-1",
+        TestSkillConfig {
+            description: "First skill".to_string(),
+            ..Default::default()
+        },
+    );
+
+    create_complete_skill(
+        temp_dir.path(),
+        "skill-2",
+        TestSkillConfig {
+            description: "Second skill".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    assert_eq!(registry.get_summaries().await.len(), 2);
+
+    // Add a new skill on disk
+    create_complete_skill(
+        temp_dir.path(),
+        "skill-3",
+        TestSkillConfig {
+            description: "Third skill added later".to_string(),
+            ..Default::default()
+        },
+    );
+
+    // Reload all skills
+    let count = registry.reload_all().await.unwrap();
+    assert_eq!(count, 3);
+
+    // Verify all three skills are now available
+    let summaries = registry.get_summaries().await;
+    assert_eq!(summaries.len(), 3);
+    assert!(summaries.iter().any(|s| s.name == "skill-3"));
+}
+
+// ============================================================================
 // E2E Test: Resource Loading (scripts, references, assets)
 // ============================================================================
 
