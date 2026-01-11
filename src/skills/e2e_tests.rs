@@ -1439,3 +1439,848 @@ async fn test_e2e_resource_loading() {
     let minimal_dir = temp_dir.path().join("minimal-skill");
     assert!(!SkillLoader::has_resources(&minimal_dir));
 }
+
+// ============================================================================
+// TE2E-001: Complete Workflow from Planning to Phase 2 Injection
+// ============================================================================
+
+#[tokio::test]
+async fn test_te2e_001_complete_workflow_planning_to_phase2() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create test skills
+    create_complete_skill(
+        temp_dir.path(),
+        "weather-query",
+        TestSkillConfig {
+            description: "Query weather information from various sources".to_string(),
+            allowed_tools: Some("WebFetch WebSearch".to_string()),
+            content: "# Weather Query Skill\n\nUse WebFetch to get weather data.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    create_complete_skill(
+        temp_dir.path(),
+        "code-review",
+        TestSkillConfig {
+            description: "Review code changes and provide feedback".to_string(),
+            allowed_tools: Some("Read Grep".to_string()),
+            content: "# Code Review Skill\n\nAnalyze code quality.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+    let summaries = registry.get_summaries().await;
+
+    // Create a subtask
+    let subtask = SubTask {
+        id: 1,
+        description: "Query the current weather in Tokyo".to_string(),
+        dependencies: vec![],
+        required_tools: vec!["WebFetch".to_string()],
+        recommended_skill: Some("weather-query".to_string()),
+        status: SubTaskStatus::Pending,
+        result: None,
+    };
+
+    let tools = vec![
+        ToolDescription {
+            name: "WebFetch".to_string(),
+            description: "Fetch content from URLs".to_string(),
+        },
+        ToolDescription {
+            name: "WebSearch".to_string(),
+            description: "Search the web".to_string(),
+        },
+    ];
+
+    // ========== Phase 1: Planning with Skills Summaries ==========
+    let phase1_messages = build_context_for_react(
+        &subtask,
+        &[],              // no previous results
+        &tools,           // available tools
+        Some(&summaries), // skill summaries for Phase 1
+        &[],              // no active skills yet
+        0,
+    )
+    .await;
+
+    assert!(!phase1_messages.is_empty());
+
+    let phase1_content = phase1_messages
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .expect("Should have a system message");
+
+    // Verify Phase 1 includes skills summaries
+    assert!(
+        phase1_content.contains("Available Skills"),
+        "Phase 1 should contain Available Skills section"
+    );
+    assert!(
+        phase1_content.contains("weather-query"),
+        "Phase 1 should list weather-query skill"
+    );
+    assert!(
+        phase1_content.contains("code-review"),
+        "Phase 1 should list code-review skill"
+    );
+    assert!(
+        phase1_content.contains("<use_skill>"),
+        "Phase 1 should contain skill activation instructions"
+    );
+
+    // ========== Simulate LLM selecting a skill ==========
+    let llm_response = "I'll use the weather skill for this. <use_skill>weather-query</use_skill>";
+    let detected = SkillDetector::detect(llm_response);
+    assert_eq!(detected.len(), 1);
+    assert_eq!(detected[0], "weather-query");
+
+    // Load the detected skill
+    let active_skill = registry.get(&detected[0]).await.unwrap();
+
+    // ========== Phase 2: Execution with Full Skill Content ==========
+    let phase2_messages = build_context_for_react(
+        &subtask,
+        &[],
+        &tools,
+        None,                    // no summaries in Phase 2
+        &[active_skill.clone()], // active skill with full content
+        0,
+    )
+    .await;
+
+    assert!(!phase2_messages.is_empty());
+
+    let phase2_content = phase2_messages
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .expect("Should have a system message");
+
+    // Verify Phase 2 includes full skill content (not just summary)
+    assert!(
+        phase2_content.contains("Active Skill") || phase2_content.contains("weather-query"),
+        "Phase 2 should indicate active skill"
+    );
+    assert!(
+        phase2_content.contains("Weather Query Skill")
+            || phase2_content.contains("WebFetch to get weather"),
+        "Phase 2 should contain full skill instructions"
+    );
+
+    // Verify Phase 2 does NOT contain the skills table (that's for Phase 1 only)
+    assert!(
+        !phase2_content.contains("| Name | Description |"),
+        "Phase 2 should NOT contain skills table"
+    );
+}
+
+// ============================================================================
+// TE2E-003: Skill Activation During Subtask Execution
+// ============================================================================
+
+#[tokio::test]
+async fn test_te2e_003_skill_activation_during_execution() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+
+    create_complete_skill(
+        temp_dir.path(),
+        "data-analysis",
+        TestSkillConfig {
+            description: "Analyze and visualize data".to_string(),
+            allowed_tools: Some("Read Write Bash".to_string()),
+            content: "# Data Analysis Skill\n\n## Workflow\n1. Load data\n2. Process\n3. Visualize"
+                .to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let subtask = SubTask {
+        id: 1,
+        description: "Analyze the sales data from Q4".to_string(),
+        dependencies: vec![],
+        required_tools: vec!["Read".to_string()],
+        recommended_skill: Some("data-analysis".to_string()),
+        status: SubTaskStatus::InProgress,
+        result: None,
+    };
+
+    let tools = vec![
+        ToolDescription {
+            name: "Read".to_string(),
+            description: "Read file contents".to_string(),
+        },
+        ToolDescription {
+            name: "Write".to_string(),
+            description: "Write file contents".to_string(),
+        },
+    ];
+
+    // First, verify skill exists and can be loaded
+    let skill = registry.get("data-analysis").await;
+    assert!(skill.is_some(), "data-analysis skill should exist");
+
+    let active_skill = skill.unwrap();
+
+    // Verify skill content was loaded correctly
+    assert_eq!(active_skill.metadata.name, "data-analysis");
+    assert!(active_skill.content.contains("Data Analysis Skill"));
+
+    // Build context with active skill
+    let messages =
+        build_context_for_react(&subtask, &[], &tools, None, &[active_skill.clone()], 0).await;
+
+    let system_content = messages
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .expect("Should have a system message");
+
+    // Verify skill is activated in context
+    assert!(
+        system_content.contains("data-analysis") || system_content.contains("Data Analysis"),
+        "Context should contain activated skill"
+    );
+    assert!(
+        system_content.contains("Workflow") || system_content.contains("Load data"),
+        "Context should contain skill instructions"
+    );
+}
+
+// ============================================================================
+// TE2E-004: Tool Calls Work Correctly After Skill Activation
+// ============================================================================
+
+#[tokio::test]
+async fn test_te2e_004_tool_calls_after_skill_activation() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create skill with specific tool requirements
+    create_complete_skill(
+        temp_dir.path(),
+        "file-processor",
+        TestSkillConfig {
+            description: "Process and transform files".to_string(),
+            allowed_tools: Some("Read Write Bash".to_string()),
+            content: "# File Processor\n\nUse Read to load, Write to save.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let skill = registry.get("file-processor").await.unwrap();
+
+    // Verify allowed tools are correctly parsed
+    let allowed = skill.metadata.get_allowed_tools();
+    assert!(allowed.contains(&"Read".to_string()));
+    assert!(allowed.contains(&"Write".to_string()));
+    assert!(allowed.contains(&"Bash".to_string()));
+
+    let subtask = SubTask {
+        id: 1,
+        description: "Transform the input file".to_string(),
+        dependencies: vec![],
+        required_tools: vec!["Read".to_string(), "Write".to_string()],
+        recommended_skill: Some("file-processor".to_string()),
+        status: SubTaskStatus::InProgress,
+        result: None,
+    };
+
+    // Create full tools list (includes tools not allowed by skill)
+    let all_tools = vec![
+        ToolDescription {
+            name: "Read".to_string(),
+            description: "Read file contents".to_string(),
+        },
+        ToolDescription {
+            name: "Write".to_string(),
+            description: "Write file contents".to_string(),
+        },
+        ToolDescription {
+            name: "Bash".to_string(),
+            description: "Execute bash commands".to_string(),
+        },
+        ToolDescription {
+            name: "WebFetch".to_string(),
+            description: "Fetch from URLs".to_string(),
+        },
+    ];
+
+    // Build context with skill
+    let messages =
+        build_context_for_react(&subtask, &[], &all_tools, None, &[skill.clone()], 0).await;
+
+    let system_content = messages
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .expect("Should have a system message");
+
+    // Verify tools are available in the context
+    assert!(
+        system_content.contains("Read") || system_content.contains("read"),
+        "Context should mention Read tool"
+    );
+    assert!(
+        system_content.contains("Write") || system_content.contains("write"),
+        "Context should mention Write tool"
+    );
+
+    // Verify skill instructions are present
+    assert!(
+        system_content.contains("File Processor") || system_content.contains("file-processor"),
+        "Context should contain skill"
+    );
+}
+
+// ============================================================================
+// TMS-001: Dependent Subtasks Using Different Skills
+// ============================================================================
+
+#[tokio::test]
+async fn test_tms_001_dependent_subtasks_different_skills() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create two different skills for two subtasks
+    create_complete_skill(
+        temp_dir.path(),
+        "data-fetcher",
+        TestSkillConfig {
+            description: "Fetch data from external sources".to_string(),
+            allowed_tools: Some("WebFetch".to_string()),
+            content: "# Data Fetcher\n\nFetch external data using WebFetch.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    create_complete_skill(
+        temp_dir.path(),
+        "report-generator",
+        TestSkillConfig {
+            description: "Generate reports from data".to_string(),
+            allowed_tools: Some("Write".to_string()),
+            content: "# Report Generator\n\nGenerate formatted reports.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let tools = vec![
+        ToolDescription {
+            name: "WebFetch".to_string(),
+            description: "Fetch from URLs".to_string(),
+        },
+        ToolDescription {
+            name: "Write".to_string(),
+            description: "Write files".to_string(),
+        },
+    ];
+
+    // ========== Subtask 1: Fetch data (uses data-fetcher skill) ==========
+    let subtask1 = SubTask {
+        id: 1,
+        description: "Fetch sales data from API".to_string(),
+        dependencies: vec![],
+        required_tools: vec!["WebFetch".to_string()],
+        recommended_skill: Some("data-fetcher".to_string()),
+        status: SubTaskStatus::InProgress,
+        result: None,
+    };
+
+    let skill1 = registry.get("data-fetcher").await.unwrap();
+
+    let messages1 =
+        build_context_for_react(&subtask1, &[], &tools, None, &[skill1.clone()], 0).await;
+
+    let content1 = messages1
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .expect("Should have system message");
+
+    assert!(
+        content1.contains("Data Fetcher") || content1.contains("data-fetcher"),
+        "Subtask 1 should use data-fetcher skill"
+    );
+
+    // ========== Subtask 2: Generate report (depends on subtask 1, uses different skill) ==========
+    let subtask2 = SubTask {
+        id: 2,
+        description: "Generate quarterly report from fetched data".to_string(),
+        dependencies: vec![1], // Depends on subtask 1
+        required_tools: vec!["Write".to_string()],
+        recommended_skill: Some("report-generator".to_string()),
+        status: SubTaskStatus::Pending,
+        result: None,
+    };
+
+    let skill2 = registry.get("report-generator").await.unwrap();
+
+    // Pass previous results from subtask 1
+    let previous_results = vec![(1, "Sales data: Q4 revenue $1.2M".to_string())];
+
+    let messages2 = build_context_for_react(
+        &subtask2,
+        &previous_results,
+        &tools,
+        None,
+        &[skill2.clone()],
+        0,
+    )
+    .await;
+
+    let content2 = messages2
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .expect("Should have system message");
+
+    // Verify subtask 2 uses different skill
+    assert!(
+        content2.contains("Report Generator") || content2.contains("report-generator"),
+        "Subtask 2 should use report-generator skill"
+    );
+    assert!(
+        !content2.contains("Data Fetcher"),
+        "Subtask 2 should NOT contain data-fetcher skill content"
+    );
+}
+
+// ============================================================================
+// TMS-002: Independent Subtasks Can Use Different Skills in Parallel
+// ============================================================================
+
+#[tokio::test]
+async fn test_tms_002_parallel_subtasks_different_skills() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create multiple skills for parallel tasks
+    create_complete_skill(
+        temp_dir.path(),
+        "weather-skill",
+        TestSkillConfig {
+            description: "Get weather information".to_string(),
+            content: "# Weather Skill\n\nGet current weather.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    create_complete_skill(
+        temp_dir.path(),
+        "news-skill",
+        TestSkillConfig {
+            description: "Get news headlines".to_string(),
+            content: "# News Skill\n\nGet latest news.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    create_complete_skill(
+        temp_dir.path(),
+        "stock-skill",
+        TestSkillConfig {
+            description: "Get stock prices".to_string(),
+            content: "# Stock Skill\n\nGet market data.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let tools = vec![ToolDescription {
+        name: "WebFetch".to_string(),
+        description: "Fetch from URLs".to_string(),
+    }];
+
+    // Create 3 independent subtasks (no dependencies)
+    let subtasks = vec![
+        SubTask {
+            id: 1,
+            description: "Get Tokyo weather".to_string(),
+            dependencies: vec![],
+            required_tools: vec!["WebFetch".to_string()],
+            recommended_skill: Some("weather-skill".to_string()),
+            status: SubTaskStatus::Pending,
+            result: None,
+        },
+        SubTask {
+            id: 2,
+            description: "Get tech news".to_string(),
+            dependencies: vec![],
+            required_tools: vec!["WebFetch".to_string()],
+            recommended_skill: Some("news-skill".to_string()),
+            status: SubTaskStatus::Pending,
+            result: None,
+        },
+        SubTask {
+            id: 3,
+            description: "Get AAPL stock price".to_string(),
+            dependencies: vec![],
+            required_tools: vec!["WebFetch".to_string()],
+            recommended_skill: Some("stock-skill".to_string()),
+            status: SubTaskStatus::Pending,
+            result: None,
+        },
+    ];
+
+    // Verify all subtasks are independent (can run in parallel)
+    for subtask in &subtasks {
+        assert!(
+            subtask.dependencies.is_empty(),
+            "All subtasks should be independent"
+        );
+    }
+
+    // Each subtask can load and use its own skill independently
+    for subtask in &subtasks {
+        let skill_name = subtask.recommended_skill.as_ref().unwrap();
+        let skill = registry.get(skill_name).await;
+        assert!(
+            skill.is_some(),
+            "Each subtask's recommended skill should be loadable"
+        );
+
+        let messages =
+            build_context_for_react(subtask, &[], &tools, None, &[skill.unwrap()], 0).await;
+
+        assert!(
+            !messages.is_empty(),
+            "Each subtask should generate valid context"
+        );
+    }
+}
+
+// ============================================================================
+// TMS-003: Previous Subtask Skill Results Passed to Subsequent Tasks
+// ============================================================================
+
+#[tokio::test]
+async fn test_tms_003_skill_results_passed_to_next_subtask() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+
+    create_complete_skill(
+        temp_dir.path(),
+        "translator",
+        TestSkillConfig {
+            description: "Translate text between languages".to_string(),
+            content: "# Translator Skill\n\nTranslate text accurately.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    create_complete_skill(
+        temp_dir.path(),
+        "summarizer",
+        TestSkillConfig {
+            description: "Summarize long texts".to_string(),
+            content: "# Summarizer Skill\n\nCreate concise summaries.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let tools = vec![ToolDescription {
+        name: "Read".to_string(),
+        description: "Read files".to_string(),
+    }];
+
+    // Subtask 1 completes with a result
+    let subtask1_result = "Translated content: This is the Japanese document translated to English. \
+        It discusses the quarterly financial results showing 15% revenue growth.";
+
+    // Subtask 2 depends on subtask 1 and needs its result
+    let subtask2 = SubTask {
+        id: 2,
+        description: "Summarize the translated document".to_string(),
+        dependencies: vec![1],
+        required_tools: vec!["Read".to_string()],
+        recommended_skill: Some("summarizer".to_string()),
+        status: SubTaskStatus::Pending,
+        result: None,
+    };
+
+    let skill2 = registry.get("summarizer").await.unwrap();
+
+    // Pass the result from subtask 1
+    let previous_results = vec![(1, subtask1_result.to_string())];
+
+    let messages =
+        build_context_for_react(&subtask2, &previous_results, &tools, None, &[skill2], 0).await;
+
+    // Check if previous results are included in the context
+    let has_previous_result = messages.iter().any(|m| match m {
+        endpoints::chat::ChatCompletionRequestMessage::System(sys) => {
+            sys.content()
+                .to_string()
+                .contains("quarterly financial results")
+                || sys.content().to_string().contains("15% revenue growth")
+        }
+        endpoints::chat::ChatCompletionRequestMessage::User(usr) => match usr.content() {
+            endpoints::chat::ChatCompletionUserMessageContent::Text(text) => {
+                text.contains("quarterly financial results") || text.contains("15% revenue growth")
+            }
+            endpoints::chat::ChatCompletionUserMessageContent::Parts(parts) => {
+                parts.iter().any(|p| {
+                    if let endpoints::chat::ContentPart::Text(t) = p {
+                        t.text().contains("quarterly financial results")
+                            || t.text().contains("15% revenue growth")
+                    } else {
+                        false
+                    }
+                })
+            }
+        },
+        _ => false,
+    });
+
+    assert!(
+        has_previous_result,
+        "Subtask 2 context should contain results from subtask 1"
+    );
+}
+
+// ============================================================================
+// TER-003: Recommended Skill Not Loaded (Graceful Degradation)
+// ============================================================================
+
+#[tokio::test]
+async fn test_ter_003_recommended_skill_not_found() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Only create one skill
+    create_complete_skill(
+        temp_dir.path(),
+        "existing-skill",
+        TestSkillConfig {
+            description: "An existing skill".to_string(),
+            content: "# Existing Skill\n\nThis skill exists.".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let summaries = registry.get_summaries().await;
+
+    // Create subtask that recommends a non-existent skill
+    let subtask = SubTask {
+        id: 1,
+        description: "Perform a task".to_string(),
+        dependencies: vec![],
+        required_tools: vec!["WebFetch".to_string()],
+        recommended_skill: Some("nonexistent-skill".to_string()), // Does not exist!
+        status: SubTaskStatus::Pending,
+        result: None,
+    };
+
+    let tools = vec![ToolDescription {
+        name: "WebFetch".to_string(),
+        description: "Fetch from URLs".to_string(),
+    }];
+
+    // Attempt to get the recommended skill
+    let skill = registry.get("nonexistent-skill").await;
+    assert!(
+        skill.is_none(),
+        "nonexistent-skill should not be found in registry"
+    );
+
+    // Graceful degradation: use Phase 1 context with summaries instead
+    let messages = build_context_for_react(
+        &subtask,
+        &[],
+        &tools,
+        Some(&summaries), // Fall back to Phase 1 with summaries
+        &[],              // No active skills (couldn't load the recommended one)
+        0,
+    )
+    .await;
+
+    assert!(!messages.is_empty(), "Should still generate valid context");
+
+    let system_content = messages
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .expect("Should have a system message");
+
+    // Verify graceful degradation: summaries are still available
+    assert!(
+        system_content.contains("Available Skills") || system_content.contains("existing-skill"),
+        "Should fall back to showing available skills"
+    );
+
+    // Verify the task can still proceed
+    assert!(
+        system_content.contains("Perform a task"),
+        "Subtask description should still be present"
+    );
+}
+
+#[tokio::test]
+async fn test_ter_003_graceful_fallback_to_phase1() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create valid skills
+    create_complete_skill(
+        temp_dir.path(),
+        "skill-a",
+        TestSkillConfig {
+            description: "Skill A for testing".to_string(),
+            content: "# Skill A".to_string(),
+            ..Default::default()
+        },
+    );
+
+    create_complete_skill(
+        temp_dir.path(),
+        "skill-b",
+        TestSkillConfig {
+            description: "Skill B for testing".to_string(),
+            content: "# Skill B".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    let summaries = registry.get_summaries().await;
+    assert_eq!(summaries.len(), 2);
+
+    // Subtask recommends a skill that doesn't exist
+    let subtask = SubTask {
+        id: 1,
+        description: "Execute with missing skill".to_string(),
+        dependencies: vec![],
+        required_tools: vec![],
+        recommended_skill: Some("missing-skill".to_string()),
+        status: SubTaskStatus::Pending,
+        result: None,
+    };
+
+    let tools = vec![];
+
+    // Since skill doesn't exist, fall back to Phase 1
+    let messages = build_context_for_react(
+        &subtask,
+        &[],
+        &tools,
+        Some(&summaries), // Phase 1 with all summaries
+        &[],              // No active skill
+        0,
+    )
+    .await;
+
+    let system_content = messages
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .expect("Should have system message");
+
+    // LLM can still see available skills and choose one
+    assert!(
+        system_content.contains("skill-a") || system_content.contains("skill-b"),
+        "Available skills should be listed for fallback"
+    );
+    assert!(
+        system_content.contains("<use_skill>"),
+        "Should still allow skill selection"
+    );
+}

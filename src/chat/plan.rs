@@ -2012,7 +2012,7 @@ fn filter_tools_by_skills<'a>(
 /// * `skills_summaries` - Optional skill summaries for Phase 1
 /// * `active_skills` - Active skills for Phase 2 (empty slice for Phase 1)
 /// * `max_reference_size` - Maximum total size of reference documents to load (0 = no limit)
-async fn build_context_for_react(
+pub(crate) async fn build_context_for_react(
     subtask: &SubTask,
     previous_results: &[(usize, String)],
     available_tools: &[ToolDescription],

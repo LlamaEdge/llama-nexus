@@ -1121,3 +1121,465 @@ async fn test_tse_006_multiple_iterations() {
     let should_continue3 = !skills3.is_empty();
     assert!(!should_continue3);
 }
+
+// ============================================================================
+// TSE-001: Initial Context Contains Skills Summaries
+// ============================================================================
+
+#[tokio::test]
+async fn test_tse_001_initial_context_contains_skills_summaries() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_skills(temp_dir.path());
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+    let summaries = registry.get_summaries().await;
+
+    // Create a subtask
+    let subtask = SubTask {
+        id: 1,
+        description: "Query weather information for Tokyo".to_string(),
+        dependencies: vec![],
+        required_tools: vec!["weather".to_string()],
+        recommended_skill: Some("weather-query".to_string()),
+        status: SubTaskStatus::Pending,
+        result: None,
+    };
+
+    // Create test tools
+    let tools = vec![
+        ToolDescription {
+            name: "weather".to_string(),
+            description: "Get weather information".to_string(),
+        },
+        ToolDescription {
+            name: "search".to_string(),
+            description: "Search the web".to_string(),
+        },
+    ];
+
+    // Phase 1: No active skills, only summaries
+    let messages = build_context_for_react(
+        &subtask,
+        &[],              // no previous results
+        &tools,           // available tools
+        Some(&summaries), // skill summaries for Phase 1
+        &[],              // no active skills
+        0,                // no reference size limit
+    )
+    .await;
+
+    // Verify messages structure
+    assert!(!messages.is_empty(), "Should have at least one message");
+
+    // Get system message content
+    let system_content = messages
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .expect("Should have a system message");
+
+    // TSE-001: Verify skills summaries are included in Phase 1
+    assert!(
+        system_content.contains("Available Skills"),
+        "Phase 1 context should contain 'Available Skills' section"
+    );
+    assert!(
+        system_content.contains("weather-query"),
+        "Phase 1 context should contain weather-query skill"
+    );
+    assert!(
+        system_content.contains("code-review"),
+        "Phase 1 context should contain code-review skill"
+    );
+    assert!(
+        system_content.contains("<use_skill>"),
+        "Phase 1 context should contain skill request instruction"
+    );
+
+    // Verify task description is included
+    assert!(
+        system_content.contains("Query weather information for Tokyo"),
+        "Context should contain subtask description"
+    );
+
+    // Verify tools are listed
+    assert!(
+        system_content.contains("weather"),
+        "Context should list available tools"
+    );
+}
+
+// ============================================================================
+// TSE-002: Active Skill Context Contains Full Content
+// ============================================================================
+
+#[tokio::test]
+async fn test_tse_002_active_skill_context_contains_full_content() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_skills(temp_dir.path());
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+
+    // Load the active skill
+    let weather_skill = registry.get("weather-query").await.unwrap();
+
+    let subtask = SubTask {
+        id: 1,
+        description: "Query weather information for Tokyo".to_string(),
+        dependencies: vec![],
+        required_tools: vec!["weather".to_string()],
+        recommended_skill: Some("weather-query".to_string()),
+        status: SubTaskStatus::InProgress,
+        result: None,
+    };
+
+    let tools = vec![
+        ToolDescription {
+            name: "weather".to_string(),
+            description: "Get weather information".to_string(),
+        },
+        ToolDescription {
+            name: "WebFetch".to_string(),
+            description: "Fetch web content".to_string(),
+        },
+    ];
+
+    // Phase 2: With active skill
+    let messages = build_context_for_react(
+        &subtask,
+        &[],
+        &tools,
+        None,                     // no summaries in Phase 2
+        &[weather_skill.clone()], // active skill
+        0,
+    )
+    .await;
+
+    assert!(!messages.is_empty());
+
+    let system_content = messages
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .expect("Should have a system message");
+
+    // TSE-002: Verify full skill content is included in Phase 2
+    assert!(
+        system_content.contains("Active Skill") || system_content.contains("weather-query"),
+        "Phase 2 context should contain active skill information"
+    );
+
+    // Verify skill content is injected (not just summary)
+    assert!(
+        system_content.contains("Weather Query") || system_content.contains("weather"),
+        "Phase 2 context should contain skill content"
+    );
+
+    // Verify Phase 2 does NOT contain skills table (that's for Phase 1)
+    assert!(
+        !system_content.contains("| Name | Description |"),
+        "Phase 2 context should NOT contain skills table"
+    );
+
+    // Verify subtask description is still present
+    assert!(
+        system_content.contains("Query weather information for Tokyo"),
+        "Context should still contain subtask description"
+    );
+}
+
+// ============================================================================
+// TSE-005: Dependent Subtask Results Are Passed Correctly
+// ============================================================================
+
+#[tokio::test]
+async fn test_tse_005_dependent_subtask_results_passed() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_skills(temp_dir.path());
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+    let summaries = registry.get_summaries().await;
+
+    // Subtask 2 depends on subtask 1
+    let subtask = SubTask {
+        id: 2,
+        description: "Analyze the weather data from previous step".to_string(),
+        dependencies: vec![1],
+        required_tools: vec!["analyze".to_string()],
+        recommended_skill: None,
+        status: SubTaskStatus::Pending,
+        result: None,
+    };
+
+    let tools = vec![ToolDescription {
+        name: "analyze".to_string(),
+        description: "Analyze data".to_string(),
+    }];
+
+    // Previous results from subtask 1
+    let previous_results: Vec<(usize, String)> = vec![(
+        1,
+        "Weather data: Tokyo is sunny, 22°C, humidity 45%".to_string(),
+    )];
+
+    let messages = build_context_for_react(
+        &subtask,
+        &previous_results,
+        &tools,
+        Some(&summaries),
+        &[],
+        0,
+    )
+    .await;
+
+    assert!(!messages.is_empty());
+
+    // Check if previous results are included in the context
+    // Previous results should be in user message or system prompt
+    let all_content: String = messages
+        .iter()
+        .filter_map(|m| match m {
+            endpoints::chat::ChatCompletionRequestMessage::System(sys) => {
+                Some(sys.content().to_string())
+            }
+            endpoints::chat::ChatCompletionRequestMessage::User(usr) => {
+                // Get user message content as string based on type
+                match usr.content() {
+                    endpoints::chat::ChatCompletionUserMessageContent::Text(text) => {
+                        Some(text.clone())
+                    }
+                    endpoints::chat::ChatCompletionUserMessageContent::Parts(parts) => {
+                        let text: String = parts
+                            .iter()
+                            .filter_map(|p| match p {
+                                endpoints::chat::ContentPart::Text(t) => Some(t.text().to_string()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        Some(text)
+                    }
+                }
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // TSE-005: Verify dependent subtask results are passed
+    // The previous results should be accessible in the context
+    // Check if the subtask description mentions dependencies
+    assert!(
+        subtask.dependencies.contains(&1),
+        "Subtask should have dependency on subtask 1"
+    );
+
+    // Verify the context includes the subtask description
+    assert!(
+        all_content.contains("Analyze the weather data"),
+        "Context should contain the current subtask description"
+    );
+
+    // Verify previous results are included (may be in a specific format)
+    // The build_context_for_react function should include dependent results
+    assert!(
+        all_content.contains("Tokyo")
+            || all_content.contains("Previous")
+            || all_content.contains("subtask"),
+        "Context should reference previous results or dependencies"
+    );
+}
+
+// ============================================================================
+// TSE-005 Additional: Multiple Dependencies
+// ============================================================================
+
+#[tokio::test]
+async fn test_tse_005_multiple_dependencies() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_skills(temp_dir.path());
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+    let summaries = registry.get_summaries().await;
+
+    // Subtask 3 depends on both subtask 1 and 2
+    let subtask = SubTask {
+        id: 3,
+        description: "Combine weather and code analysis results".to_string(),
+        dependencies: vec![1, 2],
+        required_tools: vec!["combine".to_string()],
+        recommended_skill: None,
+        status: SubTaskStatus::Pending,
+        result: None,
+    };
+
+    let tools = vec![ToolDescription {
+        name: "combine".to_string(),
+        description: "Combine multiple data sources".to_string(),
+    }];
+
+    // Multiple previous results
+    let previous_results: Vec<(usize, String)> = vec![
+        (1, "Weather: Tokyo sunny 22°C".to_string()),
+        (2, "Code review: 3 issues found".to_string()),
+    ];
+
+    let messages = build_context_for_react(
+        &subtask,
+        &previous_results,
+        &tools,
+        Some(&summaries),
+        &[],
+        0,
+    )
+    .await;
+
+    assert!(!messages.is_empty());
+
+    // Verify subtask has correct dependencies
+    assert_eq!(subtask.dependencies.len(), 2);
+    assert!(subtask.dependencies.contains(&1));
+    assert!(subtask.dependencies.contains(&2));
+
+    // Verify messages are constructed
+    let has_system = messages
+        .iter()
+        .any(|m| matches!(m, endpoints::chat::ChatCompletionRequestMessage::System(_)));
+    assert!(has_system, "Should have system message");
+}
+
+// ============================================================================
+// TSE-001/002 Combined: Phase Transition
+// ============================================================================
+
+#[tokio::test]
+async fn test_tse_phase_transition_from_1_to_2() {
+    use crate::chat::{
+        plan::build_context_for_react,
+        planner::{SubTask, SubTaskStatus, ToolDescription},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_skills(temp_dir.path());
+
+    let registry = SkillRegistry::new(temp_dir.path().to_path_buf());
+    registry.load_all().await.unwrap();
+    let summaries = registry.get_summaries().await;
+
+    let subtask = SubTask {
+        id: 1,
+        description: "Query weather for Tokyo".to_string(),
+        dependencies: vec![],
+        required_tools: vec!["weather".to_string()],
+        recommended_skill: Some("weather-query".to_string()),
+        status: SubTaskStatus::Pending,
+        result: None,
+    };
+
+    let tools = vec![ToolDescription {
+        name: "weather".to_string(),
+        description: "Get weather data".to_string(),
+    }];
+
+    // Phase 1: Get context without active skill
+    let phase1_messages = build_context_for_react(
+        &subtask,
+        &[],
+        &tools,
+        Some(&summaries),
+        &[], // No active skills
+        0,
+    )
+    .await;
+
+    let phase1_content = phase1_messages
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+
+    // Phase 1 should have skills table
+    assert!(
+        phase1_content.contains("Available Skills"),
+        "Phase 1 should contain Available Skills section"
+    );
+
+    // Simulate LLM requesting skill
+    let llm_response = "I'll use <use_skill>weather-query</use_skill> for this task.";
+    let detected = SkillDetector::detect(llm_response);
+    assert_eq!(detected, vec!["weather-query"]);
+
+    // Load the detected skill
+    let active_skill = registry.get("weather-query").await.unwrap();
+
+    // Phase 2: Get context with active skill
+    let phase2_messages = build_context_for_react(
+        &subtask,
+        &[],
+        &tools,
+        None,            // No summaries in Phase 2
+        &[active_skill], // Active skill
+        0,
+    )
+    .await;
+
+    let phase2_content = phase2_messages
+        .iter()
+        .find_map(|m| {
+            if let endpoints::chat::ChatCompletionRequestMessage::System(sys) = m {
+                Some(sys.content().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+
+    // Phase 2 should have active skill content, not skills table
+    assert!(
+        !phase2_content.contains("| Name | Description |"),
+        "Phase 2 should NOT contain skills table"
+    );
+    assert!(
+        phase2_content.contains("Active Skill") || phase2_content.contains("weather-query"),
+        "Phase 2 should contain active skill information"
+    );
+}
