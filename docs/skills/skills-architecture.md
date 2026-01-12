@@ -1398,6 +1398,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 13.1 Skills 管理 API
 
+Skills 系统提供以下 REST API 端点用于技能管理：
+
+| 端点 | 方法 | 功能 | 请求体/参数 | 响应 |
+|------|------|------|-------------|------|
+| `/skills` | GET | 列出所有技能摘要 | - | `[{name, description}, ...]` |
+| `/skills/names` | GET | 获取所有技能名称列表 | - | `["skill-1", "skill-2", ...]` |
+| `/skills/:name` | GET | 获取指定技能详情 | `:name` 路径参数 | `{metadata, content, enabled}` |
+| `/skills/:name/enabled` | PUT | 启用或禁用指定技能 | `{enabled: bool}` | `{status, skill}` |
+| `/skills/:name/reload` | POST | 重新加载指定技能 | `:name` 路径参数 | `{status: "reloaded", skill}` |
+| `/skills/reload` | POST | 重新加载所有技能 | - | `{status: "reloaded", count}` |
+
+**认证说明：**
+- 如果配置了 `skill.api.api_key`，所有端点需要在请求头中携带 `X-API-Key`
+- 也可通过 `SKILLS_API_KEY` 环境变量设置
+
+**速率限制：**
+- 默认限制：100 请求/60 秒（可在配置中调整）
+- 超出限制返回 `429 Too Many Requests`
+
+**处理器实现：**
+
 ```rust
 use axum::{extract::Path, Json};
 use crate::skills::{SkillRegistry, SkillSummary, SkillError};
